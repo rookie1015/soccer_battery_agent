@@ -51,6 +51,29 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("选择历史报告", html)
         self.assertIn("<iframe", html)
         self.assertIn("items/one.html", html)
+        self.assertIn("期号 26087", html)
+        self.assertIn("查询时间：2026-06-17 20:00:00", html)
+
+    def test_render_history_index_groups_all_queries_for_same_issue(self) -> None:
+        entries = [
+            {
+                "id": str(index),
+                "kind": "analysis",
+                "issue": "26087",
+                "title": "分析报告：26087",
+                "created_at": f"2026-06-17T20:00:0{index}",
+                "html": f"items/{index}.html",
+                "markdown": "",
+            }
+            for index in range(2)
+        ]
+
+        html = render_history_index(entries)
+
+        self.assertEqual(html.count("期号 26087"), 1)
+        self.assertIn("2 次查询", html)
+        self.assertIn("items/0.html", html)
+        self.assertIn("items/1.html", html)
 
 
 if __name__ == "__main__":

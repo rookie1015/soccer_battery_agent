@@ -96,7 +96,7 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
         f"<option value=\"{index}\">{escape(_option_label(item))}</option>"
         for index, item in enumerate(entries)
     )
-    cards = "\n".join(_history_card(item, index) for index, item in enumerate(entries))
+    cards = _grouped_history_cards(entries)
     entries_json = json.dumps(entries, ensure_ascii=False)
     empty = "" if entries else "<p class=\"empty\">还没有历史记录。生成带 HTML 的分析或复盘报告后，这里会自动出现。</p>"
     first_src = escape(entries[0]["html"]) if entries else ""
@@ -183,6 +183,26 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       display: grid;
       gap: 8px;
     }}
+    .issue-group {{
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #f8fafc;
+      overflow: hidden;
+    }}
+    .issue-group summary {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 11px;
+      cursor: pointer;
+      list-style: none;
+      font-weight: 700;
+    }}
+    .issue-group summary::-webkit-details-marker {{ display: none; }}
+    .issue-group summary::before {{ content: "＋"; color: var(--blue); font-size: 18px; }}
+    .issue-group[open] summary::before {{ content: "－"; }}
+    .issue-group summary span {{ margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 400; }}
+    .issue-entries {{ display: grid; gap: 8px; padding: 0 8px 8px; }}
     .history-card {{
       width: 100%;
       border: 1px solid var(--line);
@@ -287,9 +307,13 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       viewer.src = entry.html;
       openLink.href = entry.html;
       title.textContent = entry.title;
-      meta.textContent = `${{entry.created_at}} · 期次 ${{entry.issue}}`;
+      meta.textContent = `查询时间：${{formatQueryTime(entry.created_at)}} · 期次 ${{entry.issue}}`;
       select.value = String(index);
       cards.forEach((card, cardIndex) => card.classList.toggle("active", cardIndex === index));
+    }}
+
+    function formatQueryTime(value) {{
+      return String(value || "").replace("T", " ");
     }}
 
     select?.addEventListener("change", (event) => showEntry(Number(event.target.value)));
@@ -324,9 +348,32 @@ def _history_card(item: dict[str, str], index: int) -> str:
     <button class="history-card{active}" type="button" data-index="{index}">
       <span class="kind {escape(kind)}">{kind_label}</span>
       <strong>{escape(item.get("title", ""))}</strong>
-      <span>{escape(item.get("created_at", ""))}</span>
+      <span>查询时间：{escape(_display_time(item.get("created_at", "")))}</span>
     </button>
     """
+
+
+def _grouped_history_cards(entries: list[dict[str, str]]) -> str:
+    groups: dict[str, list[tuple[int, dict[str, str]]]] = {}
+    for index, item in enumerate(entries):
+        groups.setdefault(item.get("issue", "未知期次"), []).append((index, item))
+    sections = []
+    for group_index, (issue, items) in enumerate(groups.items()):
+        cards = "\n".join(_history_card(item, index) for index, item in items)
+        open_attr = " open" if group_index == 0 else ""
+        sections.append(
+            f"""
+            <details class="issue-group"{open_attr}>
+              <summary>期号 {escape(issue)}<span>{len(items)} 次查询</span></summary>
+              <div class="issue-entries">{cards}</div>
+            </details>
+            """
+        )
+    return "\n".join(sections)
+
+
+def _display_time(value: str) -> str:
+    return value.replace("T", " ")
 
 
 def _entry_title(kind: str, issue: str) -> str:
