@@ -19,14 +19,18 @@ class NotifyResult:
 
 
 def send_report(channel: str, report_path: str | Path, webhook_url: str | None = None) -> NotifyResult:
-    normalized = channel.lower()
     report_text = Path(report_path).read_text(encoding="utf-8")
+    return send_text(channel, report_text, webhook_url)
+
+
+def send_text(channel: str, text: str, webhook_url: str | None = None) -> NotifyResult:
+    normalized = channel.lower()
     url = webhook_url or _webhook_from_env(normalized)
 
     if normalized == "feishu":
-        payload = _feishu_payload(report_text)
+        payload = _feishu_payload(text)
     elif normalized in {"wechat", "wecom"}:
-        payload = _wecom_payload(report_text)
+        payload = _wecom_payload(text)
     else:
         raise NotifyError("Unsupported channel. Use 'feishu' or 'wechat'.")
 

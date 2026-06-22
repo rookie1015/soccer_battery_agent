@@ -15,6 +15,7 @@ from .history import archive_report
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .models import Match, Odds, Signals
+from .notifier import NotifyError, send_report, send_text
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
 from .review import build_review, fetch_sina_results, load_results, write_review_report
@@ -111,6 +112,7 @@ def render_ui() -> str:
       background: #fff;
       color: var(--ink);
     }
+    input[type="password"] { font-family: Consolas, monospace; }
     textarea {
       min-height: 220px;
       resize: vertical;
@@ -203,6 +205,14 @@ def render_ui() -> str:
     </section>
 
     <section class="grid">
+      <article class="panel wide">
+        <h2>飞书推送</h2>
+        <p class="hint">开启后，生成分析、单场预测或赛后复盘时自动发送到飞书群机器人。Webhook 只在当前页面使用，不会保存到项目文件。</p>
+        <label class="check"><input id="sendFeishu" type="checkbox"> 每次生成后自动发送到飞书</label>
+        <label for="feishuWebhook">飞书机器人 Webhook</label>
+        <input id="feishuWebhook" type="password" placeholder="可留空，改用 FEISHU_WEBHOOK_URL 环境变量" autocomplete="off">
+      </article>
+
       <article class="panel wide">
         <h2>单场比分预测</h2>
         <p class="hint">输入任意一场比赛即可预测。若对阵存在于当前期数据中，将自动复用已采集资料；其他比赛可选填欧洲赔率提高参考价值。</p>
@@ -322,7 +332,9 @@ def render_ui() -> str:
           away: document.getElementById("singleAway").value.trim(),
           home_odds: document.getElementById("singleHomeOdds").value,
           draw_odds: document.getElementById("singleDrawOdds").value,
-          away_odds: document.getElementById("singleAwayOdds").value
+          away_odds: document.getElementById("singleAwayOdds").value,
+          send_feishu: document.getElementById("sendFeishu").checked,
+          feishu_webhook: document.getElementById("feishuWebhook").value.trim()
         });
         setStatus("singleStatus", data.message, "ok");
         result.textContent = [
@@ -352,7 +364,9 @@ def render_ui() -> str:
           issue: document.getElementById("issue").value.trim(),
           strength_model: document.getElementById("strengthModel").checked,
           strength_xg_matches: Number(document.getElementById("xgMatches").value || 8),
-          no_history: document.getElementById("noHistory").checked
+          no_history: document.getElementById("noHistory").checked,
+          send_feishu: document.getElementById("sendFeishu").checked,
+          feishu_webhook: document.getElementById("feishuWebhook").value.trim()
         });
         setStatus("analysisStatus", data.message, "ok");
         setLinks("analysisLinks", data);
@@ -373,7 +387,9 @@ def render_ui() -> str:
           issue_path: document.getElementById("reviewIssue").value.trim(),
           auto_results: document.getElementById("autoResults").checked,
           results_csv: document.getElementById("resultsCsv").value,
-          no_history: document.getElementById("reviewNoHistory").checked
+          no_history: document.getElementById("reviewNoHistory").checked,
+          send_feishu: document.getElementById("sendFeishu").checked,
+          feishu_webhook: document.getElementById("feishuWebhook").value.trim()
         });
         setStatus("reviewStatus", data.message, "ok");
         setLinks("reviewLinks", data);
@@ -470,10 +486,11 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
     history_path = None
     if not bool(payload.get("no_history", False)):
         history_path = archive_report("analysis", plan.issue.issue, html_path, markdown_path, history_dir=history_dir)
+    delivery = _feishu_delivery_suffix(payload, report_path=markdown_path)
 
     return {
         "ok": True,
-        "message": f"{issue} 分析报告已生成。",
+        "message": f"{issue} 分析报告已生成{delivery}。",
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
         "history_url": _url_for(history_path or history_dir / "index.html"),
@@ -518,9 +535,9 @@ def _run_single_prediction(payload: dict[str, object]) -> dict[str, object]:
         )
 
     prediction = predict_match(match)
-    return {
+    response = {
         "ok": True,
-        "message": "单场比分预测已生成。",
+        "message": "单场比分预测已生成",
         "home": prediction.match.home,
         "away": prediction.match.away,
         "scorelines": [
@@ -538,6 +555,9 @@ def _run_single_prediction(payload: dict[str, object]) -> dict[str, object]:
         "reasons": list(prediction.reasons),
         "data_source": data_source,
     }
+    delivery = _feishu_delivery_suffix(payload, text=_single_prediction_text(response))
+    response["message"] = f"单场比分预测已生成{delivery}。"
+    return response
 
 
 def _find_collected_match(home: str, away: str) -> Match | None:
@@ -593,14 +613,47 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
     history_path = None
     if not bool(payload.get("no_history", False)):
         history_path = archive_report("review", issue.issue, html_path, markdown_path, history_dir=history_dir)
+    delivery = _feishu_delivery_suffix(payload, report_path=markdown_path)
 
     return {
         "ok": True,
-        "message": f"{issue.issue} 复盘报告已生成。",
+        "message": f"{issue.issue} 复盘报告已生成{delivery}。",
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
         "history_url": _url_for(history_path or history_dir / "index.html"),
     }
+
+
+def _feishu_delivery_suffix(
+    payload: dict[str, object],
+    *,
+    report_path: Path | None = None,
+    text: str | None = None,
+) -> str:
+    if not bool(payload.get("send_feishu", False)):
+        return ""
+    webhook = str(payload.get("feishu_webhook") or "").strip() or None
+    try:
+        if report_path is not None:
+            send_report("feishu", report_path, webhook)
+        else:
+            send_text("feishu", text or "", webhook)
+    except NotifyError as exc:
+        return f"，但飞书发送失败：{exc}"
+    return "，并已发送到飞书"
+
+
+def _single_prediction_text(result: dict[str, object]) -> str:
+    scorelines = result["scorelines"]
+    probabilities = result["probabilities"]
+    scores = "、".join(f"{item['score']}（{item['probability']}%）" for item in scorelines)
+    return (
+        f"单场比分预测：{result['home']} vs {result['away']}\n"
+        f"比分倾向：{scores}\n"
+        f"胜平负概率：主胜 {probabilities['home']}% / 平 {probabilities['draw']}% / 客胜 {probabilities['away']}%\n"
+        f"建议：{result['pick_label']}，置信度 {result['confidence']}%，风险 {result['risk']}\n"
+        f"数据依据：{result['data_source']}"
+    )
 
 
 def _url_for(path: Path) -> str:

@@ -19,6 +19,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("自动从新浪拉取赛果", html)
         self.assertIn("单场比分预测", html)
         self.assertIn("/api/single-prediction", html)
+        self.assertIn("每次生成后自动发送到飞书", html)
+        self.assertIn("feishu_webhook", html)
 
     def test_single_prediction_uses_collected_match_data(self) -> None:
         result = web_ui._run_single_prediction({"home": "荷兰", "away": "瑞典"})
@@ -34,6 +36,20 @@ class WebUiTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertIn("手工填写", result["data_source"])
+
+    def test_single_prediction_can_send_to_feishu(self) -> None:
+        with patch.object(web_ui, "send_text") as send_text:
+            result = web_ui._run_single_prediction(
+                {
+                    "home": "甲队",
+                    "away": "乙队",
+                    "send_feishu": True,
+                    "feishu_webhook": "https://example.test/webhook",
+                }
+            )
+
+        send_text.assert_called_once()
+        self.assertIn("已发送到飞书", result["message"])
 
     def test_cli_starts_ui(self) -> None:
         with (
