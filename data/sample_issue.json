@@ -1,0 +1,146 @@
+{
+  "issue": "sample-001",
+  "matches": [
+    {
+      "seq": 1,
+      "kickoff": "2026-06-20T22:00:00+08:00",
+      "league": "英超",
+      "home": "曼城",
+      "away": "热刺",
+      "odds": {"home": 1.62, "draw": 4.1, "away": 5.2},
+      "signals": {"home_form": 0.78, "away_form": 0.61, "home_motivation": 0.72, "away_motivation": 0.65, "home_injury_impact": 0.08, "away_injury_impact": 0.18, "schedule_pressure_home": 0.22, "schedule_pressure_away": 0.15},
+      "notes": ["主队主场稳定", "客队后防有伤停"]
+    },
+    {
+      "seq": 2,
+      "kickoff": "2026-06-20T22:00:00+08:00",
+      "league": "西甲",
+      "home": "皇家社会",
+      "away": "比利亚雷亚尔",
+      "odds": {"home": 2.25, "draw": 3.25, "away": 3.1},
+      "signals": {"home_form": 0.58, "away_form": 0.56, "home_motivation": 0.62, "away_motivation": 0.63, "home_injury_impact": 0.14, "away_injury_impact": 0.12, "schedule_pressure_home": 0.1, "schedule_pressure_away": 0.1},
+      "notes": ["双方状态接近", "平局需要重点防范"]
+    },
+    {
+      "seq": 3,
+      "kickoff": "2026-06-20T23:30:00+08:00",
+      "league": "德甲",
+      "home": "多特蒙德",
+      "away": "法兰克福",
+      "odds": {"home": 1.88, "draw": 3.7, "away": 3.9},
+      "signals": {"home_form": 0.68, "away_form": 0.52, "home_motivation": 0.7, "away_motivation": 0.58, "home_injury_impact": 0.12, "away_injury_impact": 0.2, "schedule_pressure_home": 0.25, "schedule_pressure_away": 0.2},
+      "notes": ["主队进攻优势明显"]
+    },
+    {
+      "seq": 4,
+      "kickoff": "2026-06-21T00:00:00+08:00",
+      "league": "意甲",
+      "home": "佛罗伦萨",
+      "away": "都灵",
+      "odds": {"home": 2.05, "draw": 3.15, "away": 3.8},
+      "signals": {"home_form": 0.55, "away_form": 0.5, "home_motivation": 0.6, "away_motivation": 0.55, "home_injury_impact": 0.18, "away_injury_impact": 0.16, "schedule_pressure_home": 0.18, "schedule_pressure_away": 0.12},
+      "notes": ["主队略占优势，但赢球效率一般"]
+    },
+    {
+      "seq": 5,
+      "kickoff": "2026-06-21T01:00:00+08:00",
+      "league": "法甲",
+      "home": "里尔",
+      "away": "雷恩",
+      "odds": {"home": 2.38, "draw": 3.2, "away": 2.92},
+      "signals": {"home_form": 0.57, "away_form": 0.59, "home_motivation": 0.6, "away_motivation": 0.64, "home_injury_impact": 0.12, "away_injury_impact": 0.1, "schedule_pressure_home": 0.12, "schedule_pressure_away": 0.12},
+      "notes": ["赔率分布比较均衡"]
+    },
+    {
+      "seq": 6,
+      "kickoff": "2026-06-21T02:45:00+08:00",
+      "league": "英冠",
+      "home": "利兹联",
+      "away": "诺维奇",
+      "odds": {"home": 1.95, "draw": 3.45, "away": 3.75},
+      "signals": {"home_form": 0.64, "away_form": 0.48, "home_motivation": 0.74, "away_motivation": 0.58, "home_injury_impact": 0.1, "away_injury_impact": 0.22, "schedule_pressure_home": 0.16, "schedule_pressure_away": 0.2},
+      "notes": ["主队战意更足"]
+    },
+    {
+      "seq": 7,
+      "kickoff": "2026-06-21T03:00:00+08:00",
+      "league": "西甲",
+      "home": "塞维利亚",
+      "away": "贝蒂斯",
+      "odds": {"home": 2.55, "draw": 3.05, "away": 2.8},
+      "signals": {"home_form": 0.48, "away_form": 0.52, "home_motivation": 0.7, "away_motivation": 0.7, "home_injury_impact": 0.2, "away_injury_impact": 0.16, "schedule_pressure_home": 0.1, "schedule_pressure_away": 0.1},
+      "notes": ["德比战波动大", "不适合做胆"]
+    },
+    {
+      "seq": 8,
+      "kickoff": "2026-06-21T18:00:00+08:00",
+      "league": "日职",
+      "home": "横滨水手",
+      "away": "大阪樱花",
+      "odds": {"home": 2.18, "draw": 3.55, "away": 3.0},
+      "signals": {"home_form": 0.6, "away_form": 0.54, "home_motivation": 0.58, "away_motivation": 0.57, "home_injury_impact": 0.16, "away_injury_impact": 0.14, "schedule_pressure_home": 0.28, "schedule_pressure_away": 0.18},
+      "notes": ["主队赛程略紧"]
+    },
+    {
+      "seq": 9,
+      "kickoff": "2026-06-21T19:00:00+08:00",
+      "league": "韩职",
+      "home": "蔚山现代",
+      "away": "水原FC",
+      "odds": {"home": 1.72, "draw": 3.55, "away": 4.7},
+      "signals": {"home_form": 0.7, "away_form": 0.46, "home_motivation": 0.68, "away_motivation": 0.5, "home_injury_impact": 0.08, "away_injury_impact": 0.25, "schedule_pressure_home": 0.12, "schedule_pressure_away": 0.2},
+      "notes": ["主队基本面优势明显"]
+    },
+    {
+      "seq": 10,
+      "kickoff": "2026-06-21T21:00:00+08:00",
+      "league": "瑞超",
+      "home": "马尔默",
+      "away": "赫根",
+      "odds": {"home": 1.82, "draw": 3.6, "away": 4.1},
+      "signals": {"home_form": 0.69, "away_form": 0.55, "home_motivation": 0.66, "away_motivation": 0.56, "home_injury_impact": 0.1, "away_injury_impact": 0.18, "schedule_pressure_home": 0.12, "schedule_pressure_away": 0.14},
+      "notes": ["主队主场胜率高"]
+    },
+    {
+      "seq": 11,
+      "kickoff": "2026-06-21T22:00:00+08:00",
+      "league": "挪超",
+      "home": "博德闪耀",
+      "away": "维京",
+      "odds": {"home": 1.7, "draw": 3.9, "away": 4.4},
+      "signals": {"home_form": 0.72, "away_form": 0.58, "home_motivation": 0.7, "away_motivation": 0.62, "home_injury_impact": 0.12, "away_injury_impact": 0.12, "schedule_pressure_home": 0.18, "schedule_pressure_away": 0.2},
+      "notes": ["主队攻击力强"]
+    },
+    {
+      "seq": 12,
+      "kickoff": "2026-06-22T00:30:00+08:00",
+      "league": "巴甲",
+      "home": "弗拉门戈",
+      "away": "米内罗竞技",
+      "odds": {"home": 2.02, "draw": 3.2, "away": 3.65},
+      "signals": {"home_form": 0.62, "away_form": 0.58, "home_motivation": 0.64, "away_motivation": 0.62, "home_injury_impact": 0.2, "away_injury_impact": 0.18, "schedule_pressure_home": 0.32, "schedule_pressure_away": 0.26},
+      "notes": ["强强对话，平局不能忽视"]
+    },
+    {
+      "seq": 13,
+      "kickoff": "2026-06-22T03:00:00+08:00",
+      "league": "美职",
+      "home": "洛杉矶FC",
+      "away": "西雅图海湾人",
+      "odds": {"home": 2.12, "draw": 3.45, "away": 3.2},
+      "signals": {"home_form": 0.59, "away_form": 0.55, "home_motivation": 0.58, "away_motivation": 0.6, "home_injury_impact": 0.16, "away_injury_impact": 0.16, "schedule_pressure_home": 0.18, "schedule_pressure_away": 0.22},
+      "notes": ["主胜略热，需关注临场赔率"]
+    },
+    {
+      "seq": 14,
+      "kickoff": "2026-06-22T07:00:00+08:00",
+      "league": "阿甲",
+      "home": "博卡青年",
+      "away": "竞技",
+      "odds": {"home": 2.28, "draw": 2.92, "away": 3.35},
+      "signals": {"home_form": 0.54, "away_form": 0.52, "home_motivation": 0.68, "away_motivation": 0.64, "home_injury_impact": 0.14, "away_injury_impact": 0.18, "schedule_pressure_home": 0.12, "schedule_pressure_away": 0.12},
+      "notes": ["低比分概率偏高", "平局权重较高"]
+    }
+  ]
+}
+

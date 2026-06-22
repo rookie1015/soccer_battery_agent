@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Local environments and secrets
+.env
+.venv/
+venv/
+
+# Runtime caches and collected/probe data
+data/cache*/
+data/collected_issue.json
+data/*_probe.json
+data/*_offline.json
+data/today_*.json
+data/[0-9]*_issue.json
+
+# Generated reports and history
+reports/
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

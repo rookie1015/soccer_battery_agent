@@ -1,0 +1,301 @@
+Football Lottery Agent 当前数据来源说明
+更新时间：2026-06-17
+
+项目定位：
+本工具用于中国大陆足球彩票「14场胜平负」和「任选9场」的信息整理、概率估算、比分倾向、任九取舍和赛后复盘。
+它只做信息辅助和策略参考，不保证中奖。
+
+一、自动采集的数据来源
+
+1. 新浪胜负彩赛程页
+   地址：
+   https://view.lottery.sina.com.cn/lottery_index/sfc/index?num=
+
+   当前用途：
+   - 获取当前或指定期号的 14 场赛程
+   - 获取期号
+   - 获取联赛
+   - 获取开赛时间
+   - 获取主队 / 客队
+   - 获取主客队近期 W / D / L 状态
+   - 获取新浪 match_id，供后续详情接口使用
+
+   对应代码：
+   football_lottery_agent\collectors.py
+
+2. 新浪移动端详情接口
+   地址：
+   https://mix.lottery.sina.com.cn/gateway/index/entry
+
+   当前使用的接口类型：
+   - footballMatchOddsEuro
+   - footballMatchTeamInjury
+   - FootballMatchIntelligence
+   - footballMatchHistory
+
+   当前用途：
+   - 欧赔均值
+   - 伤停信息
+   - 情报利好 / 不利因素
+   - 历史交锋
+
+   说明：
+   当前主赔率默认优先使用新浪欧赔均值。
+   如果后续启用国外 bookmaker 赔率且匹配成功，会优先使用国外 bookmaker 均值。
+
+   对应代码：
+   football_lottery_agent\collectors.py
+
+3. FotMob 数据接口
+   地址：
+   https://www.fotmob.com/api/data
+
+   当前使用的接口：
+   - /matches
+   - /teams
+   - /matchDetails
+
+   当前用途：
+   - 自动匹配 FotMob 赛事
+   - 自动匹配主客队 team id
+   - 读取球队近期比赛
+   - 计算近 20 场胜 / 平 / 负率
+   - 计算主场胜率、客场胜率
+   - 计算场均进球、场均失球
+   - 读取最近若干场 xG / xGA
+   - 生成球队实力评分
+   - 将实力评分写入 signals.home_form / signals.away_form，影响胜平负预测
+
+   默认设置：
+   - lookback：20 场
+   - xG matchDetails：8 场
+
+   可选调整：
+   - xG 样本可调到 20 场，但会更慢
+
+   对应代码：
+   football_lottery_agent\strength_model.py
+
+4. GDELT 公开新闻搜索
+   地址：
+   https://api.gdeltproject.org/api/v2/doc/doc
+
+   当前用途：
+   - 公开赛前新闻线索
+   - 伤停、首发、阵容相关标题线索
+   - 历史交锋、战绩相关线索
+
+   说明：
+   该来源只作为公开标题/线索补充，不作为确定性结论。
+
+   对应代码：
+   football_lottery_agent\collectors.py
+
+5. DuckDuckGo HTML 搜索
+   地址：
+   https://duckduckgo.com/html/
+
+   当前用途：
+   - 当 GDELT 没有足够结果时，补充公开搜索线索
+   - 用于赛前新闻、伤停、历史交锋等标题线索
+
+   说明：
+   该来源只作为公开标题/线索补充，不作为确定性结论。
+
+   对应代码：
+   football_lottery_agent\collectors.py
+
+6. 主流体育媒体公开 RSS / 公开页面
+   当前接入：
+   - ESPN Soccer
+     https://www.espn.com/espn/rss/soccer/news
+   - BBC Sport Football
+     https://feeds.bbci.co.uk/sport/football/rss.xml
+   - Sky Sports Football
+     https://www.skysports.com/rss/11095
+   - The Athletic
+     没有稳定公开 RSS；当前通过 DuckDuckGo 的 site:theathletic.com 公开搜索获取标题和链接线索
+
+   当前用途：
+   - 补充主流英文体育媒体的赛前新闻、球队动态、世界杯专题、阵容讨论等标题级线索
+   - 在每场 sources.mainstream_media 中保存命中的标题、链接、发布时间
+   - 在报告详细理由中以“主流媒体：...”展示
+
+   说明：
+   - 只抓公开 RSS / 公开搜索标题和链接，不抓付费正文
+   - The Athletic 多数内容有订阅墙，因此只记录公开可见的标题/链接线索
+   - 该来源用于辅助阅读，不直接等同于官方伤停或最终阵容
+
+   对应代码：
+   football_lottery_agent\collectors.py
+
+二、可选数据来源
+
+7. The Odds API
+   地址：
+   https://api.the-odds-api.com/v4
+
+   当前用途：
+   - 获取国外主流 bookmaker 的足球 1X2 / h2h 赔率
+   - 聚合 bookmaker 均值
+   - 匹配成功时优先替代新浪欧赔均值
+
+   默认地区：
+   - uk
+   - eu
+
+   默认 bookmaker 候选：
+   - pinnacle
+   - betfair
+   - unibet
+   - williamhill
+   - bet365
+   - betvictor
+   - paddypower
+   - ladbrokes
+   - coral
+   - marathonbet
+
+   使用前需要设置：
+   THE_ODDS_API_KEY
+
+   如果没有 API Key：
+   - 自动跳过
+   - 回退到新浪欧赔均值
+
+   对应代码：
+   football_lottery_agent\foreign_odds.py
+
+三、手工 / 本地数据来源
+
+8. 手工赛程 CSV
+   示例文件：
+   data\seed_matches.csv
+
+   用途：
+   - 当新浪赛程源失效时，手工指定 14 场比赛
+   - 支持离线采集流程
+
+   格式：
+   seq,kickoff,league,home,away
+
+9. 手工赔率 CSV
+   示例文件：
+   data\odds.example.csv
+
+   用途：
+   - 手工补充或覆盖赔率
+   - 适合你自己整理更可信的欧赔均值时使用
+
+   格式：
+   seq,home,draw,away
+
+10. FotMob team id 映射 CSV
+   示例文件：
+   data\team_ids.example.csv
+
+   用途：
+   - 当 FotMob 自动匹配球队失败时，手工指定球队 id
+
+   格式：
+   name,fotmob_id
+
+11. 赛果 CSV
+    示例文件：
+    data\results.example.csv
+    data\sample_results.csv
+
+    用途：
+    - 赛后复盘
+    - 统计胜平负命中、单选命中、比分 Top1 / Top3 命中、任九保留命中、任九剔除有效性
+    - 在 HTML 复盘中展示重大意外
+
+    支持格式一：
+    seq,score
+    1,2-1
+
+    支持格式二：
+    seq,home_goals,away_goals
+    1,2,1
+
+四、本地缓存和历史数据
+
+12. HTTP 缓存
+    默认目录：
+    data\cache
+
+    用途：
+    - 缓存新浪、FotMob、GDELT、DuckDuckGo、The Odds API 等请求结果
+    - 降低重复请求次数
+    - 在部分网络请求失败时复用已有缓存
+
+13. 当前期采集结果
+    默认文件：
+    data\collected_issue.json
+
+    用途：
+    - 保存本次采集到的一期 14 场数据
+    - 后续生成报告、HTML、复盘都基于该文件
+
+14. HTML 历史中心
+    默认目录：
+    reports\history
+
+    主要文件：
+    reports\history\index.html
+    reports\history\index.json
+    reports\history\items\
+
+    用途：
+    - 每次生成 HTML 分析/复盘时，复制一份历史快照
+    - 最多保留最近 52 条记录
+    - 支持在 HTML 页面里选择历史报告查看
+
+五、已移除的数据来源
+
+15. 线上专家推荐
+    状态：
+    已移除
+
+    移除原因：
+    - 公开专家推荐源长期不可稳定获取
+    - 实际运行中经常没有公开、可验证的方案
+    - 为避免维护无效数据源和干扰报告阅读，已删除相关采集、CLI 参数、报告区块和测试
+
+六、当前预测模型使用的数据
+
+胜平负预测主要使用：
+1. 赔率隐含概率
+2. 主客队近期状态
+3. 新浪情报 / 伤停 / 历史交锋线索
+4. FotMob 球队实力评分
+5. 可选国外 bookmaker 赔率
+6. ESPN / BBC Sport / Sky Sports / The Athletic 等主流媒体标题线索
+7. 手工 CSV 覆盖数据
+
+比分倾向使用：
+1. 胜平负概率
+2. 反推预期进球
+3. Poisson 分布估算 Top3 常见比分
+
+任九取舍使用：
+1. 胜平负概率
+2. 推荐选项数量
+3. 不确定性评分
+4. 风险等级
+
+赛后复盘使用：
+1. 赛前 issue JSON
+2. 赛果 CSV
+3. 赛前推荐、比分倾向和任九取舍
+
+七、非外部数据源说明
+
+以下内容不是预测数据来源，只是输出或交互方式：
+- Markdown 报告
+- HTML dashboard
+- 历史中心 HTML
+- 本地网页控制台 start_ui.bat
+- 飞书 / 企业微信 webhook 推送
+
+飞书和企业微信只用于发送报告，不参与预测。
