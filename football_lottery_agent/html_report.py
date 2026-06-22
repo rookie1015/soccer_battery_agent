@@ -64,11 +64,11 @@ def render_analysis_html(plan: TicketPlan) -> str:
               <p class="seq drop">{escape(drop)}</p>
             </div>
           </section>
-          <section class="panel">
-            <div class="section-title">
-              <h2>胜平负逐场建议</h2>
-              <span>3=主胜，1=平，0=客胜</span>
-            </div>
+          <details class="panel prediction-fold">
+            <summary>
+              <span class="fold-title">展开本期 {len(plan.predictions)} 场胜平负预测</span>
+              <span class="fold-hint">点击展开 · 3=主胜，1=平，0=客胜</span>
+            </summary>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -84,7 +84,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
                 <tbody>{outcome_rows}</tbody>
               </table>
             </div>
-          </section>
+          </details>
         </div>
         <section class="panel tab-panel" id="score-panel" role="tabpanel" aria-labelledby="score-tab" hidden>
           <div class="section-title">
@@ -414,6 +414,29 @@ def _page(title: str, body: str) -> str:
       margin-bottom: 16px;
     }}
     .panel {{ padding: 16px; }}
+    .prediction-fold {{ padding: 0; overflow: hidden; }}
+    .prediction-fold summary {{
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 16px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }}
+    .prediction-fold summary::-webkit-details-marker {{ display: none; }}
+    .prediction-fold summary::before {{
+      content: "＋";
+      color: var(--blue);
+      font-size: 20px;
+      font-weight: 700;
+    }}
+    .prediction-fold[open] summary::before {{ content: "－"; }}
+    .prediction-fold[open] summary {{ border-bottom: 1px solid var(--line); }}
+    .prediction-fold .fold-title {{ margin-right: auto; font-size: 18px; font-weight: 700; }}
+    .prediction-fold .fold-hint {{ color: var(--muted); font-size: 12px; }}
+    .prediction-fold .table-wrap {{ padding: 0 16px 16px; }}
     .tabs {{
       display: flex;
       gap: 8px;

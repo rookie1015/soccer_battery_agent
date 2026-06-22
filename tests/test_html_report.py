@@ -20,6 +20,8 @@ class HtmlReportTests(unittest.TestCase):
         self.assertIn("首选比分", html)
         self.assertIn("class=\"prob\"", html)
         self.assertIn("class=\"primary-score\"", html)
+        self.assertIn("class=\"panel prediction-fold\"", html)
+        self.assertIn("展开本期 14 场胜平负预测", html)
 
     def test_render_review_html_contains_metrics_and_rows(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))
