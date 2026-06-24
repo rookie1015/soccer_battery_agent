@@ -9,7 +9,7 @@ from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .notifier import NotifyError, send_report
 from .report import write_report
-from .review import build_review, fetch_sina_results, load_results, write_review_report
+from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
 from .strategy import build_ticket_plan
 from .web_ui import run_ui
 
@@ -178,7 +178,12 @@ def _generate_review(
 ) -> Path:
     issue = load_issue(issue_path)
     plan = build_ticket_plan(issue)
-    results = load_results(results_path) if results_path else fetch_sina_results(result_issue or issue.issue, cache_dir=cache_dir)
+    if results_path:
+        results = load_results(results_path)
+    else:
+        fetched = fetch_results_with_fallbacks(result_issue or issue.issue, cache_dir=cache_dir)
+        results = fetched.results
+        print(f"Results fetched from: {fetched.source}")
     review = build_review(plan, results)
     output = write_review_report(review, output_path)
     if html_output_path:

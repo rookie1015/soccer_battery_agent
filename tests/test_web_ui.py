@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from football_lottery_agent import cli, web_ui
+from football_lottery_agent.review import MatchResult, ResultsFetch
 from football_lottery_agent.web_ui import render_ui
 
 
@@ -16,14 +17,30 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("生成复盘报告", html)
         self.assertIn("/api/analysis", html)
         self.assertIn("/api/review", html)
-        self.assertIn("自动从新浪拉取赛果", html)
+        self.assertIn("多来源自动拉取赛果", html)
         self.assertIn("单场比分预测", html)
         self.assertIn("/api/single-prediction", html)
         self.assertIn("每次生成后自动发送到飞书", html)
         self.assertIn("feishu_webhook", html)
+        self.assertIn('id="singleHome" placeholder="例如：荷兰" autocomplete="off" required', html)
+        self.assertIn('id="issue" value="26087" autocomplete="off" required', html)
+        self.assertIn('placeholder="留空则使用 data/collected_issue.json"', html)
+        self.assertIn("validateSinglePrediction", html)
+        self.assertIn("updateReviewMode", html)
+        self.assertIn('].join("\\n");', html)
 
     def test_single_prediction_uses_collected_match_data(self) -> None:
-        result = web_ui._run_single_prediction({"home": "荷兰", "away": "瑞典"})
+        match = web_ui.Match(
+            seq=1,
+            kickoff=web_ui.datetime.now().astimezone(),
+            league="测试联赛",
+            home="荷兰",
+            away="瑞典",
+            odds=web_ui.Odds(home=1.80, draw=3.40, away=4.20),
+            signals=web_ui.Signals(),
+        )
+        with patch.object(web_ui, "_find_collected_match", return_value=match):
+            result = web_ui._run_single_prediction({"home": "荷兰", "away": "瑞典"})
 
         self.assertTrue(result["ok"])
         self.assertEqual(len(result["scorelines"]), 3)
@@ -36,6 +53,45 @@ class WebUiTests(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertIn("手工填写", result["data_source"])
+
+    def test_single_prediction_rejects_partial_manual_odds(self) -> None:
+        with self.assertRaisesRegex(ValueError, "欧赔请填写完整"):
+            web_ui._run_single_prediction({"home": "甲队", "away": "乙队", "home_odds": "1.80"})
+
+    def test_required_int_rejects_empty_and_out_of_range_values(self) -> None:
+        with self.assertRaisesRegex(ValueError, "请填写 xG 样本场次"):
+            web_ui._parse_required_int(
+                {"strength_xg_matches": ""},
+                "strength_xg_matches",
+                empty_message="请填写 xG 样本场次。",
+                invalid_message="xG 样本场次必须是 0 到 20 之间的整数。",
+                minimum=0,
+                maximum=20,
+            )
+        with self.assertRaisesRegex(ValueError, "0 到 20"):
+            web_ui._parse_required_int(
+                {"strength_xg_matches": "21"},
+                "strength_xg_matches",
+                empty_message="请填写 xG 样本场次。",
+                invalid_message="xG 样本场次必须是 0 到 20 之间的整数。",
+                minimum=0,
+                maximum=20,
+            )
+
+    def test_review_reports_missing_issue_path(self) -> None:
+        with self.assertRaisesRegex(ValueError, "请先生成赛前分析"):
+            web_ui._run_review({"issue_path": "data/missing_issue.json"})
+
+    def test_review_reports_empty_auto_results(self) -> None:
+        with patch.object(web_ui, "fetch_results_with_fallbacks", return_value=ResultsFetch(results={}, source="测试源")):
+            with self.assertRaisesRegex(ValueError, "多个赛果来源暂时都没有返回本期赛果"):
+                web_ui._run_review({"issue_path": "data/sample_issue.json", "auto_results": True})
+
+    def test_review_reports_incomplete_auto_results(self) -> None:
+        fetched = ResultsFetch(results={1: MatchResult(1, 2, 1)}, source="测试源")
+        with patch.object(web_ui, "fetch_results_with_fallbacks", return_value=fetched):
+            with self.assertRaisesRegex(ValueError, "测试源 赛果还不完整"):
+                web_ui._run_review({"issue_path": "data/sample_issue.json", "auto_results": True})
 
     def test_single_prediction_can_send_to_feishu(self) -> None:
         with patch.object(web_ui, "send_text") as send_text:

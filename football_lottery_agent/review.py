@@ -12,6 +12,15 @@ from .predictor import OUTCOME_LABELS
 
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
+EASTMONEY_SFC_URL = "https://caipiao.eastmoney.com/Result/Category/sfc"
+EASTMONEY_HISTORY_URL = "https://caipiao.eastmoney.com/Result/History/sfc"
+WUBAI_SFC_URL = "https://kaijiang.500.com/sfc.shtml"
+
+
+@dataclass(frozen=True)
+class ResultsFetch:
+    results: dict[int, "MatchResult"]
+    source: str
 
 
 @dataclass(frozen=True)
@@ -19,9 +28,12 @@ class MatchResult:
     seq: int
     home_goals: int
     away_goals: int
+    score_exact: bool = True
 
     @property
     def score_text(self) -> str:
+        if not self.score_exact:
+            return f"{OUTCOME_LABELS[self.outcome]}（仅彩果）"
         return f"{self.home_goals}-{self.away_goals}"
 
     @property
@@ -94,6 +106,10 @@ class ReviewReport:
     def major_misses(self) -> tuple[MatchReview, ...]:
         return tuple(row for row in self.rows if _is_major_miss(row))
 
+    @property
+    def score_total(self) -> int:
+        return sum(1 for row in self.rows if row.result.score_exact)
+
 
 def load_results(path: str | Path) -> dict[int, MatchResult]:
     results: dict[int, MatchResult] = {}
@@ -110,6 +126,46 @@ def load_results(path: str | Path) -> dict[int, MatchResult]:
 def fetch_sina_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
     html = _fetch_text(f"{SINA_SFC_URL}{issue}", Path(cache_dir), max_age_seconds=300)
     return parse_sina_results_html(html)
+
+
+def fetch_results_with_fallbacks(issue: str, cache_dir: str | Path = "data/cache") -> ResultsFetch:
+    errors: list[str] = []
+    providers = (
+        ("新浪体育", lambda: fetch_sina_results(issue, cache_dir=cache_dir)),
+        ("东方财富开奖", lambda: fetch_eastmoney_results(issue, cache_dir=cache_dir)),
+        ("东方财富历史开奖", lambda: fetch_eastmoney_history_results(issue, cache_dir=cache_dir)),
+        ("500彩票网开奖", lambda: fetch_wubai_results(issue, cache_dir=cache_dir)),
+    )
+    best = ResultsFetch(results={}, source="")
+    for source, fetcher in providers:
+        try:
+            results = fetcher()
+        except Exception as exc:
+            errors.append(f"{source}: {exc}")
+            continue
+        if len(results) > len(best.results):
+            best = ResultsFetch(results=results, source=source)
+        if len(results) >= 14:
+            return ResultsFetch(results=results, source=source)
+    if best.results:
+        return best
+    detail = "；".join(errors)
+    raise ValueError(f"所有赛果来源都暂时不可用。{detail}" if detail else "所有赛果来源都暂时没有返回本期赛果。")
+
+
+def fetch_eastmoney_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
+    html = _fetch_text(EASTMONEY_SFC_URL, Path(cache_dir), max_age_seconds=300)
+    return parse_outcome_results_html(html, issue)
+
+
+def fetch_eastmoney_history_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
+    html = _fetch_text(EASTMONEY_HISTORY_URL, Path(cache_dir), max_age_seconds=300)
+    return parse_outcome_results_html(html, issue)
+
+
+def fetch_wubai_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
+    html = _fetch_text(WUBAI_SFC_URL, Path(cache_dir), max_age_seconds=300)
+    return parse_outcome_results_html(html, issue)
 
 
 def parse_sina_results_html(html: str) -> dict[int, MatchResult]:
@@ -131,6 +187,18 @@ def parse_sina_results_html(html: str) -> dict[int, MatchResult]:
     return results
 
 
+def parse_outcome_results_html(html: str, issue: str) -> dict[int, MatchResult]:
+    normalized = _squash(re.sub(r"<[^>]+>", " ", html))
+    section = _issue_section(normalized, issue)
+    if not section:
+        return {}
+    outcomes = _extract_outcomes(section)
+    return {
+        seq: _result_from_outcome(seq, outcome)
+        for seq, outcome in enumerate(outcomes[:14], start=1)
+    }
+
+
 def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewReport:
     rows: list[MatchReview] = []
     missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
@@ -147,8 +215,8 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
                 prediction=prediction,
                 result=result,
                 outcome_hit=result.outcome in prediction.picks,
-                top_score_hit=bool(score_texts and result.score_text == score_texts[0]),
-                score_top3_hit=result.score_text in score_texts,
+                top_score_hit=result.score_exact and bool(score_texts and result.score_text == score_texts[0]),
+                score_top3_hit=result.score_exact and result.score_text in score_texts,
                 bucket=bucket,
             )
         )
@@ -168,8 +236,8 @@ def render_review_markdown(report: ReviewReport) -> str:
     lines.append("")
     lines.append(f"- 胜平负命中：{report.outcome_hits}/{report.total}（{_rate(report.outcome_hits, report.total)}）")
     lines.append(f"- 单选命中：{report.single_hits}/{single_total}（{_rate(report.single_hits, single_total)}）")
-    lines.append(f"- 比分 Top1 命中：{report.top_score_hits}/{report.total}（{_rate(report.top_score_hits, report.total)}）")
-    lines.append(f"- 比分 Top3 命中：{report.score_top3_hits}/{report.total}（{_rate(report.score_top3_hits, report.total)}）")
+    lines.append(f"- 比分 Top1 命中：{report.top_score_hits}/{report.score_total}（{_rate(report.top_score_hits, report.score_total)}）")
+    lines.append(f"- 比分 Top3 命中：{report.score_top3_hits}/{report.score_total}（{_rate(report.score_top3_hits, report.score_total)}）")
     lines.append(f"- 任九保留命中：{report.keep_hits}/{keep_total}（{_rate(report.keep_hits, keep_total)}）")
     lines.append(f"- 任九剔除有效：{report.effective_drops}/{drop_total}（{_rate(report.effective_drops, drop_total)}）")
     lines.append("")
@@ -182,7 +250,7 @@ def render_review_markdown(report: ReviewReport) -> str:
         match = prediction.match
         actual = OUTCOME_LABELS[row.result.outcome]
         outcome_mark = "命中" if row.outcome_hit else "未中"
-        score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else "未中")
+        score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else ("N/A" if not row.result.score_exact else "未中"))
         lines.append(
             f"| {match.seq} | {match.home} vs {match.away} | {row.result.score_text} | {actual} | "
             f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {score_mark} | {row.bucket} |"
@@ -229,6 +297,11 @@ def _parse_result_row(raw: dict[str, str]) -> MatchResult:
     seq = int((raw.get("seq") or "").strip())
     if raw.get("score"):
         home_goals, away_goals = _parse_score(raw["score"])
+        return MatchResult(seq=seq, home_goals=home_goals, away_goals=away_goals)
+    if raw.get("outcome"):
+        return _result_from_outcome(seq, raw["outcome"])
+    if raw.get("result"):
+        return _result_from_outcome(seq, raw["result"])
     else:
         home_goals = int((raw.get("home_goals") or "").strip())
         away_goals = int((raw.get("away_goals") or "").strip())
@@ -249,6 +322,50 @@ def _looks_like_score(value: str) -> bool:
 def _extract_cells(row_html: str) -> list[str]:
     cells = re.findall(r"<td[^>]*>([\s\S]*?)</td>", row_html)
     return [_squash(re.sub(r"<[^>]+>", " ", cell)) for cell in cells]
+
+
+def _issue_section(text: str, issue: str) -> str:
+    start = text.find(issue)
+    if start < 0:
+        return ""
+    tail = text[start : start + 3000]
+    next_issue = re.search(rf"\b(?!{re.escape(issue)}\b)\d{{5}}\b", tail[20:])
+    if next_issue:
+        return tail[: 20 + next_issue.start()]
+    return tail
+
+
+def _extract_outcomes(section: str) -> list[str]:
+    candidates = re.findall(r"[310]{14}", section)
+    if candidates:
+        return list(candidates[0])
+    spaced = re.findall(r"(?:^|[^\d])((?:[310]\s+){13}[310])(?:[^\d]|$)", section)
+    if spaced:
+        return re.findall(r"[310]", spaced[0])
+    labels = re.findall(r"[胜平负]", section)
+    if len(labels) >= 14:
+        return [_normalize_outcome_label(label) for label in labels[:14]]
+    return []
+
+
+def _normalize_outcome_label(value: str) -> str:
+    cleaned = value.strip()
+    if cleaned in {"3", "胜", "主胜"}:
+        return "3"
+    if cleaned in {"1", "平", "平局"}:
+        return "1"
+    if cleaned in {"0", "负", "客胜"}:
+        return "0"
+    raise ValueError(f"Invalid outcome value: {value!r}")
+
+
+def _result_from_outcome(seq: int, outcome: str) -> MatchResult:
+    normalized = _normalize_outcome_label(outcome)
+    if normalized == "3":
+        return MatchResult(seq=seq, home_goals=1, away_goals=0, score_exact=False)
+    if normalized == "1":
+        return MatchResult(seq=seq, home_goals=0, away_goals=0, score_exact=False)
+    return MatchResult(seq=seq, home_goals=0, away_goals=1, score_exact=False)
 
 
 def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:

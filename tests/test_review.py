@@ -1,9 +1,18 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from football_lottery_agent.loader import load_issue
-from football_lottery_agent.review import MatchResult, build_review, load_results, parse_sina_results_html, render_review_markdown
+from football_lottery_agent.review import (
+    MatchResult,
+    build_review,
+    fetch_results_with_fallbacks,
+    load_results,
+    parse_outcome_results_html,
+    parse_sina_results_html,
+    render_review_markdown,
+)
 from football_lottery_agent.strategy import build_ticket_plan
 
 
@@ -20,6 +29,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(results[2].score_text, "0-0")
         self.assertEqual(results[2].outcome, "1")
 
+    def test_load_results_accepts_outcome_column(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.csv"
+            path.write_text("seq,outcome\n1,3\n2,平\n3,负\n", encoding="utf-8")
+
+            results = load_results(path)
+
+        self.assertFalse(results[1].score_exact)
+        self.assertEqual(results[1].outcome, "3")
+        self.assertEqual(results[2].outcome, "1")
+        self.assertEqual(results[3].outcome, "0")
+
     def test_parse_sina_results_html_extracts_finished_scores(self) -> None:
         html = """
         <table class="sfcPubTable"><tbody>
@@ -34,6 +55,32 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(results[1].outcome, "3")
         self.assertEqual(results[3].score_text, "0-2")
         self.assertNotIn(2, results)
+
+    def test_parse_outcome_results_html_extracts_issue_section(self) -> None:
+        html = """
+        <div>26086期 33333333333333</div>
+        <div>第26087期 彩果 31031031031031</div>
+        <div>26088期 00000000000000</div>
+        """
+        results = parse_outcome_results_html(html, "26087")
+
+        self.assertEqual(len(results), 14)
+        self.assertFalse(results[1].score_exact)
+        self.assertEqual(results[1].outcome, "3")
+        self.assertEqual(results[2].outcome, "1")
+        self.assertEqual(results[3].outcome, "0")
+
+    def test_fetch_results_with_fallbacks_uses_next_complete_source(self) -> None:
+        fallback = {seq: MatchResult(seq, 1, 0, score_exact=False) for seq in range(1, 15)}
+
+        with (
+            patch("football_lottery_agent.review.fetch_sina_results", return_value={}),
+            patch("football_lottery_agent.review.fetch_eastmoney_results", return_value=fallback),
+        ):
+            fetched = fetch_results_with_fallbacks("26087")
+
+        self.assertEqual(fetched.source, "东方财富开奖")
+        self.assertEqual(len(fetched.results), 14)
 
     def test_build_review_counts_outcome_and_score_hits(self) -> None:
         issue = load_issue("data/sample_issue.json")
@@ -50,6 +97,26 @@ class ReviewTests(unittest.TestCase):
         self.assertGreaterEqual(review.score_top3_hits, 1)
         self.assertEqual(len(review.keep_rows), 9)
         self.assertEqual(len(review.drop_rows), 5)
+
+    def test_build_review_skips_score_metrics_for_outcome_only_results(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        plan = build_ticket_plan(issue)
+        results = {
+            prediction.match.seq: MatchResult(
+                seq=prediction.match.seq,
+                home_goals=1,
+                away_goals=0,
+                score_exact=False,
+            )
+            for prediction in plan.predictions
+        }
+
+        review = build_review(plan, results)
+
+        self.assertEqual(review.score_total, 0)
+        self.assertEqual(review.top_score_hits, 0)
+        self.assertEqual(review.score_top3_hits, 0)
+        self.assertIn("比分 Top1 命中：0/0（N/A）", render_review_markdown(review))
 
     def test_build_review_flags_major_miss(self) -> None:
         issue = load_issue("data/sample_issue.json")

@@ -115,11 +115,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(write_review_html.call_args.args[1], Path("reports/review_report.html"))
 
     def test_review_auto_fetches_results_when_csv_is_omitted(self) -> None:
+        fetched = Mock(results={}, source="测试源")
         with (
             patch.object(sys, "argv", ["football-lottery-agent", "review", "--issue", "data/issue.json"]),
             patch.object(cli, "load_issue", return_value=Mock(issue="26087")) as load_issue,
             patch.object(cli, "build_ticket_plan", return_value=Mock()) as build_ticket_plan,
-            patch.object(cli, "fetch_sina_results", return_value={}) as fetch_sina_results,
+            patch.object(cli, "fetch_results_with_fallbacks", return_value=fetched) as fetch_results,
             patch.object(cli, "build_review", return_value=Mock()) as build_review,
             patch.object(cli, "write_review_report", return_value=Path("reports/review_report.md")),
             patch.object(cli, "write_review_html", return_value=Path("reports/review_report.html")),
@@ -130,8 +131,8 @@ class CliTests(unittest.TestCase):
 
         load_issue.assert_called_once_with(Path("data/issue.json"))
         build_ticket_plan.assert_called_once()
-        fetch_sina_results.assert_called_once()
-        self.assertEqual(fetch_sina_results.call_args.args[0], "26087")
+        fetch_results.assert_called_once()
+        self.assertEqual(fetch_results.call_args.args[0], "26087")
         build_review.assert_called_once()
 
 

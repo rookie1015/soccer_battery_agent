@@ -18,7 +18,7 @@ from .models import Match, Odds, Signals
 from .notifier import NotifyError, send_report, send_text
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
-from .review import build_review, fetch_sina_results, load_results, write_review_report
+from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
 from .strategy import build_ticket_plan
 
 
@@ -219,11 +219,11 @@ def render_ui() -> str:
         <div class="row">
           <div>
             <label for="singleHome">主队</label>
-            <input id="singleHome" placeholder="例如：荷兰" autocomplete="off">
+            <input id="singleHome" placeholder="例如：荷兰" autocomplete="off" required>
           </div>
           <div>
             <label for="singleAway">客队</label>
-            <input id="singleAway" placeholder="例如：瑞典" autocomplete="off">
+            <input id="singleAway" placeholder="例如：瑞典" autocomplete="off" required>
           </div>
         </div>
         <div class="row odds-row">
@@ -251,11 +251,11 @@ def render_ui() -> str:
         <div class="row">
           <div>
             <label for="issue">期号</label>
-            <input id="issue" value="26087" autocomplete="off">
+            <input id="issue" value="26087" autocomplete="off" required>
           </div>
           <div>
             <label for="xgMatches">xG 样本场次</label>
-            <input id="xgMatches" type="number" min="0" max="20" value="8">
+            <input id="xgMatches" type="number" min="0" max="20" value="8" required>
           </div>
         </div>
         <label class="check"><input id="strengthModel" type="checkbox" checked> 启用球队实力模型</label>
@@ -270,10 +270,10 @@ def render_ui() -> str:
 
       <article class="panel">
         <h2>生成赛后复盘</h2>
-        <p class="hint">赛果出来后，把比分粘进来。格式示例：<code>1,2-1</code>，第一行可以保留。</p>
+        <p class="hint">默认使用最新赛前数据并从多个来源自动拉取赛果；如果来源未更新，再取消自动拉取并粘贴 CSV。</p>
         <label for="reviewIssue">复盘使用的赛前数据</label>
-        <input id="reviewIssue" value="data/collected_issue.json">
-        <label class="check"><input id="autoResults" type="checkbox" checked> 自动从新浪拉取赛果</label>
+        <input id="reviewIssue" value="data/collected_issue.json" placeholder="留空则使用 data/collected_issue.json">
+        <label class="check"><input id="autoResults" type="checkbox" checked> 多来源自动拉取赛果</label>
         <label for="resultsCsv">赛果 CSV</label>
         <textarea id="resultsCsv">seq,score
 1,2-1
@@ -291,6 +291,8 @@ def render_ui() -> str:
   </main>
 
   <script>
+    const DEFAULT_REVIEW_ISSUE_PATH = "data/collected_issue.json";
+
     async function postJson(url, payload) {
       const response = await fetch(url, {
         method: "POST",
@@ -320,11 +322,82 @@ def render_ui() -> str:
       el.innerHTML = links.map(([label, href]) => `<a class="link-button" href="${href}" target="_blank">${label}</a>`).join("");
     }
 
+    function rejectField(statusId, field, message) {
+      setStatus(statusId, message, "err");
+      field.focus();
+      field.reportValidity();
+      return false;
+    }
+
+    function requireTextField(fieldId, statusId, message) {
+      const field = document.getElementById(fieldId);
+      if (!field.value.trim()) {
+        field.setCustomValidity(message);
+        return rejectField(statusId, field, message);
+      }
+      field.setCustomValidity("");
+      return true;
+    }
+
+    function requireNumberField(fieldId, statusId, message) {
+      const field = document.getElementById(fieldId);
+      if (!field.value.trim()) {
+        field.setCustomValidity(message);
+        return rejectField(statusId, field, message);
+      }
+      if (!field.checkValidity()) {
+        field.setCustomValidity("");
+        return rejectField(statusId, field, "请填写允许范围内的数字。");
+      }
+      field.setCustomValidity("");
+      return true;
+    }
+
+    function validateOddsGroup(statusId) {
+      const fields = ["singleHomeOdds", "singleDrawOdds", "singleAwayOdds"].map((id) => document.getElementById(id));
+      const filled = fields.filter((field) => field.value.trim());
+      if (filled.length > 0 && filled.length < fields.length) {
+        return rejectField(statusId, fields.find((field) => !field.value.trim()), "欧赔请填写完整的主胜、平局和客胜三项，或全部留空。");
+      }
+      const invalid = filled.find((field) => !field.checkValidity());
+      if (invalid) {
+        return rejectField(statusId, invalid, "欧赔必须是大于 1.00 的数字。");
+      }
+      return true;
+    }
+
+    function validateSinglePrediction() {
+      return requireTextField("singleHome", "singleStatus", "请填写主队。")
+        && requireTextField("singleAway", "singleStatus", "请填写客队。")
+        && validateOddsGroup("singleStatus");
+    }
+
+    function validateAnalysis() {
+      return requireTextField("issue", "analysisStatus", "请填写期号。")
+        && requireNumberField("xgMatches", "analysisStatus", "请填写 xG 样本场次。");
+    }
+
+    function validateReview() {
+      const autoResults = document.getElementById("autoResults").checked;
+      return autoResults || requireTextField("resultsCsv", "reviewStatus", "请粘贴赛果 CSV。");
+    }
+
+    function updateReviewMode() {
+      const autoResults = document.getElementById("autoResults").checked;
+      const resultsCsv = document.getElementById("resultsCsv");
+      resultsCsv.disabled = autoResults;
+      resultsCsv.required = !autoResults;
+      resultsCsv.setCustomValidity("");
+    }
+
     document.getElementById("runSinglePrediction").addEventListener("click", async () => {
       const button = document.getElementById("runSinglePrediction");
       const result = document.getElementById("singleResult");
-      button.disabled = true;
       result.hidden = true;
+      if (!validateSinglePrediction()) {
+        return;
+      }
+      button.disabled = true;
       setStatus("singleStatus", "正在计算单场预测。");
       try {
         const data = await postJson("/api/single-prediction", {
@@ -345,7 +418,7 @@ def render_ui() -> str:
           `建议：${data.pick_label}　置信度：${data.confidence}%　风险：${data.risk}`,
           `数据依据：${data.data_source}`,
           ...data.reasons.map(item => `• ${item}`)
-        ].join("\n");
+        ].join("\\n");
         result.hidden = false;
       } catch (error) {
         setStatus("singleStatus", error.message, "err");
@@ -356,6 +429,9 @@ def render_ui() -> str:
 
     document.getElementById("runAnalysis").addEventListener("click", async () => {
       const button = document.getElementById("runAnalysis");
+      if (!validateAnalysis()) {
+        return;
+      }
       button.disabled = true;
       setStatus("analysisStatus", "正在生成分析报告，请稍等。窗口不要关。");
       document.getElementById("analysisLinks").innerHTML = "";
@@ -363,7 +439,7 @@ def render_ui() -> str:
         const data = await postJson("/api/analysis", {
           issue: document.getElementById("issue").value.trim(),
           strength_model: document.getElementById("strengthModel").checked,
-          strength_xg_matches: Number(document.getElementById("xgMatches").value || 8),
+          strength_xg_matches: Number(document.getElementById("xgMatches").value),
           no_history: document.getElementById("noHistory").checked,
           send_feishu: document.getElementById("sendFeishu").checked,
           feishu_webhook: document.getElementById("feishuWebhook").value.trim()
@@ -379,13 +455,17 @@ def render_ui() -> str:
 
     document.getElementById("runReview").addEventListener("click", async () => {
       const button = document.getElementById("runReview");
+      if (!validateReview()) {
+        return;
+      }
       button.disabled = true;
-      setStatus("reviewStatus", "正在生成复盘报告。");
+      const autoResults = document.getElementById("autoResults").checked;
+      setStatus("reviewStatus", autoResults ? "正在从多个来源自动拉取赛果并生成复盘报告。" : "正在使用手工 CSV 生成复盘报告。");
       document.getElementById("reviewLinks").innerHTML = "";
       try {
         const data = await postJson("/api/review", {
-          issue_path: document.getElementById("reviewIssue").value.trim(),
-          auto_results: document.getElementById("autoResults").checked,
+          issue_path: document.getElementById("reviewIssue").value.trim() || DEFAULT_REVIEW_ISSUE_PATH,
+          auto_results: autoResults,
           results_csv: document.getElementById("resultsCsv").value,
           no_history: document.getElementById("reviewNoHistory").checked,
           send_feishu: document.getElementById("sendFeishu").checked,
@@ -399,6 +479,9 @@ def render_ui() -> str:
         button.disabled = false;
       }
     });
+
+    document.getElementById("autoResults").addEventListener("change", updateReviewMode);
+    updateReviewMode();
   </script>
 </body>
 </html>
@@ -428,6 +511,8 @@ def _handler(root: Path):
                     self._send_json(_run_single_prediction(_read_json(self)))
                     return
                 self.send_error(HTTPStatus.NOT_FOUND, "Unknown endpoint")
+            except ValueError as exc:
+                self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.BAD_REQUEST)
             except Exception as exc:
                 self._send_json({"ok": False, "error": str(exc)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
@@ -468,6 +553,14 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
     issue = str(payload.get("issue") or "").strip()
     if not issue:
         raise ValueError("请填写期号。")
+    strength_xg_matches = _parse_required_int(
+        payload,
+        "strength_xg_matches",
+        empty_message="请填写 xG 样本场次。",
+        invalid_message="xG 样本场次必须是 0 到 20 之间的整数。",
+        minimum=0,
+        maximum=20,
+    )
     slug = _slug(issue)
     issue_path = Path("data/collected_issue.json")
     markdown_path = Path("reports") / f"{slug}_report.md"
@@ -478,7 +571,7 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
         output_path=issue_path,
         issue=issue,
         strength_model=bool(payload.get("strength_model", True)),
-        strength_xg_matches=int(payload.get("strength_xg_matches") or 8),
+        strength_xg_matches=strength_xg_matches,
     )
     plan = build_ticket_plan(load_issue(issue_path))
     write_report(plan, markdown_path)
@@ -582,9 +675,10 @@ def _team_key(value: str) -> str:
 
 
 def _run_review(payload: dict[str, object]) -> dict[str, object]:
-    issue_path = Path(str(payload.get("issue_path") or "data/collected_issue.json").strip())
+    issue_path_value = str(payload.get("issue_path") or "data/collected_issue.json").strip()
+    issue_path = Path(issue_path_value)
     if not issue_path.exists():
-        raise ValueError(f"找不到赛前数据：{issue_path}")
+        raise ValueError(f"找不到赛前数据：{issue_path}。请先生成赛前分析，或填写正确的数据文件路径。")
     results_csv = str(payload.get("results_csv") or "").strip()
     auto_results = bool(payload.get("auto_results", True))
     if not auto_results and not results_csv:
@@ -596,9 +690,22 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
     html_path = Path("reports") / f"{slug}_review.html"
     history_dir = Path("reports/history")
 
+    plan = build_ticket_plan(issue)
     if auto_results:
-        results = fetch_sina_results(issue.issue)
+        try:
+            fetched = fetch_results_with_fallbacks(issue.issue)
+        except Exception as exc:
+            raise ValueError(f"自动拉取赛果失败：{exc}") from exc
+        results = fetched.results
+        results_source = fetched.source
+        if not results:
+            raise ValueError("多个赛果来源暂时都没有返回本期赛果。请稍后再试，或取消自动拉取后粘贴赛果 CSV。")
+        missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
+        if missing:
+            missing_text = "、".join(str(item) for item in missing)
+            raise ValueError(f"{results_source} 赛果还不完整，缺少第 {missing_text} 场。请稍后再试，或取消自动拉取后粘贴赛果 CSV。")
     else:
+        results_source = "手工 CSV"
         with tempfile.NamedTemporaryFile("w", encoding="utf-8", newline="", suffix=".csv", delete=False) as handle:
             handle.write(results_csv)
             temp_results = Path(handle.name)
@@ -606,7 +713,7 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
             results = load_results(temp_results)
         finally:
             temp_results.unlink(missing_ok=True)
-    review = build_review(build_ticket_plan(issue), results)
+    review = build_review(plan, results)
 
     write_review_report(review, markdown_path)
     write_review_html(review, html_path)
@@ -617,11 +724,32 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
 
     return {
         "ok": True,
-        "message": f"{issue.issue} 复盘报告已生成{delivery}。",
+        "message": f"{issue.issue} 复盘报告已生成，赛果来源：{results_source}{delivery}。",
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
         "history_url": _url_for(history_path or history_dir / "index.html"),
     }
+
+
+def _parse_required_int(
+    payload: dict[str, object],
+    key: str,
+    *,
+    empty_message: str,
+    invalid_message: str,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = str(payload.get(key) if payload.get(key) is not None else "").strip()
+    if not raw:
+        raise ValueError(empty_message)
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(invalid_message) from exc
+    if value < minimum or value > maximum:
+        raise ValueError(invalid_message)
+    return value
 
 
 def _feishu_delivery_suffix(

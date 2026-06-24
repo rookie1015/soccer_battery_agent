@@ -122,8 +122,8 @@ def render_review_html(report: ReviewReport) -> str:
         [
             _rate_card("胜平负命中", report.outcome_hits, total),
             _rate_card("单选命中", report.single_hits, single_total),
-            _rate_card("比分 Top1", report.top_score_hits, total),
-            _rate_card("比分 Top3", report.score_top3_hits, total),
+            _rate_card("比分 Top1", report.top_score_hits, report.score_total),
+            _rate_card("比分 Top3", report.score_top3_hits, report.score_total),
             _rate_card("任九保留", report.keep_hits, keep_total),
             _rate_card("剔除有效", report.effective_drops, drop_total),
         ]
@@ -218,8 +218,8 @@ def _review_row(row) -> str:
     prediction = row.prediction
     match = prediction.match
     outcome_class = "hit" if row.outcome_hit else "miss"
-    score_class = "hit" if row.score_top3_hit else "miss"
-    score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else "未中")
+    score_class = "hit" if row.score_top3_hit else ("miss" if row.result.score_exact else "neutral")
+    score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else ("N/A" if not row.result.score_exact else "未中"))
     return f"""
     <tr>
       <td class="seqno">{match.seq}</td>
@@ -285,12 +285,14 @@ def _metric_card(label: str, value: str, note: str) -> str:
 
 def _rate_card(label: str, count: int, total: int) -> str:
     rate = 0 if total <= 0 else count / total
+    value = f"{count}/{total}" if total > 0 else "N/A"
+    rate_text = f"{rate:.0%}" if total > 0 else "仅彩果"
     return f"""
     <article class="metric">
       <span>{escape(label)}</span>
-      <strong>{count}/{total}</strong>
+      <strong>{escape(value)}</strong>
       <div class="meter"><i style="width:{rate:.0%}"></i></div>
-      <small>{rate:.0%}</small>
+      <small>{escape(rate_text)}</small>
     </article>
     """
 
