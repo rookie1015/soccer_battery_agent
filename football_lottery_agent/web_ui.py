@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import tempfile
 import webbrowser
 from datetime import datetime
@@ -270,9 +271,9 @@ def render_ui() -> str:
 
       <article class="panel">
         <h2>生成赛后复盘</h2>
-        <p class="hint">默认使用最新赛前数据并从多个来源自动拉取赛果；如果来源未更新，再取消自动拉取并粘贴 CSV。</p>
-        <label for="reviewIssue">复盘使用的赛前数据</label>
-        <input id="reviewIssue" value="data/collected_issue.json" placeholder="留空则使用 data/collected_issue.json">
+        <p class="hint">填写期号后，会优先使用该期已生成的赛前数据并从多个来源自动拉取赛果；如果来源未更新，再取消自动拉取并粘贴 CSV。</p>
+        <label for="reviewIssue">期号</label>
+        <input id="reviewIssue" value="26087" autocomplete="off" required>
         <label class="check"><input id="autoResults" type="checkbox" checked> 多来源自动拉取赛果</label>
         <label for="resultsCsv">赛果 CSV</label>
         <textarea id="resultsCsv">seq,score
@@ -291,8 +292,6 @@ def render_ui() -> str:
   </main>
 
   <script>
-    const DEFAULT_REVIEW_ISSUE_PATH = "data/collected_issue.json";
-
     async function postJson(url, payload) {
       const response = await fetch(url, {
         method: "POST",
@@ -379,7 +378,8 @@ def render_ui() -> str:
 
     function validateReview() {
       const autoResults = document.getElementById("autoResults").checked;
-      return autoResults || requireTextField("resultsCsv", "reviewStatus", "请粘贴赛果 CSV。");
+      return requireTextField("reviewIssue", "reviewStatus", "请填写期号。")
+        && (autoResults || requireTextField("resultsCsv", "reviewStatus", "请粘贴赛果 CSV。"));
     }
 
     function updateReviewMode() {
@@ -464,7 +464,7 @@ def render_ui() -> str:
       document.getElementById("reviewLinks").innerHTML = "";
       try {
         const data = await postJson("/api/review", {
-          issue_path: document.getElementById("reviewIssue").value.trim() || DEFAULT_REVIEW_ISSUE_PATH,
+          issue: document.getElementById("reviewIssue").value.trim(),
           auto_results: autoResults,
           results_csv: document.getElementById("resultsCsv").value,
           no_history: document.getElementById("reviewNoHistory").checked,
@@ -563,6 +563,7 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
     )
     slug = _slug(issue)
     issue_path = Path("data/collected_issue.json")
+    issue_archive_path = _issue_data_path(issue)
     markdown_path = Path("reports") / f"{slug}_report.md"
     html_path = Path("reports") / f"{slug}_report.html"
     history_dir = Path("reports/history")
@@ -573,6 +574,8 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
         strength_model=bool(payload.get("strength_model", True)),
         strength_xg_matches=strength_xg_matches,
     )
+    issue_archive_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(issue_path, issue_archive_path)
     plan = build_ticket_plan(load_issue(issue_path))
     write_report(plan, markdown_path)
     write_analysis_html(plan, html_path)
@@ -675,10 +678,8 @@ def _team_key(value: str) -> str:
 
 
 def _run_review(payload: dict[str, object]) -> dict[str, object]:
-    issue_path_value = str(payload.get("issue_path") or "data/collected_issue.json").strip()
-    issue_path = Path(issue_path_value)
-    if not issue_path.exists():
-        raise ValueError(f"找不到赛前数据：{issue_path}。请先生成赛前分析，或填写正确的数据文件路径。")
+    requested_issue = str(payload.get("issue") or "").strip()
+    issue_path = _resolve_review_issue_path(requested_issue, payload)
     results_csv = str(payload.get("results_csv") or "").strip()
     auto_results = bool(payload.get("auto_results", True))
     if not auto_results and not results_csv:
@@ -689,6 +690,7 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
     markdown_path = Path("reports") / f"{slug}_review.md"
     html_path = Path("reports") / f"{slug}_review.html"
     history_dir = Path("reports/history")
+    _remove_stale_review_outputs(markdown_path, html_path)
 
     plan = build_ticket_plan(issue)
     if auto_results:
@@ -729,6 +731,36 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
         "markdown_url": _url_for(markdown_path),
         "history_url": _url_for(history_path or history_dir / "index.html"),
     }
+
+
+def _issue_data_path(issue: str) -> Path:
+    return Path("data") / f"{_slug(issue)}_issue.json"
+
+
+def _resolve_review_issue_path(requested_issue: str, payload: dict[str, object]) -> Path:
+    if requested_issue:
+        issue_path = _issue_data_path(requested_issue)
+        if issue_path.exists():
+            return issue_path
+
+        current_path = Path("data/collected_issue.json")
+        if current_path.exists():
+            current_issue = load_issue(current_path)
+            if current_issue.issue == requested_issue:
+                return current_path
+
+        raise ValueError(f"找不到 {requested_issue} 的赛前数据。请先在上方生成该期赛前分析。")
+
+    issue_path_value = str(payload.get("issue_path") or "data/collected_issue.json").strip()
+    issue_path = Path(issue_path_value)
+    if not issue_path.exists():
+        raise ValueError(f"找不到赛前数据：{issue_path}。请先生成赛前分析，或填写正确的数据文件路径。")
+    return issue_path
+
+
+def _remove_stale_review_outputs(*paths: Path) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
 
 
 def _parse_required_int(

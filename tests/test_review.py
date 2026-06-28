@@ -11,6 +11,7 @@ from football_lottery_agent.review import (
     load_results,
     parse_outcome_results_html,
     parse_sina_results_html,
+    parse_sporttery_result_row,
     render_review_markdown,
 )
 from football_lottery_agent.strategy import build_ticket_plan
@@ -70,17 +71,51 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(results[2].outcome, "1")
         self.assertEqual(results[3].outcome, "0")
 
-    def test_fetch_results_with_fallbacks_uses_next_complete_source(self) -> None:
-        fallback = {seq: MatchResult(seq, 1, 0, score_exact=False) for seq in range(1, 15)}
+    def test_fetch_results_with_fallbacks_uses_official_sporttery_source(self) -> None:
+        official = {seq: MatchResult(seq, 1, 0, score_exact=False) for seq in range(1, 15)}
 
-        with (
-            patch("football_lottery_agent.review.fetch_sina_results", return_value={}),
-            patch("football_lottery_agent.review.fetch_eastmoney_results", return_value=fallback),
-        ):
+        with patch("football_lottery_agent.review.fetch_sporttery_results", return_value=official):
             fetched = fetch_results_with_fallbacks("26087")
 
-        self.assertEqual(fetched.source, "东方财富开奖")
-        self.assertEqual(len(fetched.results), 14)
+        self.assertEqual(fetched.source, "中国体彩网官方开奖")
+        self.assertFalse(fetched.results[1].score_exact)
+
+    def test_fetch_results_with_fallbacks_reports_missing_official_issue(self) -> None:
+        with patch("football_lottery_agent.review.fetch_sporttery_results", return_value={}):
+            with self.assertRaisesRegex(ValueError, "中国体彩网官方暂未返回 26088"):
+                fetch_results_with_fallbacks("26088")
+
+    def test_parse_sporttery_result_row_uses_match_numbers_and_official_outcomes(self) -> None:
+        row = {
+            "lotteryDrawNum": "26087",
+            "lotteryDrawResult": "3 1 0",
+            "matchList": [
+                {"matchNum": 1, "masterTeamName": "荷  兰", "guestTeamName": "瑞  典", "result": "3", "czScore": "2:1"},
+                {"matchNum": 2, "masterTeamName": "德  国", "guestTeamName": "科特迪", "result": "1", "czScore": "0:0"},
+                {"matchNum": 3, "masterTeamName": "突尼斯", "guestTeamName": "日  本", "result": "0", "czScore": "0:2"},
+            ],
+        }
+
+        results = parse_sporttery_result_row(row)
+
+        self.assertEqual(results[1].score_text, "2-1")
+        self.assertEqual(results[1].outcome, "3")
+        self.assertEqual(results[2].outcome, "1")
+        self.assertEqual(results[3].outcome, "0")
+        self.assertTrue(results[1].score_exact)
+
+    def test_parse_sporttery_result_row_falls_back_when_score_conflicts_with_outcome(self) -> None:
+        row = {
+            "lotteryDrawNum": "26087",
+            "matchList": [
+                {"matchNum": 1, "result": "3", "czScore": "0:1"},
+            ],
+        }
+
+        results = parse_sporttery_result_row(row)
+
+        self.assertEqual(results[1].score_text, "主胜（仅彩果）")
+        self.assertFalse(results[1].score_exact)
 
     def test_build_review_counts_outcome_and_score_hits(self) -> None:
         issue = load_issue("data/sample_issue.json")
@@ -150,7 +185,7 @@ class ReviewTests(unittest.TestCase):
 
         self.assertIn("胜平负命中", markdown)
         self.assertIn("比分 Top3 命中", markdown)
-        self.assertIn("| 序号 | 对阵 | 赛果 |", markdown)
+        self.assertIn("| 序号 | 对阵 | 最终比分 | 彩果 |", markdown)
 
 
 def _result_for_prediction(prediction):

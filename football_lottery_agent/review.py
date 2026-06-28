@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +14,7 @@ from .predictor import OUTCOME_LABELS
 
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
+SPORTTERY_HISTORY_URL = "https://webapi.sporttery.cn/gateway/lottery/getHistoryPageListV1.qry"
 EASTMONEY_SFC_URL = "https://caipiao.eastmoney.com/Result/Category/sfc"
 EASTMONEY_HISTORY_URL = "https://caipiao.eastmoney.com/Result/History/sfc"
 WUBAI_SFC_URL = "https://kaijiang.500.com/sfc.shtml"
@@ -128,13 +131,31 @@ def fetch_sina_results(issue: str, cache_dir: str | Path = "data/cache") -> dict
     return parse_sina_results_html(html)
 
 
+def fetch_sporttery_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
+    params = {
+        "gameNo": "90",
+        "provinceId": "0",
+        "pageSize": "10",
+        "pageNo": "1",
+        "startTerm": issue,
+        "endTerm": issue,
+    }
+    url = f"{SPORTTERY_HISTORY_URL}?{urllib.parse.urlencode(params)}"
+    raw = json.loads(_fetch_text(url, Path(cache_dir), max_age_seconds=300))
+    if str(raw.get("errorCode")) != "0":
+        raise ValueError(str(raw.get("errorMessage") or "Sporttery result request failed."))
+    value = raw.get("value") or {}
+    rows = value.get("list") or []
+    for row in rows:
+        if str(row.get("lotteryDrawNum") or "").strip() == issue:
+            return parse_sporttery_result_row(row)
+    return {}
+
+
 def fetch_results_with_fallbacks(issue: str, cache_dir: str | Path = "data/cache") -> ResultsFetch:
     errors: list[str] = []
     providers = (
-        ("新浪体育", lambda: fetch_sina_results(issue, cache_dir=cache_dir)),
-        ("东方财富开奖", lambda: fetch_eastmoney_results(issue, cache_dir=cache_dir)),
-        ("东方财富历史开奖", lambda: fetch_eastmoney_history_results(issue, cache_dir=cache_dir)),
-        ("500彩票网开奖", lambda: fetch_wubai_results(issue, cache_dir=cache_dir)),
+        ("中国体彩网官方开奖", lambda: fetch_sporttery_results(issue, cache_dir=cache_dir)),
     )
     best = ResultsFetch(results={}, source="")
     for source, fetcher in providers:
@@ -150,7 +171,9 @@ def fetch_results_with_fallbacks(issue: str, cache_dir: str | Path = "data/cache
     if best.results:
         return best
     detail = "；".join(errors)
-    raise ValueError(f"所有赛果来源都暂时不可用。{detail}" if detail else "所有赛果来源都暂时没有返回本期赛果。")
+    if detail:
+        raise ValueError(f"中国体彩网官方开奖结果暂时不可用。{detail}")
+    raise ValueError(f"中国体彩网官方暂未返回 {issue} 期开奖结果。请确认该期已经开奖。")
 
 
 def fetch_eastmoney_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
@@ -199,6 +222,31 @@ def parse_outcome_results_html(html: str, issue: str) -> dict[int, MatchResult]:
     }
 
 
+def parse_sporttery_result_row(row: dict[str, object]) -> dict[int, MatchResult]:
+    matches = row.get("matchList")
+    if isinstance(matches, list) and matches:
+        results: dict[int, MatchResult] = {}
+        for index, match in enumerate(matches, start=1):
+            if not isinstance(match, dict):
+                continue
+            outcome = str(match.get("result") or "").strip()
+            score = str(match.get("czScore") or "").strip()
+            if not outcome and not score:
+                continue
+            seq = int(match.get("matchNum") or index)
+            if _looks_like_score(score):
+                home_goals, away_goals = _parse_score(score)
+                result = MatchResult(seq=seq, home_goals=home_goals, away_goals=away_goals)
+                if not outcome or result.outcome == _normalize_outcome_label(outcome):
+                    results[seq] = result
+                    continue
+            results[seq] = _result_from_outcome(seq, outcome)
+        return results
+
+    outcomes = str(row.get("lotteryDrawResult") or "").split()
+    return {seq: _result_from_outcome(seq, outcome) for seq, outcome in enumerate(outcomes[:14], start=1)}
+
+
 def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewReport:
     rows: list[MatchReview] = []
     missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
@@ -243,17 +291,16 @@ def render_review_markdown(report: ReviewReport) -> str:
     lines.append("")
     lines.append("## 逐场复盘")
     lines.append("")
-    lines.append("| 序号 | 对阵 | 赛果 | 实际 | 推荐 | 胜平负 | 比分倾向 | 比分 | 任九 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
     for row in report.rows:
         prediction = row.prediction
         match = prediction.match
         actual = OUTCOME_LABELS[row.result.outcome]
         outcome_mark = "命中" if row.outcome_hit else "未中"
-        score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else ("N/A" if not row.result.score_exact else "未中"))
         lines.append(
             f"| {match.seq} | {match.home} vs {match.away} | {row.result.score_text} | {actual} | "
-            f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {score_mark} | {row.bucket} |"
+            f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {row.bucket} |"
         )
     lines.append("")
     lines.append("## 需要关注")
@@ -378,7 +425,17 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         age = datetime.now().timestamp() - cache_path.stat().st_mtime
         if age <= max_age_seconds:
             return cache_path.read_text(encoding="utf-8", errors="replace")
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
+    user_agent = "Mozilla/5.0 football-lottery-agent/0.1"
+    if "webapi.sporttery.cn" in url:
+        user_agent = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://m.sporttery.cn/mctzc/wqkj/?typeId=1",
+            "User-Agent": user_agent,
+        },
+    )
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             text = response.read().decode("utf-8", errors="replace")

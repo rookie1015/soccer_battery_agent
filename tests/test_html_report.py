@@ -40,6 +40,9 @@ class HtmlReportTests(unittest.TestCase):
         self.assertIn("Review Dashboard", html)
         self.assertIn("胜平负命中", html)
         self.assertIn("比分 Top3", html)
+        self.assertIn("<th>最终比分</th>", html)
+        self.assertIn("<th>彩果</th>", html)
+        self.assertIn("<th>比分预测</th>", html)
         self.assertIn("class=\"meter\"", html)
 
     def test_render_review_html_highlights_major_misses(self) -> None:

@@ -151,11 +151,11 @@ def render_review_html(report: ReviewReport) -> str:
                 <tr>
                   <th>#</th>
                   <th>对阵</th>
-                  <th>赛果</th>
+                  <th>最终比分</th>
+                  <th>彩果</th>
                   <th>推荐</th>
                   <th>胜平负</th>
-                  <th>比分倾向</th>
-                  <th>比分</th>
+                  <th>比分预测</th>
                   <th>任九</th>
                 </tr>
               </thead>
@@ -218,8 +218,6 @@ def _review_row(row) -> str:
     prediction = row.prediction
     match = prediction.match
     outcome_class = "hit" if row.outcome_hit else "miss"
-    score_class = "hit" if row.score_top3_hit else ("miss" if row.result.score_exact else "neutral")
-    score_mark = "Top1" if row.top_score_hit else ("Top3" if row.score_top3_hit else ("N/A" if not row.result.score_exact else "未中"))
     return f"""
     <tr>
       <td class="seqno">{match.seq}</td>
@@ -227,11 +225,11 @@ def _review_row(row) -> str:
         <strong>{escape(match.home)} vs {escape(match.away)}</strong>
         <span class="meta">{escape(match.league)}</span>
       </td>
-      <td><span class="score-final">{escape(row.result.score_text)}</span><span class="meta">{escape(OUTCOME_LABELS[row.result.outcome])}</span></td>
+      <td><span class="score-final">{escape(row.result.score_text)}</span></td>
+      <td><span class="pick">{escape(OUTCOME_LABELS[row.result.outcome])}</span></td>
       <td>{_pick_badge(prediction)}</td>
       <td><span class="badge {outcome_class}">{"命中" if row.outcome_hit else "未中"}</span></td>
       <td>{_scoreline_tags(prediction)}</td>
-      <td><span class="badge {score_class}">{escape(score_mark)}</span></td>
       <td>{_bucket_badge(row.bucket.replace("任九", ""), row.bucket == "任九保留")}</td>
     </tr>
     """

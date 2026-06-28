@@ -24,7 +24,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("feishu_webhook", html)
         self.assertIn('id="singleHome" placeholder="例如：荷兰" autocomplete="off" required', html)
         self.assertIn('id="issue" value="26087" autocomplete="off" required', html)
-        self.assertIn('placeholder="留空则使用 data/collected_issue.json"', html)
+        self.assertIn('id="reviewIssue" value="26087" autocomplete="off" required', html)
+        self.assertIn("issue: document.getElementById(\"reviewIssue\").value.trim()", html)
         self.assertIn("validateSinglePrediction", html)
         self.assertIn("updateReviewMode", html)
         self.assertIn('].join("\\n");', html)
@@ -81,6 +82,55 @@ class WebUiTests(unittest.TestCase):
     def test_review_reports_missing_issue_path(self) -> None:
         with self.assertRaisesRegex(ValueError, "请先生成赛前分析"):
             web_ui._run_review({"issue_path": "data/missing_issue.json"})
+
+    def test_review_reports_missing_issue_number(self) -> None:
+        with self.assertRaisesRegex(ValueError, "找不到 99999 的赛前数据"):
+            web_ui._run_review({"issue": "99999"})
+
+    def test_review_accepts_issue_number_from_current_issue_file(self) -> None:
+        def exists(path: Path) -> bool:
+            return str(path).replace("\\", "/") == "data/collected_issue.json"
+
+        with (
+            patch.object(web_ui.Path, "exists", exists),
+            patch.object(web_ui, "load_issue", return_value=web_ui.load_issue("data/sample_issue.json")),
+        ):
+            self.assertEqual(
+                web_ui._resolve_review_issue_path("sample-001", {}),
+                Path("data/collected_issue.json"),
+            )
+
+    def test_review_fetches_results_for_requested_issue_number(self) -> None:
+        issue = web_ui.load_issue("data/sample_issue.json")
+        fetched = ResultsFetch(
+            results={match.seq: MatchResult(match.seq, 1, 0, score_exact=False) for match in issue.matches},
+            source="中国体彩网官方开奖",
+        )
+        with (
+            patch.object(web_ui, "_resolve_review_issue_path", return_value=Path("data/sample_issue.json")),
+            patch.object(web_ui, "fetch_results_with_fallbacks", return_value=fetched) as fetch_results,
+            patch.object(web_ui, "write_review_report"),
+            patch.object(web_ui, "write_review_html"),
+            patch.object(web_ui, "archive_report", return_value=Path("reports/history/index.html")),
+        ):
+            result = web_ui._run_review({"issue": "sample-001", "auto_results": True})
+
+        fetch_results.assert_called_once_with("sample-001")
+        self.assertTrue(result["ok"])
+
+    def test_review_removes_stale_outputs_when_auto_results_are_missing(self) -> None:
+        markdown = Path("reports/sample-001_review.md")
+        html = Path("reports/sample-001_review.html")
+        markdown.parent.mkdir(parents=True, exist_ok=True)
+        markdown.write_text("stale", encoding="utf-8")
+        html.write_text("stale", encoding="utf-8")
+
+        with patch.object(web_ui, "fetch_results_with_fallbacks", return_value=ResultsFetch(results={}, source="中国体彩网官方开奖")):
+            with self.assertRaisesRegex(ValueError, "多个赛果来源暂时都没有返回本期赛果"):
+                web_ui._run_review({"issue_path": "data/sample_issue.json", "auto_results": True})
+
+        self.assertFalse(markdown.exists())
+        self.assertFalse(html.exists())
 
     def test_review_reports_empty_auto_results(self) -> None:
         with patch.object(web_ui, "fetch_results_with_fallbacks", return_value=ResultsFetch(results={}, source="测试源")):
