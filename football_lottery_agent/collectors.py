@@ -16,6 +16,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+from .json_utils import loads_json
+
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
 SINA_GATEWAY_URL = "https://mix.lottery.sina.com.cn/gateway/index/entry"
@@ -395,7 +397,7 @@ def _sina_gateway(cat1: str, params: dict[str, str], cache_dir: Path) -> Any:
     url = f"{SINA_GATEWAY_URL}?{urllib.parse.urlencode(query)}"
     try:
         text = _fetch_text(url, cache_dir, max_age_seconds=900)
-        payload = json.loads(text)
+        payload = loads_json(text)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return []
     result = payload.get("result", {})
@@ -588,7 +590,7 @@ def _fetch_gdelt_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]
     url = f"https://api.gdeltproject.org/api/v2/doc/doc?{urllib.parse.urlencode(params)}"
     try:
         raw = _fetch_text(url, cache_dir, max_age_seconds=3600)
-        data = json.loads(raw)
+        data = loads_json(raw)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return []
     items = []

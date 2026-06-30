@@ -8,6 +8,8 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
+from .json_utils import read_json
+
 
 DEFAULT_HISTORY_DIR = Path("reports/history")
 MAX_HISTORY_ENTRIES = 52
@@ -78,15 +80,30 @@ def archive_report(
     entries.insert(0, entry.as_dict())
     entries = entries[:max_entries]
     _write_index_json(root, entries)
-    write_history_index(root, entries)
+    write_history_indexes(root, entries)
+    return root / f"{safe_kind}.html"
+
+
+def write_history_indexes(history_dir: str | Path = DEFAULT_HISTORY_DIR, entries: list[dict[str, str]] | None = None) -> Path:
+    root = Path(history_dir)
+    data = entries if entries is not None else _load_entries(root)
+    write_history_index(root, data)
+    write_history_index(root, data, kind="analysis")
+    write_history_index(root, data, kind="review")
     return root / "index.html"
 
 
-def write_history_index(history_dir: str | Path = DEFAULT_HISTORY_DIR, entries: list[dict[str, str]] | None = None) -> Path:
+def write_history_index(
+    history_dir: str | Path = DEFAULT_HISTORY_DIR,
+    entries: list[dict[str, str]] | None = None,
+    kind: str | None = None,
+) -> Path:
     root = Path(history_dir)
     root.mkdir(parents=True, exist_ok=True)
     data = entries if entries is not None else _load_entries(root)
-    path = root / "index.html"
+    if kind:
+        data = [item for item in data if item.get("kind") == kind]
+    path = root / (f"{kind}.html" if kind else "index.html")
     path.write_text(render_history_index(data), encoding="utf-8")
     return path
 
@@ -128,17 +145,17 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       line-height: 1.5;
     }}
     main {{
-      width: min(1440px, calc(100% - 32px));
+      width: min(1900px, calc(100% - 16px));
       margin: 0 auto;
-      padding: 24px 0 40px;
+      padding: 12px 0 20px;
     }}
     .hero {{
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
+      grid-template-columns: minmax(0, 1fr) 340px;
       gap: 18px;
       align-items: end;
-      padding: 24px;
-      margin-bottom: 16px;
+      padding: 16px 18px;
+      margin-bottom: 10px;
       border-radius: 8px;
       background: #101828;
       color: white;
@@ -151,8 +168,8 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       text-transform: uppercase;
     }}
     h1, h2, p {{ margin-top: 0; }}
-    h1 {{ margin-bottom: 8px; font-size: 28px; letter-spacing: 0; }}
-    h2 {{ margin-bottom: 10px; font-size: 18px; letter-spacing: 0; }}
+    h1 {{ margin-bottom: 6px; font-size: 24px; letter-spacing: 0; }}
+    h2 {{ margin-bottom: 8px; font-size: 17px; letter-spacing: 0; }}
     .subtle, small {{ color: var(--muted); }}
     .hero .subtle {{ color: #d0d5dd; margin-bottom: 0; }}
     label {{ display: block; margin-bottom: 6px; color: #d0d5dd; font-size: 12px; }}
@@ -168,17 +185,17 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
     }}
     .layout {{
       display: grid;
-      grid-template-columns: 320px minmax(0, 1fr);
-      gap: 16px;
+      grid-template-columns: 280px minmax(0, 1fr);
+      gap: 10px;
     }}
     .panel {{
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 14px;
+      padding: 10px;
     }}
     .history-list {{
-      max-height: 760px;
+      max-height: calc(100vh - 160px);
       overflow: auto;
       display: grid;
       gap: 8px;
@@ -193,7 +210,7 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       display: flex;
       align-items: center;
       gap: 8px;
-      padding: 11px;
+      padding: 9px;
       cursor: pointer;
       list-style: none;
       font-weight: 700;
@@ -208,7 +225,7 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       border: 1px solid var(--line);
       border-radius: 8px;
       background: #fff;
-      padding: 10px;
+      padding: 8px;
       text-align: left;
       cursor: pointer;
       font: inherit;
@@ -232,7 +249,7 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       justify-content: space-between;
       gap: 12px;
       align-items: center;
-      margin-bottom: 10px;
+      margin-bottom: 6px;
     }}
     .viewer-head a {{
       color: var(--blue);
@@ -241,7 +258,8 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
     }}
     iframe {{
       width: 100%;
-      height: 820px;
+      height: calc(100vh - 170px);
+      min-height: 760px;
       border: 1px solid var(--line);
       border-radius: 8px;
       background: white;
@@ -254,10 +272,10 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       border-radius: 8px;
     }}
     @media (max-width: 980px) {{
-      main {{ width: min(100% - 20px, 1440px); padding-top: 12px; }}
+      main {{ width: min(100% - 12px, 1900px); padding-top: 8px; }}
       .hero, .layout {{ grid-template-columns: 1fr; }}
       h1 {{ font-size: 22px; }}
-      iframe {{ height: 720px; }}
+      iframe {{ height: 760px; min-height: 0; }}
     }}
   </style>
 </head>
@@ -309,7 +327,7 @@ def render_history_index(entries: list[dict[str, str]]) -> str:
       title.textContent = entry.title;
       meta.textContent = `查询时间：${{formatQueryTime(entry.created_at)}} · 期次 ${{entry.issue}}`;
       select.value = String(index);
-      cards.forEach((card, cardIndex) => card.classList.toggle("active", cardIndex === index));
+      cards.forEach((card) => card.classList.toggle("active", Number(card.dataset.index) === index));
     }}
 
     function formatQueryTime(value) {{
@@ -329,7 +347,7 @@ def _load_entries(root: Path) -> list[dict[str, str]]:
     path = root / "index.json"
     if not path.exists():
         return []
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = read_json(path)
     if not isinstance(raw, list):
         return []
     return [item for item in raw if isinstance(item, dict)]
@@ -360,7 +378,7 @@ def _grouped_history_cards(entries: list[dict[str, str]]) -> str:
     sections = []
     for group_index, (issue, items) in enumerate(groups.items()):
         cards = "\n".join(_history_card(item, index) for index, item in items)
-        open_attr = " open" if group_index == 0 else ""
+        open_attr = " open"
         sections.append(
             f"""
             <details class="issue-group"{open_attr}>

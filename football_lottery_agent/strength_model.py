@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import json
 import re
 import urllib.error
 import urllib.parse
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .collectors import RawMatch
+from .json_utils import loads_json
 
 
 FOTMOB_BASE = "https://www.fotmob.com/api/data"
@@ -317,17 +317,17 @@ def _fetch_json(url: str, cache: Path, max_age_seconds: int) -> Any:
     if path.exists():
         age = datetime.now().timestamp() - path.stat().st_mtime
         if age <= max_age_seconds:
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return loads_json(path.read_text(encoding="utf-8", errors="replace"))
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
     try:
         with urllib.request.urlopen(req, timeout=12) as response:
             text = response.read().decode("utf-8", errors="replace")
     except (OSError, urllib.error.URLError):
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            return loads_json(path.read_text(encoding="utf-8", errors="replace"))
         return None
     path.write_text(text, encoding="utf-8")
-    return json.loads(text)
+    return loads_json(text)
 
 
 def _walk_dicts(value: Any):

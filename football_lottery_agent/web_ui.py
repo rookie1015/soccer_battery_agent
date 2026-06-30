@@ -12,8 +12,9 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .collectors import collect_issue
-from .history import archive_report
+from .history import archive_report, write_history_indexes
 from .html_report import write_analysis_html, write_review_html
+from .json_utils import loads_json
 from .loader import load_issue
 from .models import Match, Odds, Signals
 from .notifier import NotifyError, send_report, send_text
@@ -263,7 +264,7 @@ def render_ui() -> str:
         <label class="check"><input id="noHistory" type="checkbox"> 本次不写入历史中心</label>
         <div class="actions">
           <button id="runAnalysis">生成分析报告</button>
-          <a class="link-button secondary" href="/reports/history/index.html" target="_blank">打开历史中心</a>
+          <a class="link-button secondary" href="/reports/history/analysis.html" target="_blank">打开赛前分析历史</a>
         </div>
         <div id="analysisStatus" class="status">准备就绪。</div>
         <div id="analysisLinks" class="result-links"></div>
@@ -283,7 +284,7 @@ def render_ui() -> str:
         <label class="check"><input id="reviewNoHistory" type="checkbox"> 本次不写入历史中心</label>
         <div class="actions">
           <button id="runReview">生成复盘报告</button>
-          <a class="link-button secondary" href="/reports/history/index.html" target="_blank">打开历史中心</a>
+          <a class="link-button secondary" href="/reports/history/review.html" target="_blank">打开赛后复盘历史</a>
         </div>
         <div id="reviewStatus" class="status">等待赛果。</div>
         <div id="reviewLinks" class="result-links"></div>
@@ -494,8 +495,15 @@ def _handler(root: Path):
             super().__init__(*args, directory=str(root), **kwargs)
 
         def do_GET(self) -> None:
-            if self.path in {"/", "/index.html"}:
+            path = self.path.split("?", 1)[0]
+            if path in {"/", "/index.html"}:
                 self._send_html(render_ui())
+                return
+            if _is_history_index_path(self.path):
+                history_root = Path("reports/history")
+                write_history_indexes(history_root)
+                history_path = history_root / _history_index_filename(self.path)
+                self._send_html(history_path.read_text(encoding="utf-8"))
                 return
             super().do_GET()
 
@@ -521,6 +529,7 @@ def _handler(root: Path):
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(raw)
 
@@ -543,10 +552,30 @@ def _read_json(handler: SimpleHTTPRequestHandler) -> dict[str, object]:
     raw = handler.rfile.read(length).decode("utf-8")
     if not raw:
         return {}
-    data = json.loads(raw)
+    data = loads_json(raw)
     if not isinstance(data, dict):
         raise ValueError("Invalid request body.")
     return data
+
+
+def _is_history_index_path(path: str) -> bool:
+    clean_path = path.split("?", 1)[0]
+    return clean_path in {
+        "/history",
+        "/history.html",
+        "/reports/history/index.html",
+        "/reports/history/analysis.html",
+        "/reports/history/review.html",
+    }
+
+
+def _history_index_filename(path: str) -> str:
+    clean_path = path.split("?", 1)[0]
+    if clean_path.endswith("/analysis.html"):
+        return "analysis.html"
+    if clean_path.endswith("/review.html"):
+        return "review.html"
+    return "index.html"
 
 
 def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
@@ -589,7 +618,7 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
         "message": f"{issue} 分析报告已生成{delivery}。",
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
-        "history_url": _url_for(history_path or history_dir / "index.html"),
+        "history_url": _url_for(history_path or history_dir / "analysis.html"),
     }
 
 
@@ -729,7 +758,7 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
         "message": f"{issue.issue} 复盘报告已生成，赛果来源：{results_source}{delivery}。",
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
-        "history_url": _url_for(history_path or history_dir / "index.html"),
+        "history_url": _url_for(history_path or history_dir / "review.html"),
     }
 
 

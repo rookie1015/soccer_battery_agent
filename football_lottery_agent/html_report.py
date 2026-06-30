@@ -64,7 +64,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
               <p class="seq drop">{escape(drop)}</p>
             </div>
           </section>
-          <details class="panel prediction-fold">
+          <details class="panel prediction-fold" open>
             <summary>
               <span class="fold-title">展开本期 {len(plan.predictions)} 场胜平负预测</span>
               <span class="fold-hint">点击展开 · 3=主胜，1=平，0=客胜</span>
@@ -359,16 +359,16 @@ def _page(title: str, body: str) -> str:
       line-height: 1.5;
     }}
     main {{
-      width: min(1320px, calc(100% - 32px));
+      width: min(1800px, calc(100% - 20px));
       margin: 0 auto;
-      padding: 24px 0 40px;
+      padding: 14px 0 24px;
     }}
     .hero {{
       background: #101828;
       color: white;
       border-radius: 8px;
-      padding: 24px;
-      margin-bottom: 16px;
+      padding: 16px 18px;
+      margin-bottom: 10px;
       border: 1px solid #101828;
     }}
     .eyebrow {{
@@ -379,15 +379,15 @@ def _page(title: str, body: str) -> str:
       font-weight: 700;
     }}
     h1, h2, p {{ margin-top: 0; }}
-    h1 {{ margin-bottom: 8px; font-size: 28px; letter-spacing: 0; }}
-    h2 {{ margin-bottom: 0; font-size: 18px; letter-spacing: 0; }}
+    h1 {{ margin-bottom: 6px; font-size: 24px; letter-spacing: 0; }}
+    h2 {{ margin-bottom: 0; font-size: 17px; letter-spacing: 0; }}
     .subtle, .meta, small {{ color: var(--muted); }}
     .hero .subtle {{ color: #d0d5dd; margin-bottom: 0; }}
     .metrics {{
       display: grid;
       grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 12px;
-      margin-bottom: 16px;
+      gap: 8px;
+      margin-bottom: 10px;
     }}
     .rates {{ grid-template-columns: repeat(6, minmax(0, 1fr)); }}
     .metric, .panel {{
@@ -395,9 +395,9 @@ def _page(title: str, body: str) -> str:
       border: 1px solid var(--line);
       border-radius: 8px;
     }}
-    .metric {{ padding: 14px; min-height: 106px; }}
+    .metric {{ padding: 10px 12px; min-height: 78px; }}
     .metric span {{ display: block; color: var(--muted); font-size: 12px; }}
-    .metric strong {{ display: block; margin: 6px 0; font-size: 26px; letter-spacing: 0; }}
+    .metric strong {{ display: block; margin: 4px 0; font-size: 23px; letter-spacing: 0; }}
     .metric small {{ display: block; }}
     .meter {{
       height: 8px;
@@ -410,17 +410,17 @@ def _page(title: str, body: str) -> str:
     .split {{
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 12px;
-      margin-bottom: 16px;
+      gap: 8px;
+      margin-bottom: 10px;
     }}
-    .panel {{ padding: 16px; }}
+    .panel {{ padding: 12px; }}
     .prediction-fold {{ padding: 0; overflow: hidden; }}
     .prediction-fold summary {{
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 12px;
-      padding: 16px;
+      padding: 11px 12px;
       cursor: pointer;
       list-style: none;
       user-select: none;
@@ -434,9 +434,9 @@ def _page(title: str, body: str) -> str:
     }}
     .prediction-fold[open] summary::before {{ content: "－"; }}
     .prediction-fold[open] summary {{ border-bottom: 1px solid var(--line); }}
-    .prediction-fold .fold-title {{ margin-right: auto; font-size: 18px; font-weight: 700; }}
+    .prediction-fold .fold-title {{ margin-right: auto; font-size: 17px; font-weight: 700; }}
     .prediction-fold .fold-hint {{ color: var(--muted); font-size: 12px; }}
-    .prediction-fold .table-wrap {{ padding: 0 16px 16px; }}
+    .prediction-fold .table-wrap {{ padding: 0 10px 10px; }}
     .tabs {{
       display: flex;
       gap: 8px;
@@ -449,7 +449,7 @@ def _page(title: str, body: str) -> str:
       border-bottom: 3px solid transparent;
       background: transparent;
       color: var(--muted);
-      padding: 10px 16px;
+      padding: 8px 14px;
       font: inherit;
       font-weight: 700;
       cursor: pointer;
@@ -459,7 +459,7 @@ def _page(title: str, body: str) -> str:
     .tab-button:focus-visible {{ outline: 2px solid var(--blue); outline-offset: 2px; }}
     .tab-panel {{ display: none; }}
     .tab-panel.active {{ display: block; }}
-    .seq {{ margin: 10px 0 0; font-size: 20px; font-weight: 700; }}
+    .seq {{ margin: 6px 0 0; font-size: 18px; font-weight: 700; }}
     .seq.keep {{ color: var(--green); }}
     .seq.drop {{ color: var(--red); }}
     .section-title {{
@@ -467,10 +467,10 @@ def _page(title: str, body: str) -> str:
       align-items: baseline;
       justify-content: space-between;
       gap: 12px;
-      margin-bottom: 12px;
+      margin-bottom: 8px;
     }}
     .section-title span {{ color: var(--muted); font-size: 12px; }}
-    .callout {{ margin-bottom: 16px; }}
+    .callout {{ margin-bottom: 10px; }}
     .callout.ok {{ border-color: #b7e3cf; background: #f3fbf7; }}
     .callout.danger {{ border-color: #ffd0c7; background: #fff7f5; }}
     .callout p {{ margin-bottom: 0; color: var(--muted); }}
@@ -490,7 +490,7 @@ def _page(title: str, body: str) -> str:
     .table-wrap {{ overflow-x: auto; }}
     table {{ width: 100%; border-collapse: collapse; min-width: 980px; }}
     th, td {{
-      padding: 10px 8px;
+      padding: 6px 7px;
       border-bottom: 1px solid var(--line);
       text-align: left;
       vertical-align: middle;
@@ -503,11 +503,11 @@ def _page(title: str, body: str) -> str:
       top: 0;
     }}
     .seqno {{ width: 36px; font-weight: 700; color: var(--blue); }}
-    .meta {{ display: block; margin-top: 2px; font-size: 12px; }}
+    .meta {{ display: block; margin-top: 1px; font-size: 12px; }}
     .pick {{
       display: inline-block;
       min-width: 48px;
-      padding: 4px 8px;
+      padding: 3px 7px;
       border-radius: 6px;
       background: #e8f0fb;
       color: var(--blue);
@@ -517,7 +517,7 @@ def _page(title: str, body: str) -> str:
     .score-tag {{
       display: inline-block;
       margin: 2px 4px 2px 0;
-      padding: 4px 7px;
+      padding: 3px 6px;
       border-radius: 6px;
       border: 1px solid #c7e6ea;
       color: var(--cyan);
@@ -541,20 +541,20 @@ def _page(title: str, body: str) -> str:
       display: grid;
       grid-template-columns: 22px 88px 42px;
       align-items: center;
-      gap: 6px;
-      margin: 3px 0;
+      gap: 5px;
+      margin: 2px 0;
       font-size: 12px;
     }}
     .prob i {{
       display: block;
-      height: 7px;
+      height: 6px;
       border-radius: 999px;
       background: var(--blue);
     }}
     .prob b {{ font-weight: 700; }}
     .badge {{
       display: inline-block;
-      padding: 4px 8px;
+      padding: 3px 7px;
       border-radius: 6px;
       font-weight: 700;
       white-space: nowrap;
@@ -563,7 +563,7 @@ def _page(title: str, body: str) -> str:
     .badge.mid {{ color: var(--amber); background: #fff5df; }}
     .badge.high, .badge.drop, .badge.miss {{ color: var(--red); background: #fff0ed; }}
     @media (max-width: 900px) {{
-      main {{ width: min(100% - 20px, 1320px); padding-top: 12px; }}
+      main {{ width: min(100% - 20px, 1800px); padding-top: 12px; }}
       h1 {{ font-size: 22px; }}
       .metrics, .rates, .split {{ grid-template-columns: 1fr 1fr; }}
       .upset-grid {{ grid-template-columns: 1fr; }}

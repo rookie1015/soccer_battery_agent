@@ -22,6 +22,8 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("/api/single-prediction", html)
         self.assertIn("每次生成后自动发送到飞书", html)
         self.assertIn("feishu_webhook", html)
+        self.assertIn("/reports/history/analysis.html", html)
+        self.assertIn("/reports/history/review.html", html)
         self.assertIn('id="singleHome" placeholder="例如：荷兰" autocomplete="off" required', html)
         self.assertIn('id="issue" value="26087" autocomplete="off" required', html)
         self.assertIn('id="reviewIssue" value="26087" autocomplete="off" required', html)
@@ -118,6 +120,38 @@ class WebUiTests(unittest.TestCase):
         fetch_results.assert_called_once_with("sample-001")
         self.assertTrue(result["ok"])
 
+    def test_analysis_no_history_links_to_analysis_history(self) -> None:
+        with (
+            patch.object(web_ui, "collect_issue"),
+            patch.object(web_ui.shutil, "copyfile"),
+            patch.object(web_ui, "load_issue", return_value=web_ui.load_issue("data/sample_issue.json")),
+            patch.object(web_ui, "write_report"),
+            patch.object(web_ui, "write_analysis_html"),
+            patch.object(web_ui, "archive_report") as archive_report,
+        ):
+            result = web_ui._run_analysis({"issue": "sample-001", "strength_xg_matches": "8", "no_history": True})
+
+        archive_report.assert_not_called()
+        self.assertEqual(result["history_url"], "/reports/history/analysis.html")
+
+    def test_review_no_history_links_to_review_history(self) -> None:
+        issue = web_ui.load_issue("data/sample_issue.json")
+        fetched = ResultsFetch(
+            results={match.seq: MatchResult(match.seq, 1, 0, score_exact=False) for match in issue.matches},
+            source="test",
+        )
+        with (
+            patch.object(web_ui, "_resolve_review_issue_path", return_value=Path("data/sample_issue.json")),
+            patch.object(web_ui, "fetch_results_with_fallbacks", return_value=fetched),
+            patch.object(web_ui, "write_review_report"),
+            patch.object(web_ui, "write_review_html"),
+            patch.object(web_ui, "archive_report") as archive_report,
+        ):
+            result = web_ui._run_review({"issue": "sample-001", "auto_results": True, "no_history": True})
+
+        archive_report.assert_not_called()
+        self.assertEqual(result["history_url"], "/reports/history/review.html")
+
     def test_review_removes_stale_outputs_when_auto_results_are_missing(self) -> None:
         markdown = Path("reports/sample-001_review.md")
         html = Path("reports/sample-001_review.html")
@@ -168,6 +202,16 @@ class WebUiTests(unittest.TestCase):
 
     def test_start_ui_batch_exists(self) -> None:
         self.assertTrue(Path("start_ui.bat").exists())
+
+    def test_history_index_paths_are_served_dynamically(self) -> None:
+        self.assertTrue(web_ui._is_history_index_path("/reports/history/index.html"))
+        self.assertTrue(web_ui._is_history_index_path("/reports/history/index.html?ts=1"))
+        self.assertTrue(web_ui._is_history_index_path("/reports/history/analysis.html"))
+        self.assertTrue(web_ui._is_history_index_path("/reports/history/review.html"))
+        self.assertTrue(web_ui._is_history_index_path("/history"))
+        self.assertFalse(web_ui._is_history_index_path("/reports/26089_report.html"))
+        self.assertEqual(web_ui._history_index_filename("/reports/history/analysis.html"), "analysis.html")
+        self.assertEqual(web_ui._history_index_filename("/reports/history/review.html"), "review.html")
 
 
 if __name__ == "__main__":

@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from football_lottery_agent.history import archive_report, render_history_index
+from football_lottery_agent.history import archive_report, render_history_index, write_history_indexes
 
 
 class HistoryTests(unittest.TestCase):
@@ -74,6 +74,92 @@ class HistoryTests(unittest.TestCase):
         self.assertIn("2 次查询", html)
         self.assertIn("items/0.html", html)
         self.assertIn("items/1.html", html)
+
+    def test_render_history_index_activates_grouped_card_by_data_index(self) -> None:
+        entries = [
+            {
+                "id": "review",
+                "kind": "review",
+                "issue": "26088",
+                "title": "review",
+                "created_at": "2026-06-30T22:50:00",
+                "html": "items/review.html",
+                "markdown": "",
+            },
+            {
+                "id": "analysis",
+                "kind": "analysis",
+                "issue": "26089",
+                "title": "analysis",
+                "created_at": "2026-06-30T22:49:00",
+                "html": "items/analysis.html",
+                "markdown": "",
+            },
+        ]
+
+        html = render_history_index(entries)
+
+        self.assertIn('data-index="1"', html)
+        self.assertIn('Number(card.dataset.index) === index', html)
+        self.assertEqual(html.count('<details class="issue-group" open>'), 2)
+
+    def test_archive_report_writes_separate_kind_history_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            analysis_html = root / "analysis-source.html"
+            review_html = root / "review-source.html"
+            analysis_html.write_text("<html>analysis</html>", encoding="utf-8")
+            review_html.write_text("<html>review</html>", encoding="utf-8")
+
+            analysis_path = archive_report("analysis", "26089", analysis_html, history_dir=root / "history")
+            review_path = archive_report("review", "26088", review_html, history_dir=root / "history")
+
+            analysis_page = (root / "history" / "analysis.html").read_text(encoding="utf-8")
+            review_page = (root / "history" / "review.html").read_text(encoding="utf-8")
+
+        self.assertEqual(analysis_path.name, "analysis.html")
+        self.assertEqual(review_path.name, "review.html")
+        self.assertIn("26089", analysis_page)
+        self.assertNotIn("26088", analysis_page)
+        self.assertIn("26088", review_page)
+        self.assertNotIn("26089", review_page)
+
+    def test_write_history_indexes_keeps_combined_and_kind_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            entries = [
+                {
+                    "id": "analysis",
+                    "kind": "analysis",
+                    "issue": "26089",
+                    "title": "analysis",
+                    "created_at": "2026-06-30T22:49:00",
+                    "html": "items/analysis.html",
+                    "markdown": "",
+                },
+                {
+                    "id": "review",
+                    "kind": "review",
+                    "issue": "26088",
+                    "title": "review",
+                    "created_at": "2026-06-30T22:50:00",
+                    "html": "items/review.html",
+                    "markdown": "",
+                },
+            ]
+
+            write_history_indexes(root / "history", entries)
+
+            combined = (root / "history" / "index.html").read_text(encoding="utf-8")
+            analysis = (root / "history" / "analysis.html").read_text(encoding="utf-8")
+            review = (root / "history" / "review.html").read_text(encoding="utf-8")
+
+        self.assertIn("26089", combined)
+        self.assertIn("26088", combined)
+        self.assertIn("26089", analysis)
+        self.assertNotIn("26088", analysis)
+        self.assertIn("26088", review)
+        self.assertNotIn("26089", review)
 
 
 if __name__ == "__main__":

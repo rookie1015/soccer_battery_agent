@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import json
 import re
 import urllib.error
 import urllib.parse
@@ -9,6 +8,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
+from .json_utils import loads_json
 from .models import Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
 
@@ -141,7 +141,7 @@ def fetch_sporttery_results(issue: str, cache_dir: str | Path = "data/cache") ->
         "endTerm": issue,
     }
     url = f"{SPORTTERY_HISTORY_URL}?{urllib.parse.urlencode(params)}"
-    raw = json.loads(_fetch_text(url, Path(cache_dir), max_age_seconds=300))
+    raw = loads_json(_fetch_text(url, Path(cache_dir), max_age_seconds=300))
     if str(raw.get("errorCode")) != "0":
         raise ValueError(str(raw.get("errorMessage") or "Sporttery result request failed."))
     value = raw.get("value") or {}

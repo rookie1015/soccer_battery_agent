@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .collectors import OddsRow, RawMatch
+from .json_utils import loads_json
 
 
 THE_ODDS_API_BASE = "https://api.the-odds-api.com/v4"
@@ -123,7 +124,7 @@ def _fetch_the_odds_api(
     url = f"{THE_ODDS_API_BASE}/sports/{sport_key}/odds?{urllib.parse.urlencode(params)}"
     try:
         text = _fetch_text(url, cache_dir, max_age_seconds=300)
-        data = json.loads(text)
+        data = loads_json(text)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return []
     return data if isinstance(data, list) else []

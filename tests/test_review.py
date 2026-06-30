@@ -7,6 +7,7 @@ from football_lottery_agent.loader import load_issue
 from football_lottery_agent.review import (
     MatchResult,
     build_review,
+    fetch_sporttery_results,
     fetch_results_with_fallbacks,
     load_results,
     parse_outcome_results_html,
@@ -84,6 +85,17 @@ class ReviewTests(unittest.TestCase):
         with patch("football_lottery_agent.review.fetch_sporttery_results", return_value={}):
             with self.assertRaisesRegex(ValueError, "中国体彩网官方暂未返回 26088"):
                 fetch_results_with_fallbacks("26088")
+
+    def test_fetch_sporttery_results_accepts_utf8_bom(self) -> None:
+        raw = (
+            '\ufeff{"errorCode":"0","value":{"list":[{"lotteryDrawNum":"26087",'
+            '"lotteryDrawResult":"3","matchList":[{"matchNum":1,"result":"3","czScore":"2:1"}]}]}}'
+        )
+        with patch("football_lottery_agent.review._fetch_text", return_value=raw):
+            results = fetch_sporttery_results("26087")
+
+        self.assertEqual(results[1].score_text, "2-1")
+        self.assertEqual(results[1].outcome, "3")
 
     def test_parse_sporttery_result_row_uses_match_numbers_and_official_outcomes(self) -> None:
         row = {
