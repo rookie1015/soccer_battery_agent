@@ -133,6 +133,8 @@ class WebUiTests(unittest.TestCase):
 
         archive_report.assert_not_called()
         self.assertEqual(result["history_url"], "/reports/history/analysis.html")
+        self.assertEqual(result["report"]["issue"], "sample-001")
+        self.assertEqual(len(result["report"]["predictions"]), 14)
 
     def test_review_no_history_links_to_review_history(self) -> None:
         issue = web_ui.load_issue("data/sample_issue.json")

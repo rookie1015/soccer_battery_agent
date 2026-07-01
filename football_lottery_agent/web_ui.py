@@ -16,6 +16,7 @@ from .history import archive_report, write_history_indexes
 from .html_report import write_analysis_html, write_review_html
 from .json_utils import loads_json
 from .loader import load_issue
+from .mobile_api import serialize_ticket_plan
 from .models import Match, Odds, Signals
 from .notifier import NotifyError, send_report, send_text
 from .predictor import OUTCOME_LABELS, predict_match
@@ -616,6 +617,7 @@ def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
     return {
         "ok": True,
         "message": f"{issue} 分析报告已生成{delivery}。",
+        "report": serialize_ticket_plan(plan),
         "html_url": _url_for(html_path),
         "markdown_url": _url_for(markdown_path),
         "history_url": _url_for(history_path or history_dir / "analysis.html"),
