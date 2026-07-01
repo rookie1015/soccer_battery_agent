@@ -26,6 +26,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
     low_risk = sum(1 for pred in plan.predictions if pred.risk == "低")
     singles = sum(1 for pred in plan.predictions if len(pred.picks) == 1)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
+    purchase_deadline = _purchase_deadline_text(plan)
     outcome_rows = "\n".join(_analysis_row(pred, plan) for pred in plan.predictions)
     score_rows = "\n".join(_score_prediction_row(pred) for pred in plan.predictions)
     cards = "\n".join(
@@ -44,7 +45,10 @@ def render_analysis_html(plan: TicketPlan) -> str:
         <section class="hero">
           <div>
             <p class="eyebrow">Analysis Dashboard</p>
-            <h1>足球彩票分析报告：{escape(plan.issue.issue)}</h1>
+            <div class="hero-title">
+              <h1>足球彩票分析报告：{escape(plan.issue.issue)}</h1>
+              <span class="deadline">购彩截止时间：{escape(purchase_deadline)}</span>
+            </div>
             <p class="subtle">胜平负、比分倾向、任九取舍集中展示。仅供信息分析和娱乐参考。</p>
           </div>
         </section>
@@ -281,6 +285,10 @@ def _metric_card(label: str, value: str, note: str) -> str:
     """
 
 
+def _purchase_deadline_text(plan: TicketPlan) -> str:
+    return str(plan.issue.metadata.get("purchase_deadline") or "官方截止时间暂未获取")
+
+
 def _rate_card(label: str, count: int, total: int) -> str:
     rate = 0 if total <= 0 else count / total
     value = f"{count}/{total}" if total > 0 else "N/A"
@@ -382,6 +390,19 @@ def _page(title: str, body: str) -> str:
     h1 {{ margin-bottom: 6px; font-size: 24px; letter-spacing: 0; }}
     h2 {{ margin-bottom: 0; font-size: 17px; letter-spacing: 0; }}
     .subtle, .meta, small {{ color: var(--muted); }}
+    .hero-title {{
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 16px;
+    }}
+    .deadline {{
+      flex: 0 0 auto;
+      color: #d0d5dd;
+      font-size: 14px;
+      font-weight: 700;
+      white-space: nowrap;
+    }}
     .hero .subtle {{ color: #d0d5dd; margin-bottom: 0; }}
     .metrics {{
       display: grid;
@@ -571,6 +592,8 @@ def _page(title: str, body: str) -> str:
     }}
     @media (max-width: 560px) {{
       .metrics, .rates, .split {{ grid-template-columns: 1fr; }}
+      .hero-title {{ display: block; }}
+      .deadline {{ display: block; margin: -2px 0 6px; white-space: normal; }}
       .section-title {{ display: block; }}
     }}
   </style>

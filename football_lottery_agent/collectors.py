@@ -21,6 +21,7 @@ from .json_utils import loads_json
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
 SINA_GATEWAY_URL = "https://mix.lottery.sina.com.cn/gateway/index/entry"
+SPORTTERY_FOOTBALL_MATCH_URL = "https://webapi.sporttery.cn/gateway/lottery/getFootBallMatchV1.qry"
 SINA_COMMON_PARAMS = {"__caller__": "wap", "__verno__": "10000", "__version__": "1.0.0", "dpc": "1"}
 MAINSTREAM_MEDIA_FEEDS = (
     ("espn", "ESPN Soccer", "https://www.espn.com/espn/rss/soccer/news"),
@@ -121,6 +122,7 @@ def collect_issue(
     cache = Path(cache_dir)
     source_issue, raw_matches = load_matches(source=source, seed_path=seed_path, cache_dir=cache, issue=issue)
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
     briefings = _fetch_briefings(raw_matches, cache, offline)
     media_briefings = _fetch_mainstream_media_briefings(raw_matches, cache, offline)
@@ -207,10 +209,44 @@ def collect_issue(
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
-        json.dumps({"issue": issue_id, "matches": matches}, ensure_ascii=False, indent=2),
+        json.dumps({"issue": issue_id, "metadata": metadata, "matches": matches}, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     return output
+
+
+def fetch_sporttery_issue_metadata(issue: str, cache_dir: str | Path = "data/cache") -> dict[str, str]:
+    cache = Path(cache_dir)
+    for sell_status in ("0", "1", "3"):
+        params = {
+            "param": "90,0",
+            "lotteryDrawNum": issue,
+            "sellStatus": sell_status,
+            "termLimits": "10",
+        }
+        url = f"{SPORTTERY_FOOTBALL_MATCH_URL}?{urllib.parse.urlencode(params)}"
+        try:
+            raw = loads_json(_fetch_text(url, cache, max_age_seconds=300))
+        except (urllib.error.URLError, ValueError):
+            continue
+        if str(raw.get("errorCode")) != "0":
+            continue
+        value = raw.get("value") or {}
+        sfc_match = value.get("sfcMatch") or {}
+        if str(sfc_match.get("lotteryDrawNum") or "").strip() != issue:
+            continue
+        sale_end_time = str(sfc_match.get("lotterySaleEndtime") or "").strip()
+        if not sale_end_time:
+            continue
+        metadata = {
+            "purchase_deadline": sale_end_time,
+            "purchase_deadline_source": "中国体彩网官方",
+        }
+        sale_begin_time = str(sfc_match.get("lotterySaleBegintime") or "").strip()
+        if sale_begin_time:
+            metadata["sale_begin_time"] = sale_begin_time
+        return metadata
+    return {}
 
 
 def _fetch_briefings(raw_matches: list[RawMatch], cache: Path, offline: bool) -> dict[int, list[NewsItem]]:
@@ -628,7 +664,14 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         age = datetime.now().timestamp() - cache_path.stat().st_mtime
         if age <= max_age_seconds:
             return cache_path.read_text(encoding="utf-8", errors="replace")
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
+    headers = {"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"}
+    if "webapi.sporttery.cn" in url:
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://www.sporttery.cn/ctzc/jsq/index.html",
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Mobile/15E148",
+        }
+    request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             text = response.read().decode("utf-8", errors="replace")

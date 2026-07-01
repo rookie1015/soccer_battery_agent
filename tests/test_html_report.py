@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import replace
 
 from football_lottery_agent.html_report import render_analysis_html, render_review_html
 from football_lottery_agent.loader import load_issue
@@ -21,7 +22,19 @@ class HtmlReportTests(unittest.TestCase):
         self.assertIn("class=\"prob\"", html)
         self.assertIn("class=\"primary-score\"", html)
         self.assertIn("class=\"panel prediction-fold\"", html)
+        self.assertIn("购彩截止时间：官方截止时间暂未获取", html)
         self.assertIn("展开本期 14 场胜平负预测", html)
+
+    def test_render_analysis_html_uses_official_purchase_deadline(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        plan = replace(
+            plan,
+            issue=replace(plan.issue, metadata={"purchase_deadline": "2026-07-04 23:00:00"}),
+        )
+
+        html = render_analysis_html(plan)
+
+        self.assertIn("购彩截止时间：2026-07-04 23:00:00", html)
 
     def test_render_review_html_contains_metrics_and_rows(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))

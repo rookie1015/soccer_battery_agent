@@ -2,7 +2,17 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from football_lottery_agent.collectors import NewsItem, RawMatch, _media_item_matches_match, _parse_rss, fetch_sina_sfc, infer_signals, load_matches, load_seed_matches
+from football_lottery_agent.collectors import (
+    NewsItem,
+    RawMatch,
+    _media_item_matches_match,
+    _parse_rss,
+    fetch_sina_sfc,
+    fetch_sporttery_issue_metadata,
+    infer_signals,
+    load_matches,
+    load_seed_matches,
+)
 
 
 class CollectorTests(unittest.TestCase):
@@ -60,6 +70,33 @@ class CollectorTests(unittest.TestCase):
             fetch_sina_sfc(Path("data/cache"), issue="26087")
 
         self.assertEqual(fetch_text_mock.call_args.args[0], "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num=26087")
+
+    @patch("football_lottery_agent.collectors._fetch_text")
+    def test_fetch_sporttery_issue_metadata_reads_official_sale_endtime(self, fetch_text_mock) -> None:
+        fetch_text_mock.return_value = (
+            '{"errorCode":"0","value":{"sfcMatch":{"lotteryDrawNum":"26090",'
+            '"lotterySaleBegintime":"2026-07-01 09:00:00",'
+            '"lotterySaleEndtime":"2026-07-04 23:00:00"}}}'
+        )
+
+        metadata = fetch_sporttery_issue_metadata("26090", Path("data/cache"))
+
+        self.assertEqual(metadata["purchase_deadline"], "2026-07-04 23:00:00")
+        self.assertEqual(metadata["purchase_deadline_source"], "中国体彩网官方")
+        self.assertEqual(metadata["sale_begin_time"], "2026-07-01 09:00:00")
+
+    @patch("football_lottery_agent.collectors._fetch_text")
+    def test_fetch_sporttery_issue_metadata_checks_closed_sale_status(self, fetch_text_mock) -> None:
+        fetch_text_mock.side_effect = [
+            '{"errorCode":"0","value":{"sfcMatch":{}}}',
+            '{"errorCode":"0","value":{"sfcMatch":{}}}',
+            '{"errorCode":"0","value":{"sfcMatch":{"lotteryDrawNum":"26089",'
+            '"lotterySaleEndtime":"2026-06-29 22:00:00"}}}',
+        ]
+
+        metadata = fetch_sporttery_issue_metadata("26089", Path("data/cache"))
+
+        self.assertEqual(metadata["purchase_deadline"], "2026-06-29 22:00:00")
 
 
 if __name__ == "__main__":

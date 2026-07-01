@@ -92,13 +92,14 @@ class Match:
 class Issue:
     issue: str
     matches: tuple[Match, ...]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Issue":
         matches = tuple(Match.from_dict(item) for item in raw["matches"])
         if len(matches) != 14:
             raise ValueError(f"Expected 14 matches, got {len(matches)}.")
-        return cls(issue=str(raw["issue"]), matches=matches)
+        return cls(issue=str(raw["issue"]), matches=matches, metadata=dict(raw.get("metadata", {})))
 
 
 @dataclass(frozen=True)
