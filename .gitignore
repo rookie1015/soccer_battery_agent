@@ -21,6 +21,11 @@ data/[0-9]*_issue.json
 # Generated reports and history
 reports/
 
+# Android
+android/**/.gradle/
+android/**/build/
+android/**/local.properties
+
 # Editors / OS
 .idea/
 .vscode/
