@@ -1,5 +1,7 @@
 package com.example.footballlottery
 
+import android.content.Intent
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -34,6 +36,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -42,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
@@ -441,7 +445,13 @@ fun FootballLotteryApp(
     historyViewModel: HistoryViewModel = viewModel(),
     singleViewModel: SinglePredictionViewModel = viewModel(),
 ) {
+    val context = LocalContext.current
+    val settings = remember(context) { context.getSharedPreferences("football_lottery_settings", 0) }
     var selectedTab by remember { mutableStateOf(AppTab.Analysis) }
+    LaunchedEffect(Unit) {
+        settings.getString("base_url", null)?.let(appViewModel::updateBaseUrl)
+    }
+
     Scaffold(
         bottomBar = {
             NavigationBar(containerColor = Color.White) {
@@ -466,7 +476,13 @@ fun FootballLotteryApp(
                 AppTab.Analysis -> AnalysisScreen(appViewModel, analysisViewModel)
                 AppTab.History -> HistoryScreen(appViewModel, historyViewModel)
                 AppTab.Single -> SinglePredictionScreen(appViewModel, singleViewModel)
-                AppTab.Settings -> SettingsScreen(appViewModel)
+                AppTab.Settings -> SettingsScreen(
+                    appViewModel = appViewModel,
+                    onBaseUrlChanged = { value ->
+                        appViewModel.updateBaseUrl(value)
+                        settings.edit().putString("base_url", value).apply()
+                    },
+                )
             }
         }
     }
@@ -556,7 +572,7 @@ fun SinglePredictionScreen(appViewModel: AppViewModel, viewModel: SinglePredicti
 }
 
 @Composable
-fun SettingsScreen(appViewModel: AppViewModel) {
+fun SettingsScreen(appViewModel: AppViewModel, onBaseUrlChanged: (String) -> Unit) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -569,7 +585,7 @@ fun SettingsScreen(appViewModel: AppViewModel) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     OutlinedTextField(
                         value = appViewModel.baseUrl,
-                        onValueChange = appViewModel::updateBaseUrl,
+                        onValueChange = onBaseUrlChanged,
                         label = { Text("后端地址") },
                         modifier = Modifier.fillMaxWidth(),
                         singleLine = true,
@@ -762,6 +778,11 @@ private fun PredictionCard(prediction: MatchPrediction) {
 
 @Composable
 private fun HistoryEntryCard(entry: HistoryEntry) {
+    val context = LocalContext.current
+    fun openUrl(url: String) {
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+    }
+
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -769,11 +790,17 @@ private fun HistoryEntryCard(entry: HistoryEntry) {
                 Text(entry.kind.ifBlank { "report" }, color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
             }
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
-            if (entry.htmlUrl.isNotBlank()) {
-                Text("HTML：${entry.htmlUrl}", color = Color(0xFF087F8C), style = MaterialTheme.typography.bodySmall)
-            }
-            if (entry.markdownUrl.isNotBlank()) {
-                Text("Markdown：${entry.markdownUrl}", color = Color(0xFF087F8C), style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (entry.htmlUrl.isNotBlank()) {
+                    Button(onClick = { openUrl(entry.htmlUrl) }) {
+                        Text("打开 HTML")
+                    }
+                }
+                if (entry.markdownUrl.isNotBlank()) {
+                    Button(onClick = { openUrl(entry.markdownUrl) }) {
+                        Text("打开 Markdown")
+                    }
+                }
             }
         }
     }
