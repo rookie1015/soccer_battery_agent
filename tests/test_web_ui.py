@@ -215,6 +215,28 @@ class WebUiTests(unittest.TestCase):
         self.assertEqual(web_ui._history_index_filename("/reports/history/analysis.html"), "analysis.html")
         self.assertEqual(web_ui._history_index_filename("/reports/history/review.html"), "review.html")
 
+    def test_run_history_returns_app_urls(self) -> None:
+        with patch.object(
+            web_ui,
+            "load_history_entries",
+            return_value=[
+                {
+                    "id": "one",
+                    "kind": "analysis",
+                    "issue": "26090",
+                    "title": "分析报告：26090",
+                    "created_at": "2026-07-03T20:00:00",
+                    "html": "items/one.html",
+                    "markdown": "items/one.md",
+                }
+            ],
+        ):
+            result = web_ui._run_history(Path("reports/history"))
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["entries"][0]["html_url"], "/reports/history/items/one.html")
+        self.assertEqual(result["entries"][0]["markdown_url"], "/reports/history/items/one.md")
+
 
 if __name__ == "__main__":
     unittest.main()

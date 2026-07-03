@@ -93,6 +93,10 @@ def write_history_indexes(history_dir: str | Path = DEFAULT_HISTORY_DIR, entries
     return root / "index.html"
 
 
+def load_history_entries(history_dir: str | Path = DEFAULT_HISTORY_DIR) -> list[dict[str, str]]:
+    return _load_entries(Path(history_dir))
+
+
 def write_history_index(
     history_dir: str | Path = DEFAULT_HISTORY_DIR,
     entries: list[dict[str, str]] | None = None,

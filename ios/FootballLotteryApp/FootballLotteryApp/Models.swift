@@ -1,0 +1,147 @@
+import Foundation
+
+struct AnalysisRequest: Encodable {
+    let issue: String
+    let strengthModel: Bool
+    let strengthXgMatches: Int
+    let noHistory: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case issue
+        case strengthModel = "strength_model"
+        case strengthXgMatches = "strength_xg_matches"
+        case noHistory = "no_history"
+    }
+}
+
+struct AnalysisResponse: Decodable {
+    let ok: Bool
+    let message: String?
+    let error: String?
+    let report: AnalysisReport?
+    let htmlURL: String?
+    let markdownURL: String?
+    let historyURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case ok
+        case message
+        case error
+        case report
+        case htmlURL = "html_url"
+        case markdownURL = "markdown_url"
+        case historyURL = "history_url"
+    }
+}
+
+struct HistoryResponse: Decodable {
+    let ok: Bool
+    let entries: [HistoryEntry]
+}
+
+struct HistoryEntry: Decodable, Identifiable {
+    let id: String
+    let kind: String
+    let issue: String
+    let title: String
+    let createdAt: String
+    let htmlURL: String?
+    let markdownURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case kind
+        case issue
+        case title
+        case createdAt = "created_at"
+        case htmlURL = "html_url"
+        case markdownURL = "markdown_url"
+    }
+}
+
+struct AnalysisReport: Decodable, Identifiable {
+    var id: String { issue }
+
+    let issue: String
+    let purchaseDeadline: String
+    let purchaseDeadlineSource: String
+    let saleBeginTime: String
+    let metrics: ReportMetrics
+    let choose9Keep: [Int]
+    let choose9Drop: [Int]
+    let predictions: [MatchPrediction]
+
+    enum CodingKeys: String, CodingKey {
+        case issue
+        case purchaseDeadline = "purchase_deadline"
+        case purchaseDeadlineSource = "purchase_deadline_source"
+        case saleBeginTime = "sale_begin_time"
+        case metrics
+        case choose9Keep = "choose9_keep"
+        case choose9Drop = "choose9_drop"
+        case predictions
+    }
+}
+
+struct ReportMetrics: Decodable {
+    let matchCount: Int
+    let singleCount: Int
+    let lowRiskCount: Int
+    let averageConfidence: Double
+
+    enum CodingKeys: String, CodingKey {
+        case matchCount = "match_count"
+        case singleCount = "single_count"
+        case lowRiskCount = "low_risk_count"
+        case averageConfidence = "average_confidence"
+    }
+}
+
+struct MatchPrediction: Decodable, Identifiable {
+    var id: Int { seq }
+
+    let seq: Int
+    let league: String
+    let kickoff: String
+    let kickoffDisplay: String
+    let home: String
+    let away: String
+    let pickText: String
+    let pickLabels: [String]
+    let picks: [String]
+    let confidence: Double
+    let risk: String
+    let probabilities: OutcomeProbabilities
+    let scorelines: [ScorelinePrediction]
+    let reasons: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case seq
+        case league
+        case kickoff
+        case kickoffDisplay = "kickoff_display"
+        case home
+        case away
+        case pickText = "pick_text"
+        case pickLabels = "pick_labels"
+        case picks
+        case confidence
+        case risk
+        case probabilities
+        case scorelines
+        case reasons
+    }
+}
+
+struct OutcomeProbabilities: Decodable {
+    let home: Double
+    let draw: Double
+    let away: Double
+}
+
+struct ScorelinePrediction: Decodable, Identifiable {
+    var id: String { score }
+
+    let score: String
+    let probability: Double
+}

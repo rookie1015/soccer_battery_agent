@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from football_lottery_agent.history import archive_report, render_history_index, write_history_indexes
+from football_lottery_agent.history import archive_report, load_history_entries, render_history_index, write_history_indexes
 
 
 class HistoryTests(unittest.TestCase):
@@ -160,6 +160,18 @@ class HistoryTests(unittest.TestCase):
         self.assertNotIn("26088", analysis)
         self.assertIn("26088", review)
         self.assertNotIn("26089", review)
+
+    def test_load_history_entries_reads_index_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "index.json").write_text(
+                json.dumps([{"id": "one", "kind": "analysis", "issue": "26090"}]),
+                encoding="utf-8",
+            )
+
+            entries = load_history_entries(root)
+
+        self.assertEqual(entries[0]["id"], "one")
 
 
 if __name__ == "__main__":

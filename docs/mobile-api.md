@@ -72,3 +72,28 @@ Response includes the existing report links plus an app-ready `report` object:
 `POST /api/single-prediction`
 
 This endpoint already returns app-ready JSON and can be used directly by the iPhone app.
+
+## History
+
+`GET /api/history`
+
+Response:
+
+```json
+{
+  "ok": true,
+  "entries": [
+    {
+      "id": "20260703200000-26090-analysis",
+      "kind": "analysis",
+      "issue": "26090",
+      "title": "分析报告：26090",
+      "created_at": "2026-07-03T20:00:00",
+      "html": "items/20260703200000-26090-analysis.html",
+      "markdown": "items/20260703200000-26090-analysis.md",
+      "html_url": "/reports/history/items/20260703200000-26090-analysis.html",
+      "markdown_url": "/reports/history/items/20260703200000-26090-analysis.md"
+    }
+  ]
+}
+```

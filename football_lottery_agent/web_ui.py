@@ -12,7 +12,7 @@ from pathlib import Path
 from urllib.parse import unquote
 
 from .collectors import collect_issue
-from .history import archive_report, write_history_indexes
+from .history import archive_report, load_history_entries, write_history_indexes
 from .html_report import write_analysis_html, write_review_html
 from .json_utils import loads_json
 from .loader import load_issue
@@ -500,6 +500,9 @@ def _handler(root: Path):
             if path in {"/", "/index.html"}:
                 self._send_html(render_ui())
                 return
+            if path == "/api/history":
+                self._send_json(_run_history())
+                return
             if _is_history_index_path(self.path):
                 history_root = Path("reports/history")
                 write_history_indexes(history_root)
@@ -577,6 +580,18 @@ def _history_index_filename(path: str) -> str:
     if clean_path.endswith("/review.html"):
         return "review.html"
     return "index.html"
+
+
+def _run_history(history_dir: Path = Path("reports/history")) -> dict[str, object]:
+    entries = []
+    for item in load_history_entries(history_dir):
+        entry = dict(item)
+        if entry.get("html"):
+            entry["html_url"] = _url_for(history_dir / entry["html"])
+        if entry.get("markdown"):
+            entry["markdown_url"] = _url_for(history_dir / entry["markdown"])
+        entries.append(entry)
+    return {"ok": True, "entries": entries}
 
 
 def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
