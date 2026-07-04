@@ -1,6 +1,18 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.chaquo.python")
+}
+
+val syncPythonSources by tasks.registering(Sync::class) {
+    from("../../..") {
+        include("football_lottery_agent/**/*.py")
+    }
+    into(layout.buildDirectory.dir("generated/python"))
+}
+
+tasks.matching { it.name.endsWith("PythonSources") && it.name != "syncPythonSources" }.configureEach {
+    dependsOn(syncPythonSources)
 }
 
 android {
@@ -13,6 +25,10 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
     }
 
     buildFeatures {
@@ -30,6 +46,17 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+    }
+}
+
+chaquopy {
+    defaultConfig {
+        version = "3.11"
+    }
+    sourceSets {
+        getByName("main") {
+            srcDir(layout.buildDirectory.dir("generated/python"))
+        }
     }
 }
 

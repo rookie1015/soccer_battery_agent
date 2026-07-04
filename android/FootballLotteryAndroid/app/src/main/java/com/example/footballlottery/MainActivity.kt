@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.chaquo.python.Python
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -149,8 +150,6 @@ data class SinglePredictionResult(
 )
 
 class AppViewModel : ViewModel() {
-    var baseUrl by mutableStateOf("http://10.0.2.2:8765")
-        private set
     var isTestingConnection by mutableStateOf(false)
         private set
     var connectionMessage by mutableStateOf("")
@@ -158,23 +157,17 @@ class AppViewModel : ViewModel() {
     var connectionError by mutableStateOf("")
         private set
 
-    fun updateBaseUrl(value: String) {
-        baseUrl = value
-        connectionMessage = ""
-        connectionError = ""
-    }
-
-    fun testConnection() {
+    fun testLocalEngine(engine: FootballLotteryLocalEngine) {
         viewModelScope.launch {
             isTestingConnection = true
             connectionMessage = ""
             connectionError = ""
             runCatching {
-                FootballLotteryApi(baseUrl.trim()).healthCheck()
+                engine.healthCheck()
             }.onSuccess { service ->
-                connectionMessage = "后端连接成功：$service。"
+                connectionMessage = "手机本机分析引擎可用：$service。"
             }.onFailure { throwable ->
-                connectionError = throwable.message ?: "后端连接失败。"
+                connectionError = throwable.message ?: "本机分析引擎启动失败。"
             }
             isTestingConnection = false
         }
@@ -203,12 +196,8 @@ class AnalysisViewModel : ViewModel() {
         xgMatches = value
     }
 
-    fun generateAnalysis(baseUrl: String) {
+    fun generateAnalysis(engine: FootballLotteryLocalEngine) {
         val cleanIssue = issue.trim()
-        if (baseUrl.isBlank()) {
-            error = "请先在设置中填写后端地址。"
-            return
-        }
         if (cleanIssue.isEmpty()) {
             error = "请填写期号。"
             return
@@ -218,7 +207,7 @@ class AnalysisViewModel : ViewModel() {
             error = ""
             message = ""
             runCatching {
-                FootballLotteryApi(baseUrl.trim()).generateAnalysis(cleanIssue, xgMatches.toInt())
+                engine.generateAnalysis(cleanIssue, xgMatches.toInt())
             }.onSuccess { response ->
                 report = response
                 message = "${response.issue} 分析报告已生成。"
@@ -240,16 +229,12 @@ class HistoryViewModel : ViewModel() {
     var entries by mutableStateOf<List<HistoryEntry>>(emptyList())
         private set
 
-    fun refresh(baseUrl: String) {
-        if (baseUrl.isBlank()) {
-            error = "请先在设置中填写后端地址。"
-            return
-        }
+    fun refresh(engine: FootballLotteryLocalEngine) {
         viewModelScope.launch {
             isLoading = true
             error = ""
             runCatching {
-                FootballLotteryApi(baseUrl.trim()).fetchHistory()
+                engine.fetchHistory()
             }.onSuccess { response ->
                 entries = response
                 hasLoaded = true
@@ -299,13 +284,9 @@ class SinglePredictionViewModel : ViewModel() {
         awayOdds = value
     }
 
-    fun predict(baseUrl: String) {
+    fun predict(engine: FootballLotteryLocalEngine) {
         val cleanHome = home.trim()
         val cleanAway = away.trim()
-        if (baseUrl.isBlank()) {
-            error = "请先在设置中填写后端地址。"
-            return
-        }
         if (cleanHome.isEmpty() || cleanAway.isEmpty()) {
             error = "请填写主队和客队。"
             return
@@ -331,7 +312,7 @@ class SinglePredictionViewModel : ViewModel() {
             error = ""
             result = null
             runCatching {
-                FootballLotteryApi(baseUrl.trim()).singlePrediction(
+                engine.singlePrediction(
                     home = cleanHome,
                     away = cleanAway,
                     homeOdds = oddsValues.getOrNull(0),
@@ -345,6 +326,137 @@ class SinglePredictionViewModel : ViewModel() {
             }
             isLoading = false
         }
+    }
+}
+
+class FootballLotteryLocalEngine(private val context: android.content.Context) {
+    private val bridge by lazy { Python.getInstance().getModule("android_bridge") }
+    private val workDir: String
+        get() = context.filesDir.absolutePath
+
+    suspend fun healthCheck(): String = withContext(Dispatchers.IO) {
+        val json = JSONObject(bridge.callAttr("health").toString())
+        json.optString("service", "football-lottery-agent-local")
+    }
+
+    suspend fun generateAnalysis(issue: String, xgMatches: Int): AnalysisReport = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("issue", issue)
+            .put("strength_model", true)
+            .put("strength_xg_matches", xgMatches)
+        val json = JSONObject(bridge.callAttr("analysis", body.toString(), workDir).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "本机分析失败。"))
+        }
+        parseReport(json.getJSONObject("report"))
+    }
+
+    suspend fun fetchHistory(): List<HistoryEntry> = withContext(Dispatchers.IO) {
+        val json = JSONObject(bridge.callAttr("history", workDir).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "读取历史记录失败。"))
+        }
+        json.optJSONArray("entries").orEmptyArray().mapObjects {
+            HistoryEntry(
+                id = it.optString("id"),
+                kind = it.optString("kind"),
+                issue = it.optString("issue"),
+                title = it.optString("title"),
+                createdAt = it.optString("created_at"),
+                htmlUrl = it.optString("html_url"),
+                markdownUrl = it.optString("markdown_url"),
+            )
+        }
+    }
+
+    suspend fun singlePrediction(
+        home: String,
+        away: String,
+        homeOdds: Double?,
+        drawOdds: Double?,
+        awayOdds: Double?,
+    ): SinglePredictionResult = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("home", home)
+            .put("away", away)
+        homeOdds?.let { body.put("home_odds", it) }
+        drawOdds?.let { body.put("draw_odds", it) }
+        awayOdds?.let { body.put("away_odds", it) }
+        val json = JSONObject(bridge.callAttr("single_prediction", body.toString(), workDir).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "单场预测失败。"))
+        }
+        parseSinglePrediction(json)
+    }
+
+    private fun parseReport(json: JSONObject): AnalysisReport {
+        val metrics = json.optJSONObject("metrics") ?: JSONObject()
+        return AnalysisReport(
+            issue = json.optString("issue"),
+            purchaseDeadline = json.optString("purchase_deadline"),
+            purchaseDeadlineSource = json.optString("purchase_deadline_source"),
+            saleBeginTime = json.optString("sale_begin_time"),
+            metrics = ReportMetrics(
+                matchCount = metrics.optInt("match_count"),
+                singleCount = metrics.optInt("single_count"),
+                lowRiskCount = metrics.optInt("low_risk_count"),
+                averageConfidence = metrics.optDouble("average_confidence"),
+            ),
+            choose9Keep = json.optJSONArray("choose9_keep").orEmptyArray().toIntList(),
+            choose9Drop = json.optJSONArray("choose9_drop").orEmptyArray().toIntList(),
+            predictions = json.optJSONArray("predictions").orEmptyArray().mapObjects { parsePrediction(it) },
+        )
+    }
+
+    private fun parsePrediction(json: JSONObject): MatchPrediction {
+        val probabilities = json.optJSONObject("probabilities") ?: JSONObject()
+        return MatchPrediction(
+            seq = json.optInt("seq"),
+            league = json.optString("league"),
+            kickoffDisplay = json.optString("kickoff_display"),
+            home = json.optString("home"),
+            away = json.optString("away"),
+            pickText = json.optString("pick_text"),
+            pickLabels = json.optJSONArray("pick_labels").orEmptyArray().toStringList(),
+            confidence = json.optDouble("confidence"),
+            risk = json.optString("risk"),
+            probabilities = OutcomeProbabilities(
+                home = probabilities.optDouble("home"),
+                draw = probabilities.optDouble("draw"),
+                away = probabilities.optDouble("away"),
+            ),
+            scorelines = json.optJSONArray("scorelines").orEmptyArray().mapObjects {
+                ScorelinePrediction(
+                    score = it.optString("score"),
+                    probability = it.optDouble("probability"),
+                )
+            },
+            reasons = json.optJSONArray("reasons").orEmptyArray().toStringList(),
+        )
+    }
+
+    private fun parseSinglePrediction(json: JSONObject): SinglePredictionResult {
+        val probabilities = json.optJSONObject("probabilities") ?: JSONObject()
+        return SinglePredictionResult(
+            home = json.optString("home"),
+            away = json.optString("away"),
+            pickLabel = json.optString("pick_label"),
+            confidence = json.optDouble("confidence"),
+            risk = json.optString("risk"),
+            probabilities = OutcomeProbabilities(
+                home = probabilities.optDouble("home"),
+                draw = probabilities.optDouble("draw"),
+                away = probabilities.optDouble("away"),
+            ),
+            scorelines = json.optJSONArray("scorelines").orEmptyArray().mapObjects {
+                ScorelinePrediction(
+                    score = it.optString("score"),
+                    probability = it.optDouble("probability"),
+                )
+            },
+            reasons = json.optJSONArray("reasons").orEmptyArray().toStringList(),
+            dataSource = json.optString("data_source"),
+        )
     }
 }
 
@@ -506,11 +618,8 @@ fun FootballLotteryApp(
     singleViewModel: SinglePredictionViewModel = viewModel(),
 ) {
     val context = LocalContext.current
-    val settings = remember(context) { context.getSharedPreferences("football_lottery_settings", 0) }
+    val localEngine = remember(context) { FootballLotteryLocalEngine(context.applicationContext) }
     var selectedTab by remember { mutableStateOf(AppTab.Analysis) }
-    LaunchedEffect(Unit) {
-        settings.getString("base_url", null)?.let(appViewModel::updateBaseUrl)
-    }
 
     Scaffold(
         bottomBar = {
@@ -533,15 +642,12 @@ fun FootballLotteryApp(
             color = Color(0xFFF4F6FA),
         ) {
             when (selectedTab) {
-                AppTab.Analysis -> AnalysisScreen(appViewModel, analysisViewModel)
-                AppTab.History -> HistoryScreen(appViewModel, historyViewModel)
-                AppTab.Single -> SinglePredictionScreen(appViewModel, singleViewModel)
+                AppTab.Analysis -> AnalysisScreen(localEngine, analysisViewModel)
+                AppTab.History -> HistoryScreen(localEngine, historyViewModel)
+                AppTab.Single -> SinglePredictionScreen(localEngine, singleViewModel)
                 AppTab.Settings -> SettingsScreen(
                     appViewModel = appViewModel,
-                    onBaseUrlChanged = { value ->
-                        appViewModel.updateBaseUrl(value)
-                        settings.edit().putString("base_url", value).apply()
-                    },
+                    localEngine = localEngine,
                 )
             }
         }
@@ -550,14 +656,14 @@ fun FootballLotteryApp(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AnalysisScreen(appViewModel: AppViewModel, viewModel: AnalysisViewModel) {
+fun AnalysisScreen(localEngine: FootballLotteryLocalEngine, viewModel: AnalysisViewModel) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { RequestCard(appViewModel, viewModel) }
+        item { RequestCard(localEngine, viewModel) }
         if (viewModel.error.isNotBlank()) {
             item { StatusCard(text = viewModel.error, color = Color(0xFFB42318)) }
         }
@@ -577,16 +683,16 @@ fun AnalysisScreen(appViewModel: AppViewModel, viewModel: AnalysisViewModel) {
                 PredictionCard(prediction)
             }
         } ?: item {
-            EmptyCard("等待生成", "启动后端服务，填写期号后生成分析。")
+            EmptyCard("等待生成", "填写期号后直接在手机本机生成分析。")
         }
     }
 }
 
 @Composable
-fun HistoryScreen(appViewModel: AppViewModel, viewModel: HistoryViewModel) {
-    LaunchedEffect(appViewModel.baseUrl) {
+fun HistoryScreen(localEngine: FootballLotteryLocalEngine, viewModel: HistoryViewModel) {
+    LaunchedEffect(Unit) {
         if (!viewModel.hasLoaded && !viewModel.isLoading) {
-            viewModel.refresh(appViewModel.baseUrl)
+            viewModel.refresh(localEngine)
         }
     }
 
@@ -599,33 +705,33 @@ fun HistoryScreen(appViewModel: AppViewModel, viewModel: HistoryViewModel) {
         item {
             HeaderCard(
                 title = "历史报告",
-                subtitle = "从后端读取已生成的分析记录。",
+                subtitle = "读取手机本机生成过的分析记录。",
                 buttonText = if (viewModel.isLoading) "读取中" else "刷新",
                 buttonEnabled = !viewModel.isLoading,
-                onClick = { viewModel.refresh(appViewModel.baseUrl) },
+                onClick = { viewModel.refresh(localEngine) },
             )
         }
         if (viewModel.error.isNotBlank()) {
             item { StatusCard(text = viewModel.error, color = Color(0xFFB42318)) }
         }
         if (viewModel.entries.isEmpty() && !viewModel.isLoading) {
-            item { EmptyCard("暂无历史", "后端返回空列表，生成一次分析后这里会出现记录。") }
+            item { EmptyCard("暂无历史", "生成一次分析后这里会出现本机记录。") }
         }
         items(viewModel.entries) { entry ->
-            HistoryEntryCard(entry, appViewModel.baseUrl)
+            HistoryEntryCard(entry, "")
         }
     }
 }
 
 @Composable
-fun SinglePredictionScreen(appViewModel: AppViewModel, viewModel: SinglePredictionViewModel) {
+fun SinglePredictionScreen(localEngine: FootballLotteryLocalEngine, viewModel: SinglePredictionViewModel) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { SinglePredictionForm(appViewModel, viewModel) }
+        item { SinglePredictionForm(localEngine, viewModel) }
         if (viewModel.error.isNotBlank()) {
             item { StatusCard(text = viewModel.error, color = Color(0xFFB42318)) }
         }
@@ -638,7 +744,7 @@ fun SinglePredictionScreen(appViewModel: AppViewModel, viewModel: SinglePredicti
 }
 
 @Composable
-fun SettingsScreen(appViewModel: AppViewModel, onBaseUrlChanged: (String) -> Unit) {
+fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocalEngine) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -649,25 +755,18 @@ fun SettingsScreen(appViewModel: AppViewModel, onBaseUrlChanged: (String) -> Uni
             Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-                    OutlinedTextField(
-                        value = appViewModel.baseUrl,
-                        onValueChange = onBaseUrlChanged,
-                        label = { Text("后端地址") },
-                        modifier = Modifier.fillMaxWidth(),
-                        singleLine = true,
-                    )
                     Text(
-                        "Android 模拟器访问电脑本机服务通常使用 http://10.0.2.2:8765；真机需要填电脑在同一局域网内的 IP。",
+                        "当前为手机本机独立模式：分析引擎已经打包进 App，不需要电脑后端，也不需要填写后端地址。生成当前期分析时，手机需要联网抓取赛程和赔率数据。",
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodyMedium,
                     )
                     Button(
-                        onClick = appViewModel::testConnection,
-                        enabled = !appViewModel.isTestingConnection && appViewModel.baseUrl.isNotBlank(),
+                        onClick = { appViewModel.testLocalEngine(localEngine) },
+                        enabled = !appViewModel.isTestingConnection,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         LoadingPrefix(appViewModel.isTestingConnection)
-                        Text(if (appViewModel.isTestingConnection) "测试中" else "测试连接")
+                        Text(if (appViewModel.isTestingConnection) "测试中" else "测试本机引擎")
                     }
                     if (appViewModel.connectionMessage.isNotBlank()) {
                         StatusCard(text = appViewModel.connectionMessage, color = Color(0xFF16845B))
@@ -682,7 +781,7 @@ fun SettingsScreen(appViewModel: AppViewModel, onBaseUrlChanged: (String) -> Uni
 }
 
 @Composable
-private fun RequestCard(appViewModel: AppViewModel, viewModel: AnalysisViewModel) {
+private fun RequestCard(localEngine: FootballLotteryLocalEngine, viewModel: AnalysisViewModel) {
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("生成分析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -706,7 +805,7 @@ private fun RequestCard(appViewModel: AppViewModel, viewModel: AnalysisViewModel
                 steps = 19,
             )
             Button(
-                onClick = { viewModel.generateAnalysis(appViewModel.baseUrl) },
+                onClick = { viewModel.generateAnalysis(localEngine) },
                 enabled = !viewModel.isLoading,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -718,7 +817,7 @@ private fun RequestCard(appViewModel: AppViewModel, viewModel: AnalysisViewModel
 }
 
 @Composable
-private fun SinglePredictionForm(appViewModel: AppViewModel, viewModel: SinglePredictionViewModel) {
+private fun SinglePredictionForm(localEngine: FootballLotteryLocalEngine, viewModel: SinglePredictionViewModel) {
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("单场预测", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -742,7 +841,7 @@ private fun SinglePredictionForm(appViewModel: AppViewModel, viewModel: SinglePr
                 OddsField("客胜", viewModel.awayOdds, viewModel::updateAwayOdds, Modifier.weight(1f))
             }
             Button(
-                onClick = { viewModel.predict(appViewModel.baseUrl) },
+                onClick = { viewModel.predict(localEngine) },
                 enabled = !viewModel.isLoading,
                 modifier = Modifier.fillMaxWidth(),
             ) {

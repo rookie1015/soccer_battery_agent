@@ -1,43 +1,23 @@
 # Football Lottery Android
 
-Android client for the football lottery analysis backend.
-
-## Run the backend for a phone
-
-From the repository root, double-click:
-
-```text
-start_mobile_backend.bat
-```
-
-Keep that window open while using the phone app. It prints backend address candidates such as `http://192.168.1.20:8765`.
+Standalone Android client for the football lottery analysis engine.
 
 ## Run the app
 
-Open `android/FootballLotteryAndroid` in Android Studio and run the `app` configuration.
+Open `android/FootballLotteryAndroid` in Android Studio and run the `app` configuration, or install the generated debug APK.
 
-Default backend URL:
+The Android app now includes the analysis engine locally through Chaquopy. You do not need to start a computer backend or enter a backend URL.
 
-```text
-http://10.0.2.2:8765
-```
+The phone still needs internet access when generating a current issue analysis, because it fetches official schedule, odds, and team information directly from the data sources.
 
-Use this value when running in the standard Android emulator. For a physical phone, use one of the addresses printed by `start_mobile_backend.bat`, for example:
-
-```text
-http://192.168.1.20:8765
-```
-
-The phone and computer must be on the same network, and Windows Firewall may need to allow Python or port `8765`.
+The Settings screen has a local engine test button for checking that the embedded engine starts correctly.
 
 ## Current features
 
 - Generate an issue analysis report.
-- Read report history from `/api/history`.
-- Open generated HTML or Markdown reports in the system browser.
+- Read report history generated on the phone.
 - Run a single-match prediction with optional 3-way odds.
-- Save the backend URL locally after editing it in Settings.
-- Test the backend connection from Settings before running analysis.
+- Test the embedded local analysis engine from Settings.
 
 ## Build from command line
 
