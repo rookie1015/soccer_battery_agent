@@ -118,15 +118,17 @@ def collect_issue(
     strength_team_ids: str | Path | None = None,
     strength_lookback: int = 20,
     strength_xg_matches: int = 8,
+    skip_context_fetches: bool = False,
+    skip_sina_details: bool = False,
 ) -> Path:
     cache = Path(cache_dir)
     source_issue, raw_matches = load_matches(source=source, seed_path=seed_path, cache_dir=cache, issue=issue)
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
-    briefings = _fetch_briefings(raw_matches, cache, offline)
-    media_briefings = _fetch_mainstream_media_briefings(raw_matches, cache, offline)
-    sina_details = _fetch_sina_details(raw_matches, cache, offline)
+    briefings = {} if skip_context_fetches else _fetch_briefings(raw_matches, cache, offline)
+    media_briefings = {} if skip_context_fetches else _fetch_mainstream_media_briefings(raw_matches, cache, offline)
+    sina_details = {} if skip_sina_details else _fetch_sina_details(raw_matches, cache, offline)
     foreign_odds_by_seq = {}
     if foreign_odds and not offline:
         from .foreign_odds import fetch_foreign_odds_for_matches

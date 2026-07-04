@@ -794,10 +794,15 @@ private fun RequestCard(localEngine: FootballLotteryLocalEngine, viewModel: Anal
                 singleLine = true,
             )
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("xG 样本场次")
+                Text("增强样本场次")
                 Spacer(modifier = Modifier.weight(1f))
                 Text(viewModel.xgMatches.toInt().toString(), fontWeight = FontWeight.Bold)
             }
+            Text(
+                "手机独立版当前优先使用快速分析；增强新闻、伤停和 xG 模型后续会做成可选开关。",
+                color = Color(0xFF667085),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Slider(
                 value = viewModel.xgMatches.toFloat(),
                 onValueChange = { viewModel.updateXgMatches(it.toDouble()) },

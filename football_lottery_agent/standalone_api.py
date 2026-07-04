@@ -46,8 +46,10 @@ def run_analysis(
         output_path=issue_path,
         issue=issue,
         cache_dir=cache_dir,
-        strength_model=bool(payload.get("strength_model", True)),
+        strength_model=False,
         strength_xg_matches=strength_xg_matches,
+        skip_context_fetches=True,
+        skip_sina_details=True,
     )
     plan = build_ticket_plan(load_issue(issue_path))
     write_report(plan, markdown_path)
