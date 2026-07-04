@@ -295,6 +295,22 @@ class SinglePredictionViewModel : ViewModel() {
             error = "请填写主队和客队。"
             return
         }
+        val oddsTexts = listOf(homeOdds.trim(), drawOdds.trim(), awayOdds.trim())
+        val hasAnyOdds = oddsTexts.any { it.isNotEmpty() }
+        val hasAllOdds = oddsTexts.all { it.isNotEmpty() }
+        if (hasAnyOdds && !hasAllOdds) {
+            error = "赔率请填写完整的主胜、平、客胜三项，或全部留空。"
+            return
+        }
+        val oddsValues = if (hasAllOdds) oddsTexts.map { it.toDoubleOrNull() } else emptyList()
+        if (oddsValues.any { it == null }) {
+            error = "赔率必须是数字。"
+            return
+        }
+        if (oddsValues.filterNotNull().any { it <= 1.0 }) {
+            error = "赔率必须大于 1.00。"
+            return
+        }
         viewModelScope.launch {
             isLoading = true
             error = ""
@@ -303,9 +319,9 @@ class SinglePredictionViewModel : ViewModel() {
                 FootballLotteryApi(baseUrl.trim()).singlePrediction(
                     home = cleanHome,
                     away = cleanAway,
-                    homeOdds = homeOdds.toDoubleOrNull(),
-                    drawOdds = drawOdds.toDoubleOrNull(),
-                    awayOdds = awayOdds.toDoubleOrNull(),
+                    homeOdds = oddsValues.getOrNull(0),
+                    drawOdds = oddsValues.getOrNull(1),
+                    awayOdds = oddsValues.getOrNull(2),
                 )
             }.onSuccess { response ->
                 result = response
