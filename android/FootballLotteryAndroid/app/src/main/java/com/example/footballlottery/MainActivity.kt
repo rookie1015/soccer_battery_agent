@@ -205,6 +205,10 @@ class AnalysisViewModel : ViewModel() {
 
     fun generateAnalysis(baseUrl: String) {
         val cleanIssue = issue.trim()
+        if (baseUrl.isBlank()) {
+            error = "请先在设置中填写后端地址。"
+            return
+        }
         if (cleanIssue.isEmpty()) {
             error = "请填写期号。"
             return
@@ -237,6 +241,10 @@ class HistoryViewModel : ViewModel() {
         private set
 
     fun refresh(baseUrl: String) {
+        if (baseUrl.isBlank()) {
+            error = "请先在设置中填写后端地址。"
+            return
+        }
         viewModelScope.launch {
             isLoading = true
             error = ""
@@ -294,6 +302,10 @@ class SinglePredictionViewModel : ViewModel() {
     fun predict(baseUrl: String) {
         val cleanHome = home.trim()
         val cleanAway = away.trim()
+        if (baseUrl.isBlank()) {
+            error = "请先在设置中填写后端地址。"
+            return
+        }
         if (cleanHome.isEmpty() || cleanAway.isEmpty()) {
             error = "请填写主队和客队。"
             return
