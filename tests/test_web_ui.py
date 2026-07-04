@@ -211,6 +211,15 @@ class WebUiTests(unittest.TestCase):
     def test_start_ui_batch_exists(self) -> None:
         self.assertTrue(Path("start_ui.bat").exists())
 
+    def test_start_mobile_backend_batch_exists(self) -> None:
+        script = Path("start_mobile_backend.bat")
+
+        self.assertTrue(script.exists())
+        content = script.read_text(encoding="utf-8")
+        self.assertIn("--host 0.0.0.0", content)
+        self.assertIn("--port %PORT%", content)
+        self.assertIn("--no-open", content)
+
     def test_history_index_paths_are_served_dynamically(self) -> None:
         self.assertTrue(web_ui._is_history_index_path("/reports/history/index.html"))
         self.assertTrue(web_ui._is_history_index_path("/reports/history/index.html?ts=1"))

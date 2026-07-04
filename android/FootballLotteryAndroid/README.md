@@ -2,13 +2,15 @@
 
 Android client for the football lottery analysis backend.
 
-## Run the backend
+## Run the backend for a phone
 
-From the repository root:
+From the repository root, double-click:
 
-```powershell
-python -m football_lottery_agent.web_ui --host 0.0.0.0 --port 8765
+```text
+start_mobile_backend.bat
 ```
+
+Keep that window open while using the phone app. It prints backend address candidates such as `http://192.168.1.20:8765`.
 
 ## Run the app
 
@@ -20,7 +22,7 @@ Default backend URL:
 http://10.0.2.2:8765
 ```
 
-Use this value when running in the standard Android emulator. For a physical phone, replace it with your computer's LAN IP, for example:
+Use this value when running in the standard Android emulator. For a physical phone, use one of the addresses printed by `start_mobile_backend.bat`, for example:
 
 ```text
 http://192.168.1.20:8765

@@ -32,6 +32,14 @@ start_ui.bat
 
 如需自动推送，在控制台勾选“每次生成后自动发送到飞书”，并填写飞书群机器人的 Webhook。Webhook 不会写入项目文件；也可以预先设置 `FEISHU_WEBHOOK_URL` 环境变量后将输入框留空。
 
+如果是给手机 App 使用，直接双击：
+
+```text
+start_mobile_backend.bat
+```
+
+这个窗口会自动列出手机 App 设置里应该填写的后端地址。保持窗口打开，手机和电脑连同一个 Wi-Fi，在 App 设置里粘贴地址后点“测试连接”。
+
 本次版本的完整功能变化见 [CHANGELOG.md](CHANGELOG.md)。
 
 如果你熟悉命令行，也可以继续使用下面的命令方式。
