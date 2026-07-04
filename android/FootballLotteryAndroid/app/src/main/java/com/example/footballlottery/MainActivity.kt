@@ -136,6 +136,7 @@ data class HistoryEntry(
     val createdAt: String,
     val htmlUrl: String,
     val markdownUrl: String,
+    val markdownText: String,
 )
 
 data class SinglePredictionResult(
@@ -373,6 +374,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 createdAt = it.optString("created_at"),
                 htmlUrl = it.optString("html_url"),
                 markdownUrl = it.optString("markdown_url"),
+                markdownText = it.optString("markdown_text"),
             )
         }
     }
@@ -495,6 +497,7 @@ class FootballLotteryApi(private val baseUrl: String) {
                 createdAt = it.optString("created_at"),
                 htmlUrl = it.optString("html_url"),
                 markdownUrl = it.optString("markdown_url"),
+                markdownText = it.optString("markdown_text"),
             )
         }
     }
@@ -995,7 +998,16 @@ private fun HistoryDetailCard(entry: HistoryEntry) {
             Text(entry.title.ifBlank { "第 ${entry.issue} 期报告" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Text("期号：${entry.issue.ifBlank { "未记录" }}", color = Color(0xFF344054))
             Text("生成时间：${entry.createdAt.ifBlank { "未记录" }}", color = Color(0xFF344054))
-            Text("这条记录已保存在手机本机历史中；点下方列表可切换查看不同期号。", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            if (entry.markdownText.isBlank()) {
+                Text("这条记录已保存在手机本机历史中；点下方列表可切换查看不同期号。", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            } else {
+                HorizontalDivider()
+                Text(
+                    text = entry.markdownText,
+                    color = Color(0xFF344054),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -1020,12 +1032,12 @@ private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String, onClick: () -
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
             Text("点击查看这条历史记录", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (entry.htmlUrl.isNotBlank()) {
+                if (isWebUrl(entry.htmlUrl)) {
                     Button(onClick = { openUrl(entry.htmlUrl) }) {
                         Text("打开 HTML")
                     }
                 }
-                if (entry.markdownUrl.isNotBlank()) {
+                if (isWebUrl(entry.markdownUrl)) {
                     Button(onClick = { openUrl(entry.markdownUrl) }) {
                         Text("打开 Markdown")
                     }
@@ -1042,6 +1054,10 @@ private fun recommendationText(prediction: MatchPrediction): String {
 
 private fun recommendationCode(prediction: MatchPrediction): String {
     return prediction.pickText.ifBlank { prediction.pickLabels.joinToString("/") }
+}
+
+private fun isWebUrl(value: String): Boolean {
+    return value.startsWith("http://") || value.startsWith("https://")
 }
 
 private fun resolveReportUrl(baseUrl: String, url: String): String {

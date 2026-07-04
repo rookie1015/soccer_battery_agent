@@ -49,7 +49,7 @@ def run_analysis(
         strength_model=False,
         strength_xg_matches=strength_xg_matches,
         skip_context_fetches=True,
-        skip_sina_details=True,
+        sina_odds_only=True,
     )
     plan = build_ticket_plan(load_issue(issue_path))
     write_report(plan, markdown_path)
@@ -77,10 +77,26 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
     entries = []
     for item in load_history_entries(history_dir):
         entry = dict(item)
-        entry["html_url"] = ""
-        entry["markdown_url"] = ""
+        markdown = str(entry.get("markdown") or "")
+        html = str(entry.get("html") or "")
+        entry["html_url"] = str((history_dir / html).resolve()) if html else ""
+        entry["markdown_url"] = str((history_dir / markdown).resolve()) if markdown else ""
+        entry["markdown_text"] = _read_history_text(history_dir, markdown)
         entries.append(entry)
     return {"ok": True, "entries": entries}
+
+
+def _read_history_text(history_dir: Path, relative_path: str) -> str:
+    if not relative_path:
+        return ""
+    path = (history_dir / relative_path).resolve()
+    try:
+        path.relative_to(history_dir.resolve())
+    except ValueError:
+        return ""
+    if not path.exists() or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def run_single_prediction(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:

@@ -120,6 +120,7 @@ def collect_issue(
     strength_xg_matches: int = 8,
     skip_context_fetches: bool = False,
     skip_sina_details: bool = False,
+    sina_odds_only: bool = False,
 ) -> Path:
     cache = Path(cache_dir)
     source_issue, raw_matches = load_matches(source=source, seed_path=seed_path, cache_dir=cache, issue=issue)
@@ -128,7 +129,12 @@ def collect_issue(
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
     briefings = {} if skip_context_fetches else _fetch_briefings(raw_matches, cache, offline)
     media_briefings = {} if skip_context_fetches else _fetch_mainstream_media_briefings(raw_matches, cache, offline)
-    sina_details = {} if skip_sina_details else _fetch_sina_details(raw_matches, cache, offline)
+    if skip_sina_details:
+        sina_details = {}
+    elif sina_odds_only:
+        sina_details = _fetch_sina_odds(raw_matches, cache, offline)
+    else:
+        sina_details = _fetch_sina_details(raw_matches, cache, offline)
     foreign_odds_by_seq = {}
     if foreign_odds and not offline:
         from .foreign_odds import fetch_foreign_odds_for_matches
@@ -273,6 +279,14 @@ def _fetch_sina_details(raw_matches: list[RawMatch], cache: Path, offline: bool)
         return {match.seq: SinaDetail(None, (), (), (), {}) for match in raw_matches}
     with ThreadPoolExecutor(max_workers=6) as executor:
         pairs = executor.map(lambda match: (match.seq, fetch_sina_detail(match, cache)), raw_matches)
+    return dict(pairs)
+
+
+def _fetch_sina_odds(raw_matches: list[RawMatch], cache: Path, offline: bool) -> dict[int, SinaDetail]:
+    if offline:
+        return {match.seq: SinaDetail(None, (), (), (), {}) for match in raw_matches}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        pairs = executor.map(lambda match: (match.seq, fetch_sina_odds_detail(match, cache)), raw_matches)
     return dict(pairs)
 
 
@@ -427,6 +441,20 @@ def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
         history_notes=history_notes,
         intelligence_notes=intelligence_notes,
         raw=raw,
+    )
+
+
+def fetch_sina_odds_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
+    if not match.match_id:
+        return SinaDetail(None, (), (), (), {})
+    raw_odds = _sina_gateway("footballMatchOddsEuro", {"matchId": match.match_id}, cache_dir)
+    odds = _average_sina_euro_odds(match.seq, raw_odds)
+    return SinaDetail(
+        odds=odds,
+        injury_notes=(),
+        history_notes=(),
+        intelligence_notes=(),
+        raw={"odds_rows": _safe_len(raw_odds), "mode": "odds_only"},
     )
 
 
