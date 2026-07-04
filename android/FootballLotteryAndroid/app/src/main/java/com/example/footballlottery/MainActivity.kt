@@ -151,9 +151,33 @@ data class SinglePredictionResult(
 class AppViewModel : ViewModel() {
     var baseUrl by mutableStateOf("http://10.0.2.2:8765")
         private set
+    var isTestingConnection by mutableStateOf(false)
+        private set
+    var connectionMessage by mutableStateOf("")
+        private set
+    var connectionError by mutableStateOf("")
+        private set
 
     fun updateBaseUrl(value: String) {
         baseUrl = value
+        connectionMessage = ""
+        connectionError = ""
+    }
+
+    fun testConnection() {
+        viewModelScope.launch {
+            isTestingConnection = true
+            connectionMessage = ""
+            connectionError = ""
+            runCatching {
+                FootballLotteryApi(baseUrl.trim()).fetchHistory()
+            }.onSuccess { entries ->
+                connectionMessage = "后端连接成功，读取到 ${entries.size} 条历史记录。"
+            }.onFailure { throwable ->
+                connectionError = throwable.message ?: "后端连接失败。"
+            }
+            isTestingConnection = false
+        }
     }
 }
 
@@ -595,6 +619,20 @@ fun SettingsScreen(appViewModel: AppViewModel, onBaseUrlChanged: (String) -> Uni
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    Button(
+                        onClick = appViewModel::testConnection,
+                        enabled = !appViewModel.isTestingConnection && appViewModel.baseUrl.isNotBlank(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        LoadingPrefix(appViewModel.isTestingConnection)
+                        Text(if (appViewModel.isTestingConnection) "测试中" else "测试连接")
+                    }
+                    if (appViewModel.connectionMessage.isNotBlank()) {
+                        StatusCard(text = appViewModel.connectionMessage, color = Color(0xFF16845B))
+                    }
+                    if (appViewModel.connectionError.isNotBlank()) {
+                        StatusCard(text = appViewModel.connectionError, color = Color(0xFFB42318))
+                    }
                 }
             }
         }

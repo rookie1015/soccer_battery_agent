@@ -35,6 +35,7 @@ The phone and computer must be on the same network, and Windows Firewall may nee
 - Open generated HTML or Markdown reports in the system browser.
 - Run a single-match prediction with optional 3-way odds.
 - Save the backend URL locally after editing it in Settings.
+- Test the backend connection from Settings before running analysis.
 
 ## Build from command line
 
