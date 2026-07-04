@@ -600,7 +600,7 @@ fun HistoryScreen(appViewModel: AppViewModel, viewModel: HistoryViewModel) {
             item { EmptyCard("暂无历史", "后端返回空列表，生成一次分析后这里会出现记录。") }
         }
         items(viewModel.entries) { entry ->
-            HistoryEntryCard(entry)
+            HistoryEntryCard(entry, appViewModel.baseUrl)
         }
     }
 }
@@ -845,10 +845,10 @@ private fun PredictionCard(prediction: MatchPrediction) {
 }
 
 @Composable
-private fun HistoryEntryCard(entry: HistoryEntry) {
+private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String) {
     val context = LocalContext.current
     fun openUrl(url: String) {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(resolveReportUrl(baseUrl, url))))
     }
 
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
@@ -872,6 +872,15 @@ private fun HistoryEntryCard(entry: HistoryEntry) {
             }
         }
     }
+}
+
+private fun resolveReportUrl(baseUrl: String, url: String): String {
+    if (url.startsWith("http://") || url.startsWith("https://")) {
+        return url
+    }
+    val cleanBase = baseUrl.trim().trimEnd('/')
+    val cleanPath = if (url.startsWith("/")) url else "/$url"
+    return cleanBase + cleanPath
 }
 
 @Composable
