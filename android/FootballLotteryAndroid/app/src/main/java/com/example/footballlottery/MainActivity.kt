@@ -6,6 +6,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -228,6 +229,8 @@ class HistoryViewModel : ViewModel() {
         private set
     var entries by mutableStateOf<List<HistoryEntry>>(emptyList())
         private set
+    var selectedEntry by mutableStateOf<HistoryEntry?>(null)
+        private set
 
     fun refresh(engine: FootballLotteryLocalEngine) {
         viewModelScope.launch {
@@ -237,12 +240,17 @@ class HistoryViewModel : ViewModel() {
                 engine.fetchHistory()
             }.onSuccess { response ->
                 entries = response
+                selectedEntry = response.firstOrNull()
                 hasLoaded = true
             }.onFailure { throwable ->
                 error = throwable.message ?: "读取历史记录失败。"
             }
             isLoading = false
         }
+    }
+
+    fun select(entry: HistoryEntry) {
+        selectedEntry = entry
     }
 }
 
@@ -627,7 +635,12 @@ fun FootballLotteryApp(
                 AppTab.entries.forEach { tab ->
                     NavigationBarItem(
                         selected = selectedTab == tab,
-                        onClick = { selectedTab = tab },
+                        onClick = {
+                            selectedTab = tab
+                            if (tab == AppTab.History && !historyViewModel.isLoading) {
+                                historyViewModel.refresh(localEngine)
+                            }
+                        },
                         label = { Text(tab.label) },
                         icon = { Text(tab.label.take(1), fontWeight = FontWeight.Bold) },
                     )
@@ -717,8 +730,11 @@ fun HistoryScreen(localEngine: FootballLotteryLocalEngine, viewModel: HistoryVie
         if (viewModel.entries.isEmpty() && !viewModel.isLoading) {
             item { EmptyCard("暂无历史", "生成一次分析后这里会出现本机记录。") }
         }
+        viewModel.selectedEntry?.let { entry ->
+            item { HistoryDetailCard(entry) }
+        }
         items(viewModel.entries) { entry ->
-            HistoryEntryCard(entry, "")
+            HistoryEntryCard(entry, "", onClick = { viewModel.select(entry) })
         }
     }
 }
@@ -946,11 +962,22 @@ private fun PredictionCard(prediction: MatchPrediction) {
                         color = Color(0xFF667085),
                     )
                 }
-                Text(prediction.pickText, color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
+                Text(recommendationCode(prediction), color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
             }
+            Text(
+                text = recommendationText(prediction),
+                color = Color(0xFFB42318),
+                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleSmall,
+            )
             ProbabilityLine("主胜", prediction.probabilities.home, Color(0xFFB42318))
             ProbabilityLine("平", prediction.probabilities.draw, Color(0xFF2364AA))
             ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
+            Text(
+                text = "置信度 ${"%.1f".format(prediction.confidence)}% · 风险 ${prediction.risk}",
+                color = Color(0xFF667085),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Text(
                 text = "比分倾向：" + prediction.scorelines.joinToString("，") { "${it.score} ${"%.1f".format(it.probability)}%" },
                 style = MaterialTheme.typography.bodySmall,
@@ -961,19 +988,37 @@ private fun PredictionCard(prediction: MatchPrediction) {
 }
 
 @Composable
-private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String) {
+private fun HistoryDetailCard(entry: HistoryEntry) {
+    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0FB))) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("当前选中", color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
+            Text(entry.title.ifBlank { "第 ${entry.issue} 期报告" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            Text("期号：${entry.issue.ifBlank { "未记录" }}", color = Color(0xFF344054))
+            Text("生成时间：${entry.createdAt.ifBlank { "未记录" }}", color = Color(0xFF344054))
+            Text("这条记录已保存在手机本机历史中；点下方列表可切换查看不同期号。", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+        }
+    }
+}
+
+@Composable
+private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String, onClick: () -> Unit) {
     val context = LocalContext.current
     fun openUrl(url: String) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(resolveReportUrl(baseUrl, url))))
     }
 
-    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        modifier = Modifier.clickable(onClick = onClick),
+    ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(entry.title.ifBlank { "第 ${entry.issue} 期报告" }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 Text(entry.kind.ifBlank { "report" }, color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
             }
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            Text("点击查看这条历史记录", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (entry.htmlUrl.isNotBlank()) {
                     Button(onClick = { openUrl(entry.htmlUrl) }) {
@@ -988,6 +1033,15 @@ private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String) {
             }
         }
     }
+}
+
+private fun recommendationText(prediction: MatchPrediction): String {
+    val labels = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }
+    return "建议选择：${labels.joinToString(" / ")}（${prediction.pickText}）"
+}
+
+private fun recommendationCode(prediction: MatchPrediction): String {
+    return prediction.pickText.ifBlank { prediction.pickLabels.joinToString("/") }
 }
 
 private fun resolveReportUrl(baseUrl: String, url: String): String {
