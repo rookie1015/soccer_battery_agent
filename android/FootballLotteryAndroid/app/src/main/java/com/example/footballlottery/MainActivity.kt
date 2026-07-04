@@ -229,6 +229,8 @@ class AnalysisViewModel : ViewModel() {
 class HistoryViewModel : ViewModel() {
     var isLoading by mutableStateOf(false)
         private set
+    var hasLoaded by mutableStateOf(false)
+        private set
     var error by mutableStateOf("")
         private set
     var entries by mutableStateOf<List<HistoryEntry>>(emptyList())
@@ -242,6 +244,7 @@ class HistoryViewModel : ViewModel() {
                 FootballLotteryApi(baseUrl.trim()).fetchHistory()
             }.onSuccess { response ->
                 entries = response
+                hasLoaded = true
             }.onFailure { throwable ->
                 error = throwable.message ?: "读取历史记录失败。"
             }
@@ -564,6 +567,12 @@ fun AnalysisScreen(appViewModel: AppViewModel, viewModel: AnalysisViewModel) {
 
 @Composable
 fun HistoryScreen(appViewModel: AppViewModel, viewModel: HistoryViewModel) {
+    LaunchedEffect(appViewModel.baseUrl) {
+        if (!viewModel.hasLoaded && !viewModel.isLoading) {
+            viewModel.refresh(appViewModel.baseUrl)
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
