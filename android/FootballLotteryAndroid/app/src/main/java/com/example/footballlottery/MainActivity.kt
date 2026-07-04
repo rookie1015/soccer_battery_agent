@@ -170,9 +170,9 @@ class AppViewModel : ViewModel() {
             connectionMessage = ""
             connectionError = ""
             runCatching {
-                FootballLotteryApi(baseUrl.trim()).fetchHistory()
-            }.onSuccess { entries ->
-                connectionMessage = "后端连接成功，读取到 ${entries.size} 条历史记录。"
+                FootballLotteryApi(baseUrl.trim()).healthCheck()
+            }.onSuccess { service ->
+                connectionMessage = "后端连接成功：$service。"
             }.onFailure { throwable ->
                 connectionError = throwable.message ?: "后端连接失败。"
             }
@@ -337,6 +337,11 @@ class SinglePredictionViewModel : ViewModel() {
 }
 
 class FootballLotteryApi(private val baseUrl: String) {
+    suspend fun healthCheck(): String = withContext(Dispatchers.IO) {
+        val json = requestJson("GET", "/api/health")
+        json.optString("service", "football-lottery-agent")
+    }
+
     suspend fun generateAnalysis(issue: String, xgMatches: Int): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)

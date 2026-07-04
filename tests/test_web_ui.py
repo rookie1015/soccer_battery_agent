@@ -32,6 +32,12 @@ class WebUiTests(unittest.TestCase):
         self.assertIn("updateReviewMode", html)
         self.assertIn('].join("\\n");', html)
 
+    def test_health_endpoint_payload(self) -> None:
+        self.assertEqual(
+            web_ui._run_health(),
+            {"ok": True, "service": "football-lottery-agent"},
+        )
+
     def test_single_prediction_uses_collected_match_data(self) -> None:
         match = web_ui.Match(
             seq=1,

@@ -500,6 +500,9 @@ def _handler(root: Path):
             if path in {"/", "/index.html"}:
                 self._send_html(render_ui())
                 return
+            if path == "/api/health":
+                self._send_json(_run_health())
+                return
             if path == "/api/history":
                 self._send_json(_run_history())
                 return
@@ -592,6 +595,10 @@ def _run_history(history_dir: Path = Path("reports/history")) -> dict[str, objec
             entry["markdown_url"] = _url_for(history_dir / entry["markdown"])
         entries.append(entry)
     return {"ok": True, "entries": entries}
+
+
+def _run_health() -> dict[str, object]:
+    return {"ok": True, "service": "football-lottery-agent"}
 
 
 def _run_analysis(payload: dict[str, object]) -> dict[str, object]:
