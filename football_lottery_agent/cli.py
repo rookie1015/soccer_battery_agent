@@ -117,6 +117,7 @@ def _add_collect_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--cache-dir", default="data/cache", help="HTTP cache directory.")
     parser.add_argument("--offline", action="store_true", help="Skip news/history network collection.")
     parser.add_argument("--foreign-odds", action="store_true", help="Use foreign bookmaker odds from The Odds API.")
+    parser.add_argument("--foreign-odds-api-key", help="The Odds API key. Defaults to THE_ODDS_API_KEY environment variable.")
     parser.add_argument("--foreign-odds-regions", default="uk,eu", help="The Odds API regions, for example uk,eu,us.")
     parser.add_argument("--foreign-odds-bookmakers", default="", help="Comma-separated bookmaker keys. Empty means API region defaults.")
     parser.add_argument("--foreign-odds-sports", default="", help="Comma-separated The Odds API sport keys.")
@@ -136,6 +137,7 @@ def _collect_from_args(args: argparse.Namespace, output_path: Path) -> Path:
         cache_dir=Path(args.cache_dir),
         offline=args.offline,
         foreign_odds=args.foreign_odds,
+        foreign_odds_api_key=args.foreign_odds_api_key,
         foreign_odds_regions=args.foreign_odds_regions,
         foreign_odds_bookmakers=args.foreign_odds_bookmakers,
         foreign_odds_sports=args.foreign_odds_sports,

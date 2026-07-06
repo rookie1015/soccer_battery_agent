@@ -1,4 +1,5 @@
 import unittest
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
 
@@ -97,6 +98,35 @@ class CollectorTests(unittest.TestCase):
         metadata = fetch_sporttery_issue_metadata("26089", Path("data/cache"))
 
         self.assertEqual(metadata["purchase_deadline"], "2026-06-29 22:00:00")
+
+    @patch("football_lottery_agent.polymarket.fetch_polymarket_signals_for_matches", return_value={})
+    @patch("football_lottery_agent.collectors.fetch_sporttery_issue_metadata", return_value={})
+    @patch("football_lottery_agent.collectors._fetch_sina_details", return_value={})
+    @patch("football_lottery_agent.collectors._fetch_mainstream_media_briefings", return_value={})
+    @patch("football_lottery_agent.collectors._fetch_briefings", return_value={})
+    @patch("football_lottery_agent.collectors.load_matches")
+    def test_collect_issue_fetches_polymarket_only_for_full_context(
+        self,
+        load_matches_mock,
+        _briefings_mock,
+        _media_mock,
+        _sina_mock,
+        _metadata_mock,
+        polymarket_mock,
+    ) -> None:
+        load_matches_mock.return_value = (
+            "26090",
+            [RawMatch(seq=index, kickoff="2026-07-05T01:00:00", league="世界杯", home=f"主队{index}", away=f"客队{index}") for index in range(1, 15)],
+        )
+
+        with TemporaryDirectory() as tmp:
+            collect_path = Path(tmp) / "issue.json"
+            from football_lottery_agent.collectors import collect_issue
+
+            collect_issue(collect_path, issue="26090", cache_dir=Path(tmp) / "cache", skip_context_fetches=False)
+            collect_issue(collect_path, issue="26090", cache_dir=Path(tmp) / "cache", skip_context_fetches=True)
+
+        self.assertEqual(polymarket_mock.call_count, 1)
 
 
 if __name__ == "__main__":

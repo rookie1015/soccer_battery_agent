@@ -6,6 +6,7 @@ from football_lottery_agent.standalone_api import (
     run_analysis,
     run_health,
     run_history,
+    run_review,
     run_single_prediction,
 )
 
@@ -20,6 +21,10 @@ def analysis(payload_json: str, work_dir: str) -> str:
 
 def history(work_dir: str) -> str:
     return _json(run_history(work_dir))
+
+
+def review(payload_json: str, work_dir: str) -> str:
+    return _json(run_review(json.loads(payload_json), work_dir))
 
 
 def single_prediction(payload_json: str, work_dir: str) -> str:

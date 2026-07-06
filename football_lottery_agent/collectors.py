@@ -111,6 +111,7 @@ def collect_issue(
     cache_dir: str | Path = "data/cache",
     offline: bool = False,
     foreign_odds: bool = False,
+    foreign_odds_api_key: str | None = None,
     foreign_odds_regions: str = "uk,eu",
     foreign_odds_bookmakers: str = "",
     foreign_odds_sports: str = "",
@@ -142,6 +143,7 @@ def collect_issue(
         foreign_odds_by_seq = fetch_foreign_odds_for_matches(
             raw_matches,
             cache_dir=cache,
+            api_key=foreign_odds_api_key,
             regions=foreign_odds_regions,
             bookmakers=foreign_odds_bookmakers,
             sport_keys=tuple(item.strip() for item in foreign_odds_sports.split(",") if item.strip()),
@@ -157,6 +159,11 @@ def collect_issue(
             lookback=strength_lookback,
             xg_matches=strength_xg_matches,
         )
+    polymarket_by_seq = {}
+    if not skip_context_fetches and not offline:
+        from .polymarket import fetch_polymarket_signals_for_matches
+
+        polymarket_by_seq = fetch_polymarket_signals_for_matches(raw_matches, cache_dir=cache)
     matches: list[dict[str, Any]] = []
     for item in raw_matches:
         detail = sina_details.get(item.seq, SinaDetail(None, (), (), (), {}))
@@ -179,10 +186,12 @@ def collect_issue(
             foreign_notes.append("外盘赔率：未匹配到国外 bookmaker 数据，保留国内/新浪赔率。")
         strength = strength_by_seq.get(item.seq)
         strength_notes = _strength_notes(strength) if strength else []
+        polymarket = polymarket_by_seq.get(item.seq)
+        polymarket_notes = _polymarket_notes(polymarket)
         media_notes = _mainstream_media_notes(media_items)
         has_real_odds = item.seq in odds_by_seq or foreign is not None or detail.odds is not None
         notes = _build_notes(item, news, injury_news, history + history_notes, has_odds=has_real_odds)
-        notes[3:3] = injury_notes + intelligence_notes + media_notes + foreign_notes + strength_notes
+        notes[3:3] = injury_notes + intelligence_notes + media_notes + foreign_notes + polymarket_notes + strength_notes
         odds = odds_by_seq.get(item.seq) or (foreign.odds if foreign else None) or detail.odds or OddsRow(item.seq, 2.35, 3.15, 2.95)
         odds_source = "csv"
         if item.seq not in odds_by_seq:
@@ -208,6 +217,7 @@ def collect_issue(
                     "history": history,
                     "sina_detail": detail.raw,
                     "foreign_odds": foreign.raw if foreign else {},
+                    "polymarket": polymarket.raw if polymarket else {},
                     "strength_model": _strength_source(strength),
                     "odds": odds_source,
                 },
@@ -829,6 +839,18 @@ def _strength_notes(strength: Any) -> list[str]:
     if not notes:
         notes.append("实力模型：FotMob 未匹配到球队或近期样本不足。")
     return notes[:8]
+
+
+def _polymarket_notes(signal: Any) -> list[str]:
+    if not signal:
+        return []
+    volume = getattr(signal, "volume", 0.0)
+    volume_text = f"，成交量约 ${volume:,.0f}" if volume else ""
+    question = getattr(signal, "question", "")
+    summary = getattr(signal, "probability_summary", "")
+    if not question or not summary:
+        return []
+    return [f"Polymarket预测市场：{question}；市场概率 {summary}{volume_text}。"]
 
 
 def _strength_source(strength: Any) -> dict[str, Any]:

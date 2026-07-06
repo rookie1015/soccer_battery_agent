@@ -1,5 +1,6 @@
 package com.example.footballlottery
 
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -23,8 +24,12 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -49,6 +54,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
@@ -79,10 +85,13 @@ class MainActivity : ComponentActivity() {
 
 private enum class AppTab(val label: String) {
     Analysis("分析"),
-    History("历史"),
+    Review("复盘"),
     Single("单场"),
     Settings("设置"),
 }
+
+private const val SETTINGS_PREFS = "football_lottery_settings"
+private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
 
 data class AnalysisReport(
     val issue: String,
@@ -115,6 +124,10 @@ data class MatchPrediction(
     val probabilities: OutcomeProbabilities,
     val scorelines: List<ScorelinePrediction>,
     val reasons: List<String>,
+    val finalScore: String,
+    val finalResult: String,
+    val finalResultLabel: String,
+    val outcomeHit: Boolean,
 )
 
 data class OutcomeProbabilities(
@@ -137,6 +150,14 @@ data class HistoryEntry(
     val htmlUrl: String,
     val markdownUrl: String,
     val markdownText: String,
+    val report: AnalysisReport?,
+)
+
+data class HistoryGroup(
+    val key: String,
+    val issue: String,
+    val kind: String,
+    val entries: List<HistoryEntry>,
 )
 
 data class SinglePredictionResult(
@@ -158,6 +179,30 @@ class AppViewModel : ViewModel() {
         private set
     var connectionError by mutableStateOf("")
         private set
+    var theOddsApiKey by mutableStateOf("")
+        private set
+    var settingsMessage by mutableStateOf("")
+        private set
+
+    fun loadSettings(context: Context) {
+        val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        theOddsApiKey = prefs.getString(PREF_THE_ODDS_API_KEY, "").orEmpty()
+    }
+
+    fun updateTheOddsApiKey(value: String) {
+        theOddsApiKey = value
+        settingsMessage = ""
+    }
+
+    fun saveSettings(context: Context) {
+        val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        val cleanApiKey = theOddsApiKey.trim()
+        prefs.edit()
+            .putString(PREF_THE_ODDS_API_KEY, cleanApiKey)
+            .apply()
+        theOddsApiKey = cleanApiKey
+        settingsMessage = "外盘设置已保存。"
+    }
 
     fun testLocalEngine(engine: FootballLotteryLocalEngine) {
         viewModelScope.launch {
@@ -181,6 +226,8 @@ class AnalysisViewModel : ViewModel() {
         private set
     var xgMatches by mutableDoubleStateOf(8.0)
         private set
+    var fullAnalysis by mutableStateOf(false)
+        private set
     var isLoading by mutableStateOf(false)
         private set
     var message by mutableStateOf("")
@@ -198,8 +245,13 @@ class AnalysisViewModel : ViewModel() {
         xgMatches = value
     }
 
-    fun generateAnalysis(engine: FootballLotteryLocalEngine) {
+    fun updateFullAnalysis(value: Boolean) {
+        fullAnalysis = value
+    }
+
+    fun generateAnalysis(engine: FootballLotteryLocalEngine, foreignOddsApiKey: String) {
         val cleanIssue = issue.trim()
+        val cleanForeignOddsApiKey = foreignOddsApiKey.trim()
         if (cleanIssue.isEmpty()) {
             error = "请填写期号。"
             return
@@ -209,7 +261,13 @@ class AnalysisViewModel : ViewModel() {
             error = ""
             message = ""
             runCatching {
-                engine.generateAnalysis(cleanIssue, xgMatches.toInt())
+                engine.generateAnalysis(
+                    issue = cleanIssue,
+                    xgMatches = xgMatches.toInt(),
+                    fullAnalysis = fullAnalysis,
+                    foreignOdds = fullAnalysis && cleanForeignOddsApiKey.isNotEmpty(),
+                    foreignOddsApiKey = cleanForeignOddsApiKey,
+                )
             }.onSuccess { response ->
                 report = response
                 message = "${response.issue} 分析报告已生成。"
@@ -232,6 +290,8 @@ class HistoryViewModel : ViewModel() {
         private set
     var selectedEntry by mutableStateOf<HistoryEntry?>(null)
         private set
+    var expandedGroups by mutableStateOf<Set<String>>(emptySet())
+        private set
 
     fun refresh(engine: FootballLotteryLocalEngine) {
         viewModelScope.launch {
@@ -240,8 +300,11 @@ class HistoryViewModel : ViewModel() {
             runCatching {
                 engine.fetchHistory()
             }.onSuccess { response ->
+                val previousSelection = selectedEntry
                 entries = response
-                selectedEntry = response.firstOrNull()
+                selectedEntry = response.firstOrNull { it.id == previousSelection?.id }
+                val availableGroups = response.map { historyGroupKey(it) }.toSet()
+                expandedGroups = expandedGroups.intersect(availableGroups)
                 hasLoaded = true
             }.onFailure { throwable ->
                 error = throwable.message ?: "读取历史记录失败。"
@@ -252,6 +315,70 @@ class HistoryViewModel : ViewModel() {
 
     fun select(entry: HistoryEntry) {
         selectedEntry = entry
+        expandedGroups = expandedGroups + historyGroupKey(entry)
+    }
+
+    fun toggleGroup(key: String) {
+        expandedGroups = if (key in expandedGroups) {
+            expandedGroups - key
+        } else {
+            expandedGroups + key
+        }
+    }
+}
+
+class ReviewViewModel : ViewModel() {
+    var issue by mutableStateOf("26090")
+        private set
+    var autoResults by mutableStateOf(true)
+        private set
+    var resultsCsv by mutableStateOf("seq,score\n1,1-0\n2,0-0")
+        private set
+    var isLoading by mutableStateOf(false)
+        private set
+    var message by mutableStateOf("")
+        private set
+    var error by mutableStateOf("")
+        private set
+    var report by mutableStateOf<AnalysisReport?>(null)
+        private set
+
+    fun updateIssue(value: String) {
+        issue = value
+    }
+
+    fun updateAutoResults(value: Boolean) {
+        autoResults = value
+    }
+
+    fun updateResultsCsv(value: String) {
+        resultsCsv = value
+    }
+
+    fun generateReview(engine: FootballLotteryLocalEngine) {
+        val cleanIssue = issue.trim()
+        if (cleanIssue.isEmpty()) {
+            error = "请填写期号。"
+            return
+        }
+        if (!autoResults && resultsCsv.trim().isEmpty()) {
+            error = "请粘贴赛果 CSV，或打开自动拉取赛果。"
+            return
+        }
+        viewModelScope.launch {
+            isLoading = true
+            error = ""
+            message = ""
+            runCatching {
+                engine.generateReview(cleanIssue, autoResults, resultsCsv)
+            }.onSuccess { response ->
+                report = response
+                message = "${response.issue} 复盘报告已生成。"
+            }.onFailure { throwable ->
+                error = throwable.message ?: "生成复盘报告失败。"
+            }
+            isLoading = false
+        }
     }
 }
 
@@ -348,11 +475,20 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         json.optString("service", "football-lottery-agent-local")
     }
 
-    suspend fun generateAnalysis(issue: String, xgMatches: Int): AnalysisReport = withContext(Dispatchers.IO) {
+    suspend fun generateAnalysis(
+        issue: String,
+        xgMatches: Int,
+        fullAnalysis: Boolean,
+        foreignOdds: Boolean,
+        foreignOddsApiKey: String,
+    ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("strength_model", true)
             .put("strength_xg_matches", xgMatches)
+            .put("full_analysis", fullAnalysis)
+            .put("foreign_odds", foreignOdds)
+            .put("foreign_odds_api_key", foreignOddsApiKey)
         val json = JSONObject(bridge.callAttr("analysis", body.toString(), workDir).toString())
         if (!json.optBoolean("ok", false)) {
             throw IllegalStateException(json.optString("error", "本机分析失败。"))
@@ -375,8 +511,21 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 htmlUrl = it.optString("html_url"),
                 markdownUrl = it.optString("markdown_url"),
                 markdownText = it.optString("markdown_text"),
+                report = it.optJSONObject("report")?.let { reportJson -> parseReport(reportJson) },
             )
         }
+    }
+
+    suspend fun generateReview(issue: String, autoResults: Boolean, resultsCsv: String): AnalysisReport = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("issue", issue)
+            .put("auto_results", autoResults)
+            .put("results_csv", resultsCsv)
+        val json = JSONObject(bridge.callAttr("review", body.toString(), workDir).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "本机复盘失败。"))
+        }
+        parseReport(json.getJSONObject("report"))
     }
 
     suspend fun singlePrediction(
@@ -442,6 +591,10 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 )
             },
             reasons = json.optJSONArray("reasons").orEmptyArray().toStringList(),
+            finalScore = json.optString("final_score"),
+            finalResult = json.optString("final_result"),
+            finalResultLabel = json.optString("final_result_label"),
+            outcomeHit = json.optBoolean("outcome_hit"),
         )
     }
 
@@ -476,11 +629,20 @@ class FootballLotteryApi(private val baseUrl: String) {
         json.optString("service", "football-lottery-agent")
     }
 
-    suspend fun generateAnalysis(issue: String, xgMatches: Int): AnalysisReport = withContext(Dispatchers.IO) {
+    suspend fun generateAnalysis(
+        issue: String,
+        xgMatches: Int,
+        fullAnalysis: Boolean,
+        foreignOdds: Boolean,
+        foreignOddsApiKey: String,
+    ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
-            .put("strength_model", true)
+            .put("strength_model", fullAnalysis)
             .put("strength_xg_matches", xgMatches)
+            .put("full_analysis", fullAnalysis)
+            .put("foreign_odds", foreignOdds)
+            .put("foreign_odds_api_key", foreignOddsApiKey)
             .put("no_history", false)
         val json = requestJson("POST", "/api/analysis", body)
         parseReport(json.getJSONObject("report"))
@@ -498,8 +660,19 @@ class FootballLotteryApi(private val baseUrl: String) {
                 htmlUrl = it.optString("html_url"),
                 markdownUrl = it.optString("markdown_url"),
                 markdownText = it.optString("markdown_text"),
+                report = it.optJSONObject("report")?.let { reportJson -> parseReport(reportJson) },
             )
         }
+    }
+
+    suspend fun generateReview(issue: String, autoResults: Boolean, resultsCsv: String): AnalysisReport = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("issue", issue)
+            .put("auto_results", autoResults)
+            .put("results_csv", resultsCsv)
+            .put("no_history", false)
+        val json = requestJson("POST", "/api/review", body)
+        parseReport(json.getJSONObject("report"))
     }
 
     suspend fun singlePrediction(
@@ -593,6 +766,10 @@ class FootballLotteryApi(private val baseUrl: String) {
                 )
             },
             reasons = json.optJSONArray("reasons").orEmptyArray().toStringList(),
+            finalScore = json.optString("final_score"),
+            finalResult = json.optString("final_result"),
+            finalResultLabel = json.optString("final_result_label"),
+            outcomeHit = json.optBoolean("outcome_hit"),
         )
     }
 
@@ -625,12 +802,18 @@ class FootballLotteryApi(private val baseUrl: String) {
 fun FootballLotteryApp(
     appViewModel: AppViewModel = viewModel(),
     analysisViewModel: AnalysisViewModel = viewModel(),
-    historyViewModel: HistoryViewModel = viewModel(),
+    analysisHistoryViewModel: HistoryViewModel = viewModel(key = "analysisHistory"),
+    reviewViewModel: ReviewViewModel = viewModel(),
+    reviewHistoryViewModel: HistoryViewModel = viewModel(key = "reviewHistory"),
     singleViewModel: SinglePredictionViewModel = viewModel(),
 ) {
     val context = LocalContext.current
     val localEngine = remember(context) { FootballLotteryLocalEngine(context.applicationContext) }
     var selectedTab by remember { mutableStateOf(AppTab.Analysis) }
+
+    LaunchedEffect(Unit) {
+        appViewModel.loadSettings(context.applicationContext)
+    }
 
     Scaffold(
         bottomBar = {
@@ -640,9 +823,6 @@ fun FootballLotteryApp(
                         selected = selectedTab == tab,
                         onClick = {
                             selectedTab = tab
-                            if (tab == AppTab.History && !historyViewModel.isLoading) {
-                                historyViewModel.refresh(localEngine)
-                            }
                         },
                         label = { Text(tab.label) },
                         icon = { Text(tab.label.take(1), fontWeight = FontWeight.Bold) },
@@ -658,8 +838,8 @@ fun FootballLotteryApp(
             color = Color(0xFFF4F6FA),
         ) {
             when (selectedTab) {
-                AppTab.Analysis -> AnalysisScreen(localEngine, analysisViewModel)
-                AppTab.History -> HistoryScreen(localEngine, historyViewModel)
+                AppTab.Analysis -> AnalysisScreen(localEngine, analysisViewModel, analysisHistoryViewModel, appViewModel)
+                AppTab.Review -> ReviewScreen(localEngine, reviewViewModel, reviewHistoryViewModel)
                 AppTab.Single -> SinglePredictionScreen(localEngine, singleViewModel)
                 AppTab.Settings -> SettingsScreen(
                     appViewModel = appViewModel,
@@ -672,43 +852,90 @@ fun FootballLotteryApp(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AnalysisScreen(localEngine: FootballLotteryLocalEngine, viewModel: AnalysisViewModel) {
+fun AnalysisScreen(
+    localEngine: FootballLotteryLocalEngine,
+    viewModel: AnalysisViewModel,
+    historyViewModel: HistoryViewModel,
+    appViewModel: AppViewModel,
+) {
+    LaunchedEffect(viewModel.report?.issue) {
+        if (viewModel.report != null) {
+            historyViewModel.refresh(localEngine)
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item { RequestCard(localEngine, viewModel) }
+        item { RequestCard(localEngine, viewModel, appViewModel) }
         if (viewModel.error.isNotBlank()) {
             item { StatusCard(text = viewModel.error, color = Color(0xFFB42318)) }
         }
         if (viewModel.message.isNotBlank()) {
             item { StatusCard(text = viewModel.message, color = Color(0xFF16845B)) }
         }
-        viewModel.report?.let { report ->
-            item { SummaryCard(report) }
-            item {
-                Text(
-                    text = "逐场预测",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-            }
-            items(report.predictions) { prediction ->
-                PredictionCard(prediction)
-            }
-        } ?: item {
-            EmptyCard("等待生成", "填写期号后直接在手机本机生成分析。")
+        item {
+            HistorySection(
+                localEngine = localEngine,
+                viewModel = historyViewModel,
+                kind = "analysis",
+                title = "历史分析报告",
+            )
         }
     }
 }
 
 @Composable
-fun HistoryScreen(localEngine: FootballLotteryLocalEngine, viewModel: HistoryViewModel) {
+private fun HistorySection(
+    localEngine: FootballLotteryLocalEngine,
+    viewModel: HistoryViewModel,
+    kind: String,
+    title: String,
+) {
     LaunchedEffect(Unit) {
         if (!viewModel.hasLoaded && !viewModel.isLoading) {
             viewModel.refresh(localEngine)
+        }
+    }
+
+    val entries = viewModel.entries.filter { it.kind == kind }
+    val selectedEntry = viewModel.selectedEntry?.takeIf { it.kind == kind }
+
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        HeaderCard(
+            title = title,
+            subtitle = "读取手机本机生成过的${kindLabel(kind)}记录。",
+            buttonText = if (viewModel.isLoading) "读取中" else "刷新",
+            buttonEnabled = !viewModel.isLoading,
+            onClick = { viewModel.refresh(localEngine) },
+        )
+        if (viewModel.error.isNotBlank()) {
+            StatusCard(text = viewModel.error, color = Color(0xFFB42318))
+        }
+        historyGroups(entries).forEach { group ->
+            HistoryGroupCard(
+                group = group,
+                selectedEntry = selectedEntry,
+                expanded = group.key in viewModel.expandedGroups,
+                onToggle = { viewModel.toggleGroup(group.key) },
+                onSelect = { viewModel.select(it) },
+            )
+        }
+    }
+}
+
+@Composable
+fun ReviewScreen(
+    localEngine: FootballLotteryLocalEngine,
+    viewModel: ReviewViewModel,
+    historyViewModel: HistoryViewModel,
+) {
+    LaunchedEffect(viewModel.report?.issue) {
+        if (viewModel.report != null) {
+            historyViewModel.refresh(localEngine)
         }
     }
 
@@ -718,26 +945,20 @@ fun HistoryScreen(localEngine: FootballLotteryLocalEngine, viewModel: HistoryVie
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        item {
-            HeaderCard(
-                title = "历史报告",
-                subtitle = "读取手机本机生成过的分析记录。",
-                buttonText = if (viewModel.isLoading) "读取中" else "刷新",
-                buttonEnabled = !viewModel.isLoading,
-                onClick = { viewModel.refresh(localEngine) },
-            )
-        }
+        item { ReviewRequestCard(localEngine, viewModel) }
         if (viewModel.error.isNotBlank()) {
             item { StatusCard(text = viewModel.error, color = Color(0xFFB42318)) }
         }
-        if (viewModel.entries.isEmpty() && !viewModel.isLoading) {
-            item { EmptyCard("暂无历史", "生成一次分析后这里会出现本机记录。") }
+        if (viewModel.message.isNotBlank()) {
+            item { StatusCard(text = viewModel.message, color = Color(0xFF16845B)) }
         }
-        viewModel.selectedEntry?.let { entry ->
-            item { HistoryDetailCard(entry) }
-        }
-        items(viewModel.entries) { entry ->
-            HistoryEntryCard(entry, "", onClick = { viewModel.select(entry) })
+        item {
+            HistorySection(
+                localEngine = localEngine,
+                viewModel = historyViewModel,
+                kind = "review",
+                title = "历史复盘报告",
+            )
         }
     }
 }
@@ -756,14 +977,13 @@ fun SinglePredictionScreen(localEngine: FootballLotteryLocalEngine, viewModel: S
         }
         viewModel.result?.let { result ->
             item { SinglePredictionResultCard(result) }
-        } ?: item {
-            EmptyCard("单场预测", "输入主队和客队，可选填写竞彩赔率。")
         }
     }
 }
 
 @Composable
 fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocalEngine) {
+    val context = LocalContext.current
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -779,6 +999,24 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodyMedium,
                     )
+                    OutlinedTextField(
+                        value = appViewModel.theOddsApiKey,
+                        onValueChange = appViewModel::updateTheOddsApiKey,
+                        label = { Text("The Odds API Key") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    Button(
+                        onClick = { appViewModel.saveSettings(context.applicationContext) },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("保存外盘设置")
+                    }
+                    if (appViewModel.settingsMessage.isNotBlank()) {
+                        StatusCard(text = appViewModel.settingsMessage, color = Color(0xFF16845B))
+                    }
                     Button(
                         onClick = { appViewModel.testLocalEngine(localEngine) },
                         enabled = !appViewModel.isTestingConnection,
@@ -799,26 +1037,42 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun RequestCard(localEngine: FootballLotteryLocalEngine, viewModel: AnalysisViewModel) {
+private fun RequestCard(
+    localEngine: FootballLotteryLocalEngine,
+    viewModel: AnalysisViewModel,
+    appViewModel: AppViewModel,
+) {
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("生成分析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            OutlinedTextField(
-                value = viewModel.issue,
-                onValueChange = viewModel::updateIssue,
-                label = { Text("期号") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = viewModel.issue,
+                    onValueChange = viewModel::updateIssue,
+                    label = { Text("期号") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                )
+                AnalysisModeDropdown(
+                    fullAnalysis = viewModel.fullAnalysis,
+                    onFullAnalysisChange = viewModel::updateFullAnalysis,
+                    modifier = Modifier.weight(1f),
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("增强样本场次")
                 Spacer(modifier = Modifier.weight(1f))
                 Text(viewModel.xgMatches.toInt().toString(), fontWeight = FontWeight.Bold)
             }
             Text(
-                "手机独立版当前优先使用快速分析；增强新闻、伤停和 xG 模型后续会做成可选开关。",
+                if (viewModel.fullAnalysis) {
+                    "完整分析会抓取新闻、伤停、交锋、实力模型、Polymarket 和已保存的外盘赔率，生成会明显变慢。"
+                } else {
+                    "简单分析只抓取赛程和轻量赔率，生成更快。"
+                },
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -829,13 +1083,61 @@ private fun RequestCard(localEngine: FootballLotteryLocalEngine, viewModel: Anal
                 steps = 19,
             )
             Button(
-                onClick = { viewModel.generateAnalysis(localEngine) },
+                onClick = { viewModel.generateAnalysis(localEngine, appViewModel.theOddsApiKey) },
                 enabled = !viewModel.isLoading,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 LoadingPrefix(viewModel.isLoading)
                 Text(if (viewModel.isLoading) "生成中" else "生成分析报告")
             }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AnalysisModeDropdown(
+    fullAnalysis: Boolean,
+    onFullAnalysisChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedText = if (fullAnalysis) "完整分析" else "简单分析"
+
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = selectedText,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("分析模式") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth(),
+            singleLine = true,
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text("简单分析") },
+                onClick = {
+                    onFullAnalysisChange(false)
+                    expanded = false
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("完整分析") },
+                onClick = {
+                    onFullAnalysisChange(true)
+                    expanded = false
+                },
+            )
         }
     }
 }
@@ -889,6 +1191,47 @@ private fun OddsField(label: String, value: String, onValueChange: (String) -> U
 }
 
 @Composable
+private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel: ReviewViewModel) {
+    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text("生成复盘", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+            OutlinedTextField(
+                value = viewModel.issue,
+                onValueChange = viewModel::updateIssue,
+                label = { Text("期号") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = viewModel.autoResults,
+                    onCheckedChange = viewModel::updateAutoResults,
+                )
+                Text("自动拉取开奖结果")
+            }
+            if (!viewModel.autoResults) {
+                OutlinedTextField(
+                    value = viewModel.resultsCsv,
+                    onValueChange = viewModel::updateResultsCsv,
+                    label = { Text("赛果 CSV") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 4,
+                )
+            }
+            Button(
+                onClick = { viewModel.generateReview(localEngine) },
+                enabled = !viewModel.isLoading,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                LoadingPrefix(viewModel.isLoading)
+                Text(if (viewModel.isLoading) "复盘中" else "生成复盘报告")
+            }
+        }
+    }
+}
+
+@Composable
 private fun HeaderCard(
     title: String,
     subtitle: String,
@@ -916,24 +1259,39 @@ private fun HeaderCard(
 
 @Composable
 private fun SummaryCard(report: AnalysisReport) {
+    val isReview = report.purchaseDeadlineSource == "复盘报告"
+    val keepSet = report.choose9Keep.toSet()
+    val choose9Total = report.choose9Keep.size
+    val choose9Hits = report.predictions.count { prediction ->
+        prediction.seq in keepSet && prediction.outcomeHit
+    }
+    val choose9Rate = if (choose9Total > 0) choose9Hits * 100.0 / choose9Total else 0.0
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("第 ${report.issue} 期", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
             Text(
-                text = deadlineText(report),
+                text = if (isReview) "赛后复盘结果" else deadlineText(report),
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF667085),
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile("比赛", report.metrics.matchCount.toString(), Modifier.weight(1f))
-                MetricTile("单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
+                MetricTile(if (isReview) "单选命中" else "单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile("低风险", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
-                MetricTile("平均置信", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
+                MetricTile(if (isReview) "胜平负命中" else "低风险", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
+                MetricTile(if (isReview) "胜平负命中率" else "平均置信", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
             }
-            SequenceLine("任选九保留", report.choose9Keep, Color(0xFF16845B))
-            SequenceLine("建议剔除", report.choose9Drop, Color(0xFFB42318))
+            if (isReview) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MetricTile("任选九命中", "$choose9Hits/$choose9Total", Modifier.weight(1f))
+                    MetricTile("任选九命中率", "%.1f%%".format(choose9Rate), Modifier.weight(1f))
+                }
+            }
+            if (!isReview) {
+                SequenceLine("任选九保留", report.choose9Keep, Color(0xFF16845B))
+                SequenceLine("建议剔除", report.choose9Drop, Color(0xFFB42318))
+            }
         }
     }
 }
@@ -965,7 +1323,14 @@ private fun PredictionCard(prediction: MatchPrediction) {
                         color = Color(0xFF667085),
                     )
                 }
-                Text(recommendationCode(prediction), color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
+                val finalText = resultText(prediction)
+                if (finalText.isNotBlank()) {
+                    Text(
+                        text = finalText,
+                        color = if (prediction.outcomeHit) Color(0xFF16845B) else Color(0xFFB42318),
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
             Text(
                 text = recommendationText(prediction),
@@ -991,46 +1356,81 @@ private fun PredictionCard(prediction: MatchPrediction) {
 }
 
 @Composable
-private fun HistoryDetailCard(entry: HistoryEntry) {
-    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFFE8F0FB))) {
-        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("当前选中", color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
-            Text(entry.title.ifBlank { "第 ${entry.issue} 期报告" }, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            Text("期号：${entry.issue.ifBlank { "未记录" }}", color = Color(0xFF344054))
-            Text("生成时间：${entry.createdAt.ifBlank { "未记录" }}", color = Color(0xFF344054))
-            if (entry.markdownText.isBlank()) {
-                Text("这条记录已保存在手机本机历史中；点下方列表可切换查看不同期号。", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
-            } else {
-                HorizontalDivider()
-                Text(
-                    text = entry.markdownText,
-                    color = Color(0xFF344054),
-                    style = MaterialTheme.typography.bodySmall,
-                )
+private fun HistoryGroupCard(
+    group: HistoryGroup,
+    selectedEntry: HistoryEntry?,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    onSelect: (HistoryEntry) -> Unit,
+) {
+    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+        Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "${kindLabel(group.kind)} · 第 ${group.issue.ifBlank { "未记录" }} 期",
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                    Text(
+                        text = "${group.entries.size} 条记录，最新 ${group.entries.firstOrNull()?.createdAt.orEmpty()}",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                Text(if (expanded) "收起" else "展开", color = Color(0xFF2364AA), fontWeight = FontWeight.Bold)
+            }
+            if (expanded) {
+                group.entries.forEach { entry ->
+                    HistoryEntryCard(
+                        entry = entry,
+                        selected = selectedEntry?.id == entry.id,
+                        onClick = { onSelect(entry) },
+                    )
+                    if (selectedEntry?.id == entry.id) {
+                        entry.report?.let { report ->
+                            SummaryCard(report)
+                            Text(
+                                text = if (entry.kind == "review") "逐场复盘" else "逐场预测",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                            )
+                            report.predictions.forEach { prediction ->
+                                PredictionCard(prediction)
+                            }
+                        } ?: EmptyCard("历史详情", "这条历史记录暂时没有可结构化展示的数据。")
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun HistoryEntryCard(entry: HistoryEntry, baseUrl: String, onClick: () -> Unit) {
+private fun HistoryEntryCard(entry: HistoryEntry, selected: Boolean, onClick: () -> Unit) {
     val context = LocalContext.current
     fun openUrl(url: String) {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(resolveReportUrl(baseUrl, url))))
+        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
     }
 
     Card(
         shape = RoundedCornerShape(8.dp),
-        colors = CardDefaults.cardColors(containerColor = Color.White),
+        colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFFE8F0FB) else Color(0xFFF7F9FC)),
         modifier = Modifier.clickable(onClick = onClick),
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(entry.title.ifBlank { "第 ${entry.issue} 期报告" }, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                Text(entry.kind.ifBlank { "report" }, color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
+                Text(kindLabel(entry.kind), color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
             }
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
-            Text("点击查看这条历史记录", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            Text(if (selected) "已展开" else "点击展开", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (isWebUrl(entry.htmlUrl)) {
                     Button(onClick = { openUrl(entry.htmlUrl) }) {
@@ -1052,8 +1452,37 @@ private fun recommendationText(prediction: MatchPrediction): String {
     return "建议选择：${labels.joinToString(" / ")}（${prediction.pickText}）"
 }
 
-private fun recommendationCode(prediction: MatchPrediction): String {
-    return prediction.pickText.ifBlank { prediction.pickLabels.joinToString("/") }
+private fun resultText(prediction: MatchPrediction): String {
+    if (prediction.finalResultLabel.isBlank()) {
+        return ""
+    }
+    return if (prediction.finalScore.isBlank()) {
+        prediction.finalResultLabel
+    } else {
+        "${prediction.finalResultLabel}\n${prediction.finalScore}"
+    }
+}
+
+private fun historyGroups(entries: List<HistoryEntry>): List<HistoryGroup> {
+    return entries
+        .groupBy { historyGroupKey(it) }
+        .map { (key, items) ->
+            val first = items.first()
+            HistoryGroup(
+                key = key,
+                issue = first.issue,
+                kind = first.kind,
+                entries = items,
+            )
+        }
+}
+
+private fun historyGroupKey(entry: HistoryEntry): String {
+    return "${entry.kind.ifBlank { "analysis" }}:${entry.issue.ifBlank { "unknown" }}"
+}
+
+private fun kindLabel(kind: String): String {
+    return if (kind == "review") "复盘" else "分析"
 }
 
 private fun isWebUrl(value: String): Boolean {

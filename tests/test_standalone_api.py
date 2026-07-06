@@ -55,6 +55,85 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args.kwargs["sina_odds_only"])
         self.assertFalse(collect_issue.call_args.kwargs["strength_model"])
 
+    def test_analysis_can_use_full_mobile_mode(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", return_value=Path(tmp) / "issue.json") as collect_issue,
+                patch.object(standalone_api, "load_issue", return_value=Mock()),
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                standalone_api.run_analysis({"issue": "26090", "full_analysis": True}, Path(tmp))
+
+        self.assertFalse(collect_issue.call_args.kwargs["skip_context_fetches"])
+        self.assertFalse(collect_issue.call_args.kwargs["sina_odds_only"])
+        self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
+        self.assertFalse(collect_issue.call_args.kwargs["foreign_odds"])
+
+    def test_full_analysis_uses_saved_foreign_odds_key(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", return_value=Path(tmp) / "issue.json") as collect_issue,
+                patch.object(standalone_api, "load_issue", return_value=Mock()),
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                standalone_api.run_analysis(
+                    {
+                        "issue": "26090",
+                        "full_analysis": True,
+                        "foreign_odds_api_key": "odds-key",
+                    },
+                    Path(tmp),
+                )
+
+        self.assertTrue(collect_issue.call_args.kwargs["foreign_odds"])
+        self.assertEqual(collect_issue.call_args.kwargs["foreign_odds_api_key"], "odds-key")
+
+    def test_analysis_passes_foreign_odds_options(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", return_value=Path(tmp) / "issue.json") as collect_issue,
+                patch.object(standalone_api, "load_issue", return_value=Mock()),
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                standalone_api.run_analysis(
+                    {
+                        "issue": "26090",
+                        "foreign_odds": True,
+                        "foreign_odds_api_key": "odds-key",
+                    },
+                    Path(tmp),
+                )
+
+        self.assertTrue(collect_issue.call_args.kwargs["foreign_odds"])
+        self.assertEqual(collect_issue.call_args.kwargs["foreign_odds_api_key"], "odds-key")
+
     def test_history_returns_markdown_text_for_android_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -69,6 +148,75 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["entries"][0]["issue"], "26090")
         self.assertIn("pick: home", result["entries"][0]["markdown_text"])
+
+    def test_history_parses_markdown_report_for_android_cards(self) -> None:
+        markdown_text = """# 足球彩票分析报告：26090
+
+## 任九建议
+
+- 建议保留：1、2、3、4、5、6、7、8、9
+- 建议剔除：10、11、12、13、14
+
+## 14场逐场建议
+
+| 序号 | 联赛 | 对阵 | 推荐 | 比分倾向 | 置信度 | 风险 | 概率(3/1/0) |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| 1 | 世界杯 | 甲队 vs 乙队 | 3/1 | 1-0 13%，1-1 12%，2-0 10% | 53.0% | 中 | 53%/25%/22% |
+
+## 详细理由
+
+### 1. 甲队 vs 乙队
+
+- 比赛：世界杯，2026-07-06T20:00:00+08:00
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "report.html"
+            markdown = root / "report.md"
+            report.write_text("<h1>report</h1>", encoding="utf-8")
+            markdown.write_text(markdown_text, encoding="utf-8")
+            archive_report("analysis", "26090", report, markdown, history_dir=root / "reports" / "history")
+
+            result = standalone_api.run_history(root)
+
+        parsed = result["entries"][0]["report"]
+        self.assertEqual(parsed["issue"], "26090")
+        self.assertEqual(parsed["metrics"]["match_count"], 1)
+        self.assertEqual(parsed["choose9_drop"], [10, 11, 12, 13, 14])
+        self.assertEqual(parsed["predictions"][0]["pick_labels"], ["主胜", "平"])
+        self.assertEqual(parsed["predictions"][0]["kickoff_display"], "07-06 20:00")
+
+    def test_history_parses_review_keep_rows_for_android_summary(self) -> None:
+        markdown_text = """# 足球彩票复盘报告：26090
+
+## 总览
+
+- 胜平负命中：1/2（50%）
+- 单选命中：1/1（100%）
+
+## 逐场复盘
+
+| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 甲队 vs 乙队 | 1-0 | 主胜 | 3 | 命中 | 1-0 13%，1-1 12% | 任九保留 |
+| 2 | 丙队 vs 丁队 | 0-1 | 客胜 | 3 | 未中 | 1-0 10%，0-1 9% | 任九剔除 |
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "review.html"
+            markdown = root / "review.md"
+            report.write_text("<h1>review</h1>", encoding="utf-8")
+            markdown.write_text(markdown_text, encoding="utf-8")
+            archive_report("review", "26090", report, markdown, history_dir=root / "reports" / "history")
+
+            result = standalone_api.run_history(root)
+
+        parsed = result["entries"][0]["report"]
+        self.assertEqual(parsed["purchase_deadline_source"], "复盘报告")
+        self.assertEqual(parsed["choose9_keep"], [1])
+        self.assertEqual(parsed["choose9_drop"], [2])
+        self.assertTrue(parsed["predictions"][0]["outcome_hit"])
+        self.assertEqual(parsed["predictions"][0]["final_result_label"], "主胜")
 
 
 if __name__ == "__main__":
