@@ -14,7 +14,7 @@ from .models import Match, Odds, Signals
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
-from .strategy import build_ticket_plan
+from .strategy import DEFAULT_MAX_TICKET_COST_YUAN, build_ticket_plan
 import tempfile
 
 
@@ -32,6 +32,9 @@ def run_analysis(
     strength_xg_matches = int(payload.get("strength_xg_matches") or 8)
     if strength_xg_matches < 0 or strength_xg_matches > 20:
         raise ValueError("xG 样本场次必须是 0 到 20 之间的整数。")
+    max_ticket_cost_yuan = int(payload.get("max_ticket_cost_yuan") or DEFAULT_MAX_TICKET_COST_YUAN)
+    if max_ticket_cost_yuan < 2:
+        raise ValueError("最高购彩金额不能低于 2 元。")
     full_analysis = bool(payload.get("full_analysis", False))
     foreign_odds = bool(payload.get("foreign_odds", False))
     foreign_odds_api_key = str(payload.get("foreign_odds_api_key") or "").strip() or None
@@ -63,7 +66,7 @@ def run_analysis(
     )
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
-    plan = build_ticket_plan(load_issue(issue_path))
+    plan = build_ticket_plan(load_issue(issue_path), max_ticket_cost_yuan=max_ticket_cost_yuan)
     write_report(plan, markdown_path)
     write_analysis_html(plan, html_path)
     history_path = archive_report(

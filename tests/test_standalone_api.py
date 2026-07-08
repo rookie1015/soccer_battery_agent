@@ -78,6 +78,31 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
         self.assertFalse(collect_issue.call_args.kwargs["foreign_odds"])
 
+    def test_analysis_passes_ticket_budget_to_strategy(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", return_value=Path(tmp) / "issue.json"),
+                patch.object(standalone_api, "load_issue", return_value=Mock()) as load_issue,
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan) as build_ticket_plan,
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 288}, Path(tmp))
+
+        build_ticket_plan.assert_called_once_with(load_issue.return_value, max_ticket_cost_yuan=288)
+
+    def test_analysis_rejects_too_small_ticket_budget(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "最高购彩金额不能低于 2 元"):
+                standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 1}, Path(tmp))
+
     def test_full_analysis_uses_saved_foreign_odds_key(self) -> None:
         fake_plan = Mock()
         fake_plan.issue.issue = "26090"

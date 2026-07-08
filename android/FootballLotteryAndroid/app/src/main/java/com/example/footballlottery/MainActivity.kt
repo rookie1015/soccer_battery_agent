@@ -224,6 +224,8 @@ class AppViewModel : ViewModel() {
 class AnalysisViewModel : ViewModel() {
     var issue by mutableStateOf("26090")
         private set
+    var maxTicketCostYuan by mutableStateOf("500")
+        private set
     var xgMatches by mutableDoubleStateOf(8.0)
         private set
     var fullAnalysis by mutableStateOf(false)
@@ -241,6 +243,10 @@ class AnalysisViewModel : ViewModel() {
         issue = value
     }
 
+    fun updateMaxTicketCostYuan(value: String) {
+        maxTicketCostYuan = value
+    }
+
     fun updateXgMatches(value: Double) {
         xgMatches = value
     }
@@ -251,9 +257,14 @@ class AnalysisViewModel : ViewModel() {
 
     fun generateAnalysis(engine: FootballLotteryLocalEngine, foreignOddsApiKey: String) {
         val cleanIssue = issue.trim()
+        val cleanMaxTicketCostYuan = maxTicketCostYuan.trim().toIntOrNull()
         val cleanForeignOddsApiKey = foreignOddsApiKey.trim()
         if (cleanIssue.isEmpty()) {
             error = "请填写期号。"
+            return
+        }
+        if (cleanMaxTicketCostYuan == null || cleanMaxTicketCostYuan < 2) {
+            error = "请填写不低于 2 元的最高购彩金额。"
             return
         }
         viewModelScope.launch {
@@ -263,6 +274,7 @@ class AnalysisViewModel : ViewModel() {
             runCatching {
                 engine.generateAnalysis(
                     issue = cleanIssue,
+                    maxTicketCostYuan = cleanMaxTicketCostYuan,
                     xgMatches = xgMatches.toInt(),
                     fullAnalysis = fullAnalysis,
                     foreignOdds = fullAnalysis && cleanForeignOddsApiKey.isNotEmpty(),
@@ -477,6 +489,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
 
     suspend fun generateAnalysis(
         issue: String,
+        maxTicketCostYuan: Int,
         xgMatches: Int,
         fullAnalysis: Boolean,
         foreignOdds: Boolean,
@@ -484,6 +497,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
+            .put("max_ticket_cost_yuan", maxTicketCostYuan)
             .put("strength_model", true)
             .put("strength_xg_matches", xgMatches)
             .put("full_analysis", fullAnalysis)
@@ -631,6 +645,7 @@ class FootballLotteryApi(private val baseUrl: String) {
 
     suspend fun generateAnalysis(
         issue: String,
+        maxTicketCostYuan: Int,
         xgMatches: Int,
         fullAnalysis: Boolean,
         foreignOdds: Boolean,
@@ -638,6 +653,7 @@ class FootballLotteryApi(private val baseUrl: String) {
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
+            .put("max_ticket_cost_yuan", maxTicketCostYuan)
             .put("strength_model", fullAnalysis)
             .put("strength_xg_matches", xgMatches)
             .put("full_analysis", fullAnalysis)
@@ -1062,6 +1078,14 @@ private fun RequestCard(
                     modifier = Modifier.weight(1f),
                 )
             }
+            OutlinedTextField(
+                value = viewModel.maxTicketCostYuan,
+                onValueChange = viewModel::updateMaxTicketCostYuan,
+                label = { Text("最高购彩金额") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("增强样本场次")
                 Spacer(modifier = Modifier.weight(1f))
@@ -1266,9 +1290,25 @@ private fun SummaryCard(report: AnalysisReport) {
         prediction.seq in keepSet && prediction.outcomeHit
     }
     val choose9Rate = if (choose9Total > 0) choose9Hits * 100.0 / choose9Total else 0.0
+    val purchaseCostText = purchaseCostText(report)
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("第 ${report.issue} 期", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "第 ${report.issue} 期",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                if (!isReview && purchaseCostText.isNotBlank()) {
+                    Text(
+                        purchaseCostText,
+                        color = Color(0xFF2364AA),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
             Text(
                 text = if (isReview) "赛后复盘结果" else deadlineText(report),
                 style = MaterialTheme.typography.bodyMedium,
@@ -1461,6 +1501,26 @@ private fun resultText(prediction: MatchPrediction): String {
     } else {
         "${prediction.finalResultLabel}\n${prediction.finalScore}"
     }
+}
+
+private fun purchaseCostText(report: AnalysisReport): String {
+    val units = report.predictions.fold(1L) { total, prediction ->
+        total * recommendedChoiceCount(prediction).toLong()
+    }
+    if (units <= 0L) {
+        return ""
+    }
+    return "购彩 ¥${"%,d".format(units * 2L)}"
+}
+
+private fun recommendedChoiceCount(prediction: MatchPrediction): Int {
+    val pickCount = prediction.pickText
+        .split("/")
+        .count { it.isNotBlank() }
+    if (pickCount > 0) {
+        return pickCount
+    }
+    return prediction.pickLabels.size.coerceAtLeast(1)
 }
 
 private fun historyGroups(entries: List<HistoryEntry>): List<HistoryGroup> {

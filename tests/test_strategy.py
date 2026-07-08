@@ -2,7 +2,7 @@ import unittest
 
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.report import render_markdown
-from football_lottery_agent.strategy import build_ticket_plan
+from football_lottery_agent.strategy import build_ticket_plan, ticket_cost_yuan
 
 
 class StrategyTests(unittest.TestCase):
@@ -14,6 +14,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(len(plan.choose9_keep), 9)
         self.assertEqual(len(plan.choose9_drop), 5)
         self.assertTrue(set(plan.choose9_keep).isdisjoint(plan.choose9_drop))
+        self.assertLessEqual(ticket_cost_yuan(plan.predictions), 2000)
 
     def test_predictions_include_scorelines(self) -> None:
         issue = load_issue("data/sample_issue.json")
@@ -31,6 +32,12 @@ class StrategyTests(unittest.TestCase):
 
         self.assertIn("比分倾向", report)
         self.assertRegex(report, r"\d-\d \d+%")
+
+    def test_build_ticket_plan_respects_custom_budget(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
+
+        self.assertLessEqual(ticket_cost_yuan(plan.predictions), 128)
 
 
 if __name__ == "__main__":

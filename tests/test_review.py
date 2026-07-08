@@ -201,12 +201,32 @@ class ReviewTests(unittest.TestCase):
 
 
 def _result_for_prediction(prediction):
-    scoreline = prediction.scorelines[0]
+    pick = prediction.picks[0]
+    scoreline = next(
+        (
+            item
+            for item in prediction.scorelines
+            if _outcome_for_score(item.home_goals, item.away_goals) == pick
+        ),
+        None,
+    )
+    if scoreline is None:
+        home_goals, away_goals = {"3": (1, 0), "1": (0, 0), "0": (0, 1)}[pick]
+    else:
+        home_goals, away_goals = scoreline.home_goals, scoreline.away_goals
     return MatchResult(
         seq=prediction.match.seq,
-        home_goals=scoreline.home_goals,
-        away_goals=scoreline.away_goals,
+        home_goals=home_goals,
+        away_goals=away_goals,
     )
+
+
+def _outcome_for_score(home_goals, away_goals):
+    if home_goals > away_goals:
+        return "3"
+    if home_goals == away_goals:
+        return "1"
+    return "0"
 
 
 if __name__ == "__main__":
