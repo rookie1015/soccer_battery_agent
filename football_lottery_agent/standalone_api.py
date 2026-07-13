@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,7 @@ from .history import archive_report, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
-from .models import Match, Odds, Signals
+from .models import Match, Odds, Signals, TicketPlan
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
@@ -352,7 +353,7 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     report_dir.mkdir(parents=True, exist_ok=True)
 
     issue_path = _resolve_local_issue_path(data_dir, issue)
-    plan = build_ticket_plan(load_issue(issue_path))
+    plan = _load_latest_analysis_plan(issue_path, history_dir, issue)
     auto_results = bool(payload.get("auto_results", True))
     results_csv = str(payload.get("results_csv") or "").strip()
 
@@ -401,6 +402,74 @@ def _resolve_local_issue_path(data_dir: Path, issue: str) -> Path:
     if collected.exists() and load_issue(collected).issue == issue:
         return collected
     raise ValueError(f"找不到 {issue} 的赛前数据。请先生成该期分析。")
+
+
+def _load_latest_analysis_plan(issue_path: Path, history_dir: Path, issue: str) -> TicketPlan:
+    plan = build_ticket_plan(load_issue(issue_path))
+    for entry in load_history_entries(history_dir):
+        if entry.get("kind") != "analysis" or str(entry.get("issue") or "").strip() != issue:
+            continue
+        report = _parse_history_report(
+            _read_history_text(history_dir, str(entry.get("markdown") or "")),
+            fallback_issue=issue,
+            kind="analysis",
+        )
+        restored = _restore_analysis_recommendations(plan, report)
+        if restored:
+            return restored
+    return plan
+
+
+def _restore_analysis_recommendations(
+    plan: TicketPlan,
+    report: dict[str, object] | None,
+) -> TicketPlan | None:
+    if not report:
+        return None
+    saved_predictions = report.get("predictions")
+    if not isinstance(saved_predictions, list):
+        return None
+
+    saved_picks: dict[int, tuple[str, ...]] = {}
+    for saved in saved_predictions:
+        if not isinstance(saved, dict):
+            return None
+        try:
+            seq = int(saved.get("seq"))
+        except (TypeError, ValueError):
+            return None
+        picks = tuple(item for item in str(saved.get("pick_text") or "").split("/") if item in OUTCOME_LABELS)
+        if not picks:
+            return None
+        saved_picks[seq] = picks
+
+    current_sequences = {prediction.match.seq for prediction in plan.predictions}
+    if set(saved_picks) != current_sequences:
+        return None
+
+    saved_keep = _valid_sequence_list(report.get("choose9_keep"), current_sequences, expected_count=9)
+    saved_drop = _valid_sequence_list(report.get("choose9_drop"), current_sequences, expected_count=5)
+    if saved_keep is None or saved_drop is None or set(saved_keep) & set(saved_drop):
+        return None
+
+    return TicketPlan(
+        issue=plan.issue,
+        predictions=tuple(replace(prediction, picks=saved_picks[prediction.match.seq]) for prediction in plan.predictions),
+        choose9_keep=saved_keep,
+        choose9_drop=saved_drop,
+    )
+
+
+def _valid_sequence_list(value: object, sequences: set[int], expected_count: int) -> tuple[int, ...] | None:
+    if not isinstance(value, list):
+        return None
+    try:
+        items = tuple(int(item) for item in value)
+    except (TypeError, ValueError):
+        return None
+    if len(items) != expected_count or len(set(items)) != expected_count or not set(items) <= sequences:
+        return None
+    return tuple(sorted(items))
 
 
 def _serialize_review_report(review) -> dict[str, object]:

@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -159,6 +160,45 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args.kwargs["foreign_odds"])
         self.assertEqual(collect_issue.call_args.kwargs["foreign_odds_api_key"], "odds-key")
 
+    def test_review_uses_latest_analysis_report_recommendations(self) -> None:
+        issue = "sample-001"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            (data_dir / f"{issue}_issue.json").write_text(
+                Path("data/sample_issue.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            history_dir = root / "reports" / "history"
+            html = root / "analysis.html"
+            html.write_text("<h1>analysis</h1>", encoding="utf-8")
+            old_markdown = root / "old.md"
+            latest_markdown = root / "latest.md"
+            old_markdown.write_text(_analysis_markdown(issue, "3", tuple(range(1, 10))), encoding="utf-8")
+            latest_markdown.write_text(_analysis_markdown(issue, "0", tuple(range(6, 15))), encoding="utf-8")
+            created = datetime(2026, 7, 13, 10, 0, 0)
+            archive_report("analysis", issue, html, old_markdown, history_dir=history_dir, created_at=created)
+            archive_report(
+                "analysis",
+                issue,
+                html,
+                latest_markdown,
+                history_dir=history_dir,
+                created_at=created + timedelta(seconds=1),
+            )
+
+            results_csv = "seq,score\n" + "\n".join(f"{seq},0-1" for seq in range(1, 15))
+            result = standalone_api.run_review(
+                {"issue": issue, "auto_results": False, "results_csv": results_csv},
+                root,
+            )
+
+        predictions = result["report"]["predictions"]
+        self.assertTrue(all(item["pick_text"] == "0" for item in predictions))
+        self.assertEqual(result["report"]["choose9_keep"], list(range(6, 15)))
+        self.assertEqual(result["report"]["metrics"]["low_risk_count"], 14)
+
     def test_history_returns_markdown_text_for_android_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -246,3 +286,24 @@ class StandaloneApiTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _analysis_markdown(issue: str, pick: str, keep: tuple[int, ...]) -> str:
+    drop = tuple(seq for seq in range(1, 15) if seq not in keep)
+    rows = "\n".join(
+        f"| {seq} | 测试联赛 | 主队{seq} vs 客队{seq} | {pick} | 1-0 13% | 53.0% | 中 | 53%/25%/22% |"
+        for seq in range(1, 15)
+    )
+    return f"""# 足球彩票分析报告：{issue}
+
+## 任九建议
+
+- 建议保留：{'、'.join(str(seq) for seq in keep)}
+- 建议剔除：{'、'.join(str(seq) for seq in drop)}
+
+## 14场逐场建议
+
+| 序号 | 联赛 | 对阵 | 推荐 | 比分倾向 | 置信度 | 风险 | 概率(3/1/0) |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+{rows}
+"""
