@@ -184,6 +184,23 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(len(review.major_misses), 1)
         self.assertEqual(review.major_misses[0].prediction.match.seq, first_single.match.seq)
 
+    def test_build_review_labels_a_draw_omission(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        plan = build_ticket_plan(issue)
+        target = next(prediction for prediction in plan.predictions if "1" not in prediction.picks)
+        results = {
+            prediction.match.seq: _result_for_prediction(prediction)
+            for prediction in plan.predictions
+        }
+        results[target.match.seq] = MatchResult(seq=target.match.seq, home_goals=0, away_goals=0)
+
+        review = build_review(plan, results)
+        row = next(item for item in review.rows if item.prediction.match.seq == target.match.seq)
+
+        self.assertFalse(row.outcome_hit)
+        self.assertIn("平局漏判", row.diagnostic_tags)
+        self.assertGreater(review.diagnostic_counts["平局漏判"], 0)
+
     def test_render_review_markdown_contains_summary_and_rows(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue)
@@ -197,6 +214,7 @@ class ReviewTests(unittest.TestCase):
 
         self.assertIn("胜平负命中", markdown)
         self.assertIn("比分 Top3 命中", markdown)
+        self.assertIn("错因记录", markdown)
         self.assertIn("| 序号 | 对阵 | 最终比分 | 彩果 |", markdown)
 
 

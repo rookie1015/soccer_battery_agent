@@ -2,7 +2,7 @@ import unittest
 
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.report import render_markdown
-from football_lottery_agent.strategy import build_ticket_plan, ticket_cost_yuan
+from football_lottery_agent.strategy import _pick_coverage_probability, build_ticket_plan, ticket_cost_yuan
 
 
 class StrategyTests(unittest.TestCase):
@@ -38,6 +38,25 @@ class StrategyTests(unittest.TestCase):
         plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
 
         self.assertLessEqual(ticket_cost_yuan(plan.predictions), 128)
+
+    def test_choose9_keeps_highest_recommended_outcome_coverage(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        plan = build_ticket_plan(issue)
+
+        expected_keep = {
+            prediction.match.seq
+            for prediction in sorted(
+                plan.predictions,
+                key=lambda prediction: (
+                    _pick_coverage_probability(prediction),
+                    prediction.confidence,
+                    -prediction.match.seq,
+                ),
+                reverse=True,
+            )[:9]
+        }
+
+        self.assertEqual(set(plan.choose9_keep), expected_keep)
 
 
 if __name__ == "__main__":

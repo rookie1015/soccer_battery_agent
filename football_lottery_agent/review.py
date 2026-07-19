@@ -56,6 +56,7 @@ class MatchReview:
     top_score_hit: bool
     score_top3_hit: bool
     bucket: str
+    diagnostic_tags: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,14 @@ class ReviewReport:
     @property
     def score_total(self) -> int:
         return sum(1 for row in self.rows if row.result.score_exact)
+
+    @property
+    def diagnostic_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for row in self.rows:
+            for tag in row.diagnostic_tags:
+                counts[tag] = counts.get(tag, 0) + 1
+        return counts
 
 
 def load_results(path: str | Path) -> dict[int, MatchResult]:
@@ -266,12 +275,17 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
                 top_score_hit=result.score_exact and bool(score_texts and result.score_text == score_texts[0]),
                 score_top3_hit=result.score_exact and result.score_text in score_texts,
                 bucket=bucket,
+                diagnostic_tags=_diagnostic_tags(prediction, result),
             )
         )
     return ReviewReport(plan=plan, rows=tuple(rows))
 
 
-def render_review_markdown(report: ReviewReport) -> str:
+def render_review_markdown(
+    report: ReviewReport,
+    post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
+) -> str:
+    evidence_by_seq = post_match_evidence or {}
     lines: list[str] = []
     single_total = len(report.single_rows)
     keep_total = len(report.keep_rows)
@@ -289,10 +303,18 @@ def render_review_markdown(report: ReviewReport) -> str:
     lines.append(f"- 任九保留命中：{report.keep_hits}/{keep_total}（{_rate(report.keep_hits, keep_total)}）")
     lines.append(f"- 任九剔除有效：{report.effective_drops}/{drop_total}（{_rate(report.effective_drops, drop_total)}）")
     lines.append("")
+    lines.append("## 错因记录")
+    lines.append("")
+    if report.diagnostic_counts:
+        lines.append("- 本期失手标签：" + "；".join(f"{tag} {count} 场" for tag, count in report.diagnostic_counts.items()))
+        lines.append("- 标签用于定位后续可验证的改进方向，不等同于赛后因果结论。")
+    else:
+        lines.append("- 本期胜平负推荐全部覆盖，无失手标签。")
+    lines.append("")
     lines.append("## 逐场复盘")
     lines.append("")
-    lines.append("| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 |")
-    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
+    lines.append("| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 | 错因标签 | 赛后外部线索 |")
+    lines.append("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for row in report.rows:
         prediction = row.prediction
         match = prediction.match
@@ -300,7 +322,7 @@ def render_review_markdown(report: ReviewReport) -> str:
         outcome_mark = "命中" if row.outcome_hit else "未中"
         lines.append(
             f"| {match.seq} | {match.home} vs {match.away} | {row.result.score_text} | {actual} | "
-            f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {row.bucket} |"
+            f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {row.bucket} | {'、'.join(row.diagnostic_tags) or '-'} | {_evidence_summary(evidence_by_seq.get(match.seq, []))} |"
         )
     lines.append("")
     lines.append("## 需要关注")
@@ -333,10 +355,34 @@ def _is_major_miss(row: MatchReview) -> bool:
     )
 
 
-def write_review_report(report: ReviewReport, output_path: str | Path) -> Path:
+def _diagnostic_tags(prediction: Prediction, result: MatchResult) -> tuple[str, ...]:
+    if result.outcome in prediction.picks:
+        return ()
+
+    tags: list[str] = []
+    actual_probability = prediction.probabilities.get(result.outcome, 0.0)
+    top_outcome, top_probability = max(prediction.probabilities.items(), key=lambda item: item[1])
+    if result.outcome == "1" and "1" not in prediction.picks:
+        tags.append("平局漏判")
+    if len(prediction.picks) == 1:
+        tags.append("单选覆盖不足")
+    if prediction.risk == "低" or prediction.confidence >= 56.0:
+        tags.append("高置信反转")
+    if top_outcome != result.outcome and top_probability - actual_probability >= 0.20:
+        tags.append("强弱判断偏差")
+    if actual_probability <= 0.25:
+        tags.append("冷门结果")
+    return tuple(tags or ["赛前概率偏差"])
+
+
+def write_review_report(
+    report: ReviewReport,
+    output_path: str | Path,
+    post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
+) -> Path:
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_review_markdown(report), encoding="utf-8")
+    path.write_text(render_review_markdown(report, post_match_evidence), encoding="utf-8")
     return path
 
 
@@ -464,3 +510,8 @@ def _rate(count: int, total: int) -> str:
     if total <= 0:
         return "N/A"
     return f"{count / total:.0%}"
+
+
+def _evidence_summary(evidence: list[dict[str, object]]) -> str:
+    labels = [str(item.get("label") or "") for item in evidence if item.get("label")]
+    return "、".join(labels) or "-"

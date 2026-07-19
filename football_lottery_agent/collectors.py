@@ -655,6 +655,23 @@ def _fetch_bing_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]:
     return []
 
 
+def search_web_news(query: str, cache_dir: str | Path, limit: int = 5) -> list[NewsItem]:
+    """Search indexed news with the project's GDELT-first, DuckDuckGo fallback flow."""
+    root = Path(cache_dir)
+    items = _fetch_bing_news(query, root, limit)
+    if items:
+        return items
+    return _fetch_google_news(query, root, limit)
+
+
+def _fetch_google_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]:
+    url = f"https://news.google.com/rss/search?{urllib.parse.urlencode({'q': query, 'hl': 'en-US', 'gl': 'US', 'ceid': 'US:en'})}"
+    try:
+        return _parse_rss(_fetch_text(url, cache_dir, max_age_seconds=3600))[:limit]
+    except (OSError, urllib.error.URLError, ET.ParseError):
+        return []
+
+
 def _fetch_gdelt_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]:
     params = {
         "query": query,

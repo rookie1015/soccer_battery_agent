@@ -102,6 +102,7 @@ data class AnalysisReport(
     val choose9Keep: List<Int>,
     val choose9Drop: List<Int>,
     val predictions: List<MatchPrediction>,
+    val reviewDiagnostics: ReviewDiagnostics?,
 )
 
 data class ReportMetrics(
@@ -128,6 +129,26 @@ data class MatchPrediction(
     val finalResult: String,
     val finalResultLabel: String,
     val outcomeHit: Boolean,
+    val diagnosticTags: List<String>,
+    val postMatchEvidence: List<PostMatchEvidence>,
+)
+
+data class PostMatchEvidence(
+    val label: String,
+    val summary: String,
+    val sources: List<String>,
+)
+
+data class DiagnosticCount(
+    val label: String,
+    val count: Int,
+)
+
+data class ReviewDiagnostics(
+    val issueMissCount: Int,
+    val issueTags: List<DiagnosticCount>,
+    val historyIssueCount: Int,
+    val historyTags: List<DiagnosticCount>,
 )
 
 data class OutcomeProbabilities(
@@ -578,6 +599,18 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             choose9Keep = json.optJSONArray("choose9_keep").orEmptyArray().toIntList(),
             choose9Drop = json.optJSONArray("choose9_drop").orEmptyArray().toIntList(),
             predictions = json.optJSONArray("predictions").orEmptyArray().mapObjects { parsePrediction(it) },
+            reviewDiagnostics = json.optJSONObject("review_diagnostics")?.let { diagnostics ->
+                ReviewDiagnostics(
+                    issueMissCount = diagnostics.optInt("issue_miss_count"),
+                    issueTags = diagnostics.optJSONArray("issue_tags").orEmptyArray().mapObjects { item ->
+                        DiagnosticCount(item.optString("label"), item.optInt("count"))
+                    },
+                    historyIssueCount = diagnostics.optInt("history_issue_count"),
+                    historyTags = diagnostics.optJSONArray("history_tags").orEmptyArray().mapObjects { item ->
+                        DiagnosticCount(item.optString("label"), item.optInt("count"))
+                    },
+                )
+            },
         )
     }
 
@@ -609,6 +642,16 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             finalResult = json.optString("final_result"),
             finalResultLabel = json.optString("final_result_label"),
             outcomeHit = json.optBoolean("outcome_hit"),
+            diagnosticTags = json.optJSONArray("diagnostic_tags").orEmptyArray().toStringList(),
+            postMatchEvidence = json.optJSONArray("post_match_evidence").orEmptyArray().mapObjects { item ->
+                PostMatchEvidence(
+                    label = item.optString("label"),
+                    summary = item.optString("summary"),
+                    sources = item.optJSONArray("sources").orEmptyArray().mapObjects { source ->
+                        source.optString("title")
+                    },
+                )
+            },
         )
     }
 
@@ -755,6 +798,18 @@ class FootballLotteryApi(private val baseUrl: String) {
             choose9Keep = json.optJSONArray("choose9_keep").orEmptyArray().toIntList(),
             choose9Drop = json.optJSONArray("choose9_drop").orEmptyArray().toIntList(),
             predictions = json.optJSONArray("predictions").orEmptyArray().mapObjects { parsePrediction(it) },
+            reviewDiagnostics = json.optJSONObject("review_diagnostics")?.let { diagnostics ->
+                ReviewDiagnostics(
+                    issueMissCount = diagnostics.optInt("issue_miss_count"),
+                    issueTags = diagnostics.optJSONArray("issue_tags").orEmptyArray().mapObjects { item ->
+                        DiagnosticCount(item.optString("label"), item.optInt("count"))
+                    },
+                    historyIssueCount = diagnostics.optInt("history_issue_count"),
+                    historyTags = diagnostics.optJSONArray("history_tags").orEmptyArray().mapObjects { item ->
+                        DiagnosticCount(item.optString("label"), item.optInt("count"))
+                    },
+                )
+            },
         )
     }
 
@@ -786,6 +841,16 @@ class FootballLotteryApi(private val baseUrl: String) {
             finalResult = json.optString("final_result"),
             finalResultLabel = json.optString("final_result_label"),
             outcomeHit = json.optBoolean("outcome_hit"),
+            diagnosticTags = json.optJSONArray("diagnostic_tags").orEmptyArray().toStringList(),
+            postMatchEvidence = json.optJSONArray("post_match_evidence").orEmptyArray().mapObjects { item ->
+                PostMatchEvidence(
+                    label = item.optString("label"),
+                    summary = item.optString("summary"),
+                    sources = item.optJSONArray("sources").orEmptyArray().mapObjects { source ->
+                        source.optString("title")
+                    },
+                )
+            },
         )
     }
 
@@ -1327,6 +1392,9 @@ private fun SummaryCard(report: AnalysisReport) {
                     MetricTile("任选九命中", "$choose9Hits/$choose9Total", Modifier.weight(1f))
                     MetricTile("任选九命中率", "%.1f%%".format(choose9Rate), Modifier.weight(1f))
                 }
+                report.reviewDiagnostics?.let { diagnostics ->
+                    ReviewDiagnosticsCard(diagnostics)
+                }
             }
             if (!isReview) {
                 SequenceLine("任选九保留", report.choose9Keep, Color(0xFF16845B))
@@ -1337,7 +1405,40 @@ private fun SummaryCard(report: AnalysisReport) {
 }
 
 @Composable
-private fun PredictionCard(prediction: MatchPrediction) {
+private fun ReviewDiagnosticsCard(diagnostics: ReviewDiagnostics) {
+    val issueText = if (diagnostics.issueMissCount == 0) {
+        "本期胜平负推荐全部覆盖"
+    } else {
+        "本期 ${diagnostics.issueMissCount} 场未中：" + diagnostics.issueTags.joinToString(" · ") {
+            "${it.label} ${it.count}"
+        }
+    }
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(containerColor = Color(0xFFF6F8FC)),
+    ) {
+        Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("复盘诊断", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+            Text(issueText, color = Color(0xFF344054), style = MaterialTheme.typography.bodySmall)
+            if (diagnostics.historyTags.isNotEmpty()) {
+                Text(
+                    "近 ${diagnostics.historyIssueCount} 期：" + diagnostics.historyTags.take(3).joinToString(" · ") {
+                        "${it.label} ${it.count}"
+                    },
+                    color = Color(0xFF667085),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PredictionCard(
+    prediction: MatchPrediction,
+    isReview: Boolean = false,
+    choose9Keep: Set<Int> = emptySet(),
+) {
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1378,19 +1479,44 @@ private fun PredictionCard(prediction: MatchPrediction) {
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.titleSmall,
             )
-            ProbabilityLine("主胜", prediction.probabilities.home, Color(0xFFB42318))
-            ProbabilityLine("平", prediction.probabilities.draw, Color(0xFF2364AA))
-            ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
-            Text(
-                text = "置信度 ${"%.1f".format(prediction.confidence)}% · 风险 ${prediction.risk}",
-                color = Color(0xFF667085),
-                style = MaterialTheme.typography.bodySmall,
-            )
-            Text(
-                text = "比分倾向：" + prediction.scorelines.joinToString("，") { "${it.score} ${"%.1f".format(it.probability)}%" },
-                style = MaterialTheme.typography.bodySmall,
-                color = Color(0xFF087F8C),
-            )
+            if (isReview) {
+                Text(
+                    text = "任选九选择：" + if (prediction.seq in choose9Keep) "保留" else "未选",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (prediction.seq in choose9Keep) Color(0xFF16845B) else Color(0xFF667085),
+                )
+                Text(
+                    text = if (prediction.outcomeHit) {
+                        "复盘结论：本场推荐已命中"
+                    } else {
+                        val externalReason = prediction.postMatchEvidence.joinToString("；") { evidence ->
+                            "${evidence.label}：${evidence.summary}"
+                        }
+                        val modelReason = prediction.diagnosticTags.joinToString("、").ifBlank { "赛前概率偏差" }
+                        "分析未正确原因：" + if (externalReason.isBlank()) {
+                            "未找到可验证的赛后报道。模型诊断：$modelReason"
+                        } else {
+                            "赛后报道线索：$externalReason\n模型诊断：$modelReason"
+                        }
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (prediction.outcomeHit) Color(0xFF16845B) else Color(0xFFB54708),
+                )
+            } else {
+                ProbabilityLine("主胜", prediction.probabilities.home, Color(0xFFB42318))
+                ProbabilityLine("平", prediction.probabilities.draw, Color(0xFF2364AA))
+                ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
+                Text(
+                    text = "置信度 ${"%.1f".format(prediction.confidence)}% · 风险 ${prediction.risk}",
+                    color = Color(0xFF667085),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = "比分倾向：" + prediction.scorelines.joinToString("，") { "${it.score} ${"%.1f".format(it.probability)}%" },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF087F8C),
+                )
+            }
         }
     }
 }
@@ -1442,7 +1568,11 @@ private fun HistoryGroupCard(
                                 fontWeight = FontWeight.Bold,
                             )
                             report.predictions.forEach { prediction ->
-                                PredictionCard(prediction)
+                                PredictionCard(
+                                    prediction = prediction,
+                                    isReview = entry.kind == "review",
+                                    choose9Keep = report.choose9Keep.toSet(),
+                                )
                             }
                         } ?: EmptyCard("历史详情", "这条历史记录暂时没有可结构化展示的数据。")
                     }

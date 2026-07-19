@@ -261,10 +261,10 @@ class StandaloneApiTests(unittest.TestCase):
 
 ## 逐场复盘
 
-| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 甲队 vs 乙队 | 1-0 | 主胜 | 3 | 命中 | 1-0 13%，1-1 12% | 任九保留 |
-| 2 | 丙队 vs 丁队 | 0-1 | 客胜 | 3 | 未中 | 1-0 10%，0-1 9% | 任九剔除 |
+| 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 | 错因标签 | 赛后外部线索 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 甲队 vs 乙队 | 1-0 | 主胜 | 3 | 命中 | 1-0 13%，1-1 12% | 任九保留 | - | - |
+| 2 | 丙队 vs 丁队 | 0-1 | 客胜 | 3 | 未中 | 1-0 10%，0-1 9% | 任九剔除 | 平局漏判、单选覆盖不足 | 关键伤停或临场阵容变化 |
 """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -280,6 +280,8 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(parsed["purchase_deadline_source"], "复盘报告")
         self.assertEqual(parsed["choose9_keep"], [1])
         self.assertEqual(parsed["choose9_drop"], [2])
+        self.assertEqual(parsed["predictions"][1]["diagnostic_tags"], ["平局漏判", "单选覆盖不足"])
+        self.assertEqual(parsed["predictions"][1]["post_match_evidence"][0]["label"], "关键伤停或临场阵容变化")
         self.assertTrue(parsed["predictions"][0]["outcome_hit"])
         self.assertEqual(parsed["predictions"][0]["final_result_label"], "主胜")
 

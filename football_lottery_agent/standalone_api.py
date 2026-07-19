@@ -15,6 +15,8 @@ from .models import Match, Odds, Signals, TicketPlan
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
+from .review_diagnostics import record_review_diagnostics
+from .post_match_context import find_post_match_evidence, normalize_evidence
 from .strategy import DEFAULT_MAX_TICKET_COST_YUAN, build_ticket_plan
 import tempfile
 
@@ -235,6 +237,12 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
                 "final_result": _outcome_code(cells[3]),
                 "final_result_label": cells[3],
                 "outcome_hit": cells[5] == "命中",
+                "diagnostic_tags": [] if len(cells) < 9 or cells[8] == "-" else cells[8].split("、"),
+                "post_match_evidence": (
+                    []
+                    if len(cells) < 10 or cells[9] == "-"
+                    else [{"label": label, "summary": label, "sources": []} for label in cells[9].split("、")]
+                ),
             }
         )
 
@@ -379,16 +387,18 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         raise ValueError(f"{results_source} 赛果不完整，缺少第 {missing_text} 场。")
 
     review = build_review(plan, results)
+    post_match_evidence = find_post_match_evidence(review, cache_dir / "post_match_evidence")
+    diagnostics = record_review_diagnostics(review, report_dir)
     markdown_path = report_dir / f"{_slug(plan.issue.issue)}_review.md"
     html_path = report_dir / f"{_slug(plan.issue.issue)}_review.html"
-    write_review_report(review, markdown_path)
+    write_review_report(review, markdown_path, post_match_evidence)
     write_review_html(review, html_path)
     archive_report("review", plan.issue.issue, html_path, markdown_path, history_dir=history_dir)
 
     return {
         "ok": True,
         "message": f"{plan.issue.issue} 复盘报告已生成，赛果来源：{results_source}。",
-        "report": _serialize_review_report(review),
+        "report": _serialize_review_report(review, diagnostics, post_match_evidence),
         "html_path": str(html_path),
         "markdown_path": str(markdown_path),
     }
@@ -472,7 +482,11 @@ def _valid_sequence_list(value: object, sequences: set[int], expected_count: int
     return tuple(sorted(items))
 
 
-def _serialize_review_report(review) -> dict[str, object]:
+def _serialize_review_report(
+    review,
+    diagnostics: dict[str, object] | None = None,
+    post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
+) -> dict[str, object]:
     report = serialize_ticket_plan(review.plan)
     by_seq = {row.prediction.match.seq: row for row in review.rows}
     predictions = []
@@ -484,6 +498,10 @@ def _serialize_review_report(review) -> dict[str, object]:
             prediction["final_result"] = row.result.outcome
             prediction["final_result_label"] = OUTCOME_LABELS[row.result.outcome]
             prediction["outcome_hit"] = row.outcome_hit
+            prediction["diagnostic_tags"] = list(row.diagnostic_tags)
+            prediction["post_match_evidence"] = normalize_evidence(
+                (post_match_evidence or {}).get(row.prediction.match.seq)
+            )
         predictions.append(prediction)
     report["predictions"] = predictions
     report["purchase_deadline_source"] = "复盘报告"
@@ -492,6 +510,12 @@ def _serialize_review_report(review) -> dict[str, object]:
         "single_count": review.single_hits,
         "low_risk_count": review.outcome_hits,
         "average_confidence": round(review.outcome_hits / review.total * 100, 1) if review.total else 0.0,
+    }
+    report["review_diagnostics"] = diagnostics or {
+        "issue_miss_count": review.total - review.outcome_hits,
+        "issue_tags": [],
+        "history_issue_count": 0,
+        "history_tags": [],
     }
     return report
 

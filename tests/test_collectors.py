@@ -13,6 +13,7 @@ from football_lottery_agent.collectors import (
     infer_signals,
     load_matches,
     load_seed_matches,
+    search_web_news,
 )
 
 
@@ -50,6 +51,16 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0].title, "Portugal team news")
         self.assertEqual(items[0].link, "https://example.test/a")
+
+    def test_search_web_news_uses_google_news_when_primary_indexes_are_empty(self) -> None:
+        fallback = [NewsItem(title="Weather disrupted match", link="https://example.test/weather")]
+        with (
+            patch("football_lottery_agent.collectors._fetch_bing_news", return_value=[]),
+            patch("football_lottery_agent.collectors._fetch_google_news", return_value=fallback),
+        ):
+            items = search_web_news("team weather", Path("data/cache"))
+
+        self.assertEqual(items, fallback)
 
     def test_media_item_matches_chinese_team_alias(self) -> None:
         match = RawMatch(seq=1, kickoff="", league="世界杯", home="葡萄牙", away="乌兹别克")

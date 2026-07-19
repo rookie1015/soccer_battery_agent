@@ -15,13 +15,7 @@ def build_ticket_plan(issue: Issue, max_ticket_cost_yuan: int = DEFAULT_MAX_TICK
         predict_issue(issue.matches),
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
-    uncertainty = sorted(
-        predictions,
-        key=lambda item: (_uncertainty_score(item), -item.match.seq),
-        reverse=True,
-    )
-    choose9_drop = tuple(sorted(pred.match.seq for pred in uncertainty[:5]))
-    choose9_keep = tuple(seq for seq in range(1, 15) if seq not in choose9_drop)
+    choose9_keep, choose9_drop = _select_choose9(predictions)
 
     return TicketPlan(
         issue=issue,
@@ -29,6 +23,30 @@ def build_ticket_plan(issue: Issue, max_ticket_cost_yuan: int = DEFAULT_MAX_TICK
         choose9_keep=choose9_keep,
         choose9_drop=choose9_drop,
     )
+
+
+def _select_choose9(predictions: tuple[Prediction, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Select nine fixtures for the chance that all nine recommended picks land.
+
+    A fixture's relevant probability is the total probability covered by its selected
+    outcomes, rather than its raw confidence or number of selected outcomes.
+    """
+    ranked = sorted(
+        predictions,
+        key=lambda prediction: (
+            _pick_coverage_probability(prediction),
+            prediction.confidence,
+            -prediction.match.seq,
+        ),
+        reverse=True,
+    )
+    keep = tuple(sorted(prediction.match.seq for prediction in ranked[:9]))
+    drop = tuple(sorted(prediction.match.seq for prediction in ranked[9:]))
+    return keep, drop
+
+
+def _pick_coverage_probability(prediction: Prediction) -> float:
+    return sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks)
 
 
 def ticket_cost_yuan(predictions: tuple[Prediction, ...]) -> int:
@@ -88,11 +106,3 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
     if budget_note not in reasons:
         reasons = (*reasons, budget_note)
     return replace(prediction, picks=downgraded, reasons=reasons)
-
-
-def _uncertainty_score(prediction: Prediction) -> float:
-    probs = sorted(prediction.probabilities.values(), reverse=True)
-    top = probs[0]
-    second = probs[1]
-    pick_penalty = {1: 0.0, 2: 0.12, 3: 0.24}[len(prediction.picks)]
-    return (1.0 - top) + (second - top) * 0.2 + pick_penalty
