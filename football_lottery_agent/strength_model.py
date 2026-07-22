@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import math
 import re
 import urllib.error
 import urllib.parse
@@ -91,9 +92,30 @@ class StrengthProfile:
 
 
 @dataclass(frozen=True)
+class SquadProfile:
+    """A pre-match paper-strength view built only from the current team roster."""
+
+    team: TeamRef
+    players_count: int
+    estimated_starting_value: float
+    paper_rating: float
+    current_rating: float
+    attack_rating: float
+    defence_rating: float
+    recent_form_rating: float | None
+    recent_form_samples: int
+    unavailable_count: int
+    unavailable_value: float
+    availability_penalty: float
+    notable_absences: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FixtureStrength:
     home: StrengthProfile | None
     away: StrengthProfile | None
+    home_squad: SquadProfile | None
+    away_squad: SquadProfile | None
     h2h: tuple[str, ...]
     source: dict[str, Any]
 
@@ -142,10 +164,15 @@ def _build_fixture_strength(
 
     home = _build_team_profile(home_ref, cache, lookback, xg_matches) if home_ref else None
     away = _build_team_profile(away_ref, cache, lookback, xg_matches) if away_ref else None
+    unavailable = _fixture_unavailable(event, cache)
+    home_squad = _build_squad_profile(home_ref, cache, unavailable.get("home", ())) if home_ref else None
+    away_squad = _build_squad_profile(away_ref, cache, unavailable.get("away", ())) if away_ref else None
     h2h = _extract_h2h_from_event(event, cache) if event else ()
     return FixtureStrength(
         home=home,
         away=away,
+        home_squad=home_squad,
+        away_squad=away_squad,
         h2h=h2h,
         source={
             "provider": "fotmob",
@@ -207,6 +234,164 @@ def _build_team_profile(team: TeamRef, cache: Path, lookback: int, xg_matches: i
         rating=round(rating, 3),
         notes=notes,
     )
+
+
+def _build_squad_profile(team: TeamRef, cache: Path, fixture_unavailable: tuple[dict[str, Any], ...]) -> SquadProfile | None:
+    team_data = _fetch_json(f"{FOTMOB_BASE}/teams?{urllib.parse.urlencode({'id': team.id})}", cache, 86400)
+    groups = (((team_data or {}).get("squad") or {}).get("squad")) or []
+    players = [member for group in groups for member in (group.get("members") or []) if _is_player(member)]
+    if len(players) < 11:
+        return None
+
+    unavailable_ids = {str(item.get("id")) for item in fixture_unavailable if item.get("id") is not None}
+    unavailable_ids.update(str(player.get("id")) for player in players if _has_injury(player.get("injury")))
+    unavailable_players = [player for player in players if str(player.get("id")) in unavailable_ids]
+    available_players = [player for player in players if str(player.get("id")) not in unavailable_ids]
+    recent_forms = _recent_player_forms(team, team_data, cache)
+    selected = _estimate_starting_eleven(available_players, recent_forms)
+    if len(selected) < 8:
+        selected = _estimate_starting_eleven(players, recent_forms)
+
+    starter_value = sum(_player_value(player) for player in selected)
+    unavailable_value = sum(_player_value(player) for player in unavailable_players)
+    paper_strength = sum(_player_strength(player) for player in selected)
+    current_strength = sum(_player_strength(player, recent_forms) for player in selected)
+    attack_strength = sum(_player_strength(player, recent_forms) for player in selected if _position_group(player) in {"midfield", "attack"})
+    defence_strength = sum(_player_strength(player, recent_forms) for player in selected if _position_group(player) in {"keeper", "defence", "midfield"})
+    form_values = [recent_forms[str(player.get("id"))] for player in selected if str(player.get("id")) in recent_forms]
+    sample_count = sum(item[0] for item in form_values)
+    recent_form = sum(item[0] * item[1] for item in form_values) / sample_count if sample_count else None
+    reference_value = max(starter_value + unavailable_value, 1.0)
+    penalty = min(0.35, unavailable_value / reference_value)
+    absences = tuple(str(player.get("name", "")) for player in sorted(unavailable_players, key=_player_value, reverse=True)[:3] if player.get("name"))
+    return SquadProfile(
+        team=team,
+        players_count=len(players),
+        estimated_starting_value=round(starter_value, 1),
+        paper_rating=round(paper_strength, 3),
+        current_rating=round(current_strength, 3),
+        attack_rating=round(attack_strength, 3),
+        defence_rating=round(defence_strength, 3),
+        recent_form_rating=round(recent_form, 2) if recent_form is not None else None,
+        recent_form_samples=sample_count,
+        unavailable_count=len(unavailable_players),
+        unavailable_value=round(unavailable_value, 1),
+        availability_penalty=round(penalty, 3),
+        notable_absences=absences,
+    )
+
+
+def _fixture_unavailable(event: dict[str, Any] | None, cache: Path) -> dict[str, tuple[dict[str, Any], ...]]:
+    if not event or _is_finished(event) or not event.get("id"):
+        return {"home": (), "away": ()}
+    payload = _fetch_json(
+        f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': event['id']})}", cache, 900
+    )
+    lineup = (((payload or {}).get("content") or {}).get("lineup")) or {}
+    return {
+        "home": tuple(((lineup.get("homeTeam") or {}).get("unavailable")) or []),
+        "away": tuple(((lineup.get("awayTeam") or {}).get("unavailable")) or []),
+    }
+
+
+def _is_player(member: dict[str, Any]) -> bool:
+    return bool(member.get("id")) and _position_group(member) != "other"
+
+
+def _has_injury(value: Any) -> bool:
+    return bool(value) and value not in {"none", "None", "null"}
+
+
+def _position_group(player: dict[str, Any]) -> str:
+    role = str(((player.get("role") or {}).get("key")) or "").lower()
+    position = player.get("positionId")
+    if "keeper" in role or position == 0:
+        return "keeper"
+    if "defender" in role or position == 1:
+        return "defence"
+    if "midfielder" in role or position == 2:
+        return "midfield"
+    if "attacker" in role or position == 3:
+        return "attack"
+    return "other"
+
+
+def _recent_player_forms(team: TeamRef, team_data: dict[str, Any], cache: Path, limit: int = 8) -> dict[str, tuple[int, float]]:
+    fixtures = (((team_data.get("fixtures") or {}).get("allFixtures") or {}).get("fixtures")) or []
+    finished = [_fixture_to_match_stat(item, team.id) for item in fixtures if _is_finished(item)]
+    recent = sorted((item for item in finished if item is not None), key=lambda item: item.date, reverse=True)[:limit]
+    values: dict[str, list[float]] = {}
+    for item in recent:
+        payload = _fetch_json(
+            f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': item.match_id})}", cache, 86400 * 30
+        )
+        lineup = (((payload or {}).get("content") or {}).get("lineup")) or {}
+        for side in ("homeTeam", "awayTeam"):
+            team_lineup = lineup.get(side) or {}
+            if int(team_lineup.get("id", -1)) != team.id:
+                continue
+            for player in list(team_lineup.get("starters") or []) + list(team_lineup.get("subs") or []):
+                rating = ((player.get("performance") or {}).get("rating"))
+                try:
+                    rating = min(8.8, max(5.0, float(rating)))
+                except (TypeError, ValueError):
+                    continue
+                values.setdefault(str(player.get("id")), []).append(rating)
+    return {
+        player_id: (len(ratings), round(_weighted_recent_average(ratings), 3))
+        for player_id, ratings in values.items()
+    }
+
+
+def _weighted_recent_average(ratings: list[float]) -> float:
+    weights = [0.88**index for index in range(len(ratings))]
+    return sum(rating * weight for rating, weight in zip(ratings, weights)) / sum(weights)
+
+
+def _estimate_starting_eleven(
+    players: list[dict[str, Any]], recent_forms: dict[str, tuple[int, float]] | None = None
+) -> list[dict[str, Any]]:
+    quotas = (("keeper", 1), ("defence", 4), ("midfield", 3), ("attack", 3))
+    selected: list[dict[str, Any]] = []
+    for group, quota in quotas:
+        candidates = sorted(
+            (player for player in players if _position_group(player) == group),
+            key=lambda player: _player_strength(player, recent_forms),
+            reverse=True,
+        )
+        selected.extend(candidates[:quota])
+    if len(selected) < 11:
+        chosen = {str(player.get("id")) for player in selected}
+        remaining = sorted(
+            (player for player in players if str(player.get("id")) not in chosen),
+            key=lambda player: _player_strength(player, recent_forms),
+            reverse=True,
+        )
+        selected.extend(remaining[: 11 - len(selected)])
+    return selected[:11]
+
+
+def _player_value(player: dict[str, Any]) -> float:
+    try:
+        return max(0.0, float(player.get("transferValue") or player.get("marketValue") or 0.0) / 1_000_000)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _player_strength(player: dict[str, Any], recent_forms: dict[str, tuple[int, float]] | None = None) -> float:
+    weights = {"keeper": 0.9, "defence": 0.95, "midfield": 1.0, "attack": 1.08}
+    rating = player.get("rating")
+    try:
+        base_rating = float(rating)
+    except (TypeError, ValueError):
+        base_rating = 6.8
+    recent = (recent_forms or {}).get(str(player.get("id")))
+    if recent:
+        appearances, recent_rating = recent
+        recent_weight = min(0.45, appearances * 0.12)
+        base_rating = base_rating * (1.0 - recent_weight) + recent_rating * recent_weight
+    form_factor = min(1.12, max(0.88, 1.0 + (base_rating - 6.8) * 0.04))
+    return math.log1p(_player_value(player)) * weights.get(_position_group(player), 1.0) * form_factor
 
 
 def _fetch_events_for_dates(matches: list[RawMatch], cache: Path) -> dict[str, list[dict[str, Any]]]:

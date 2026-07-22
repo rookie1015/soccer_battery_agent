@@ -2,18 +2,25 @@ from __future__ import annotations
 
 from math import exp, factorial
 
+from .dixon_coles import DixonColesForecast, forecast as dixon_coles_forecast
 from .models import Match, Prediction, Scoreline
 
 
 OUTCOME_LABELS = {"3": "主胜", "1": "平", "0": "客胜"}
 
 
-def predict_match(match: Match) -> Prediction:
+def predict_match(match: Match, model_weights: dict[str, float] | None = None) -> Prediction:
     odds_probs = _odds_to_probabilities(match)
     signal_scores = _signal_scores(match)
+    math_forecast = dixon_coles_forecast(match)
+    odds_weight, signal_weight, math_weight = _blend_weights(math_forecast, model_weights)
 
     mixed = {
-        outcome: 0.68 * odds_probs[outcome] + 0.32 * signal_scores[outcome]
+        outcome: (
+            odds_weight * odds_probs[outcome]
+            + signal_weight * signal_scores[outcome]
+            + math_weight * math_forecast.probabilities[outcome]
+        )
         for outcome in ("3", "1", "0")
     }
     probabilities = _normalize(mixed)
@@ -32,8 +39,8 @@ def predict_match(match: Match) -> Prediction:
 
     confidence = round(top_prob * 100, 1)
     risk = _risk_label(top_prob, spread, len(picks))
-    scorelines = _predict_scorelines(match, probabilities)
-    reasons = _build_reasons(match, probabilities, ranked, spread)
+    scorelines = _predict_scorelines(match, probabilities, math_forecast)
+    reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
 
     return Prediction(
         match=match,
@@ -46,8 +53,23 @@ def predict_match(match: Match) -> Prediction:
     )
 
 
-def predict_issue(matches: tuple[Match, ...]) -> tuple[Prediction, ...]:
-    return tuple(predict_match(match) for match in matches)
+def predict_issue(matches: tuple[Match, ...], model_weights: dict[str, float] | None = None) -> tuple[Prediction, ...]:
+    return tuple(predict_match(match, model_weights=model_weights) for match in matches)
+
+
+def _blend_weights(
+    math_forecast: DixonColesForecast,
+    model_weights: dict[str, float] | None,
+) -> tuple[float, float, float]:
+    if math_forecast.data_quality != "strength" or not model_weights:
+        return (0.63, 0.25, 0.12) if math_forecast.data_quality != "strength" else (0.55, 0.22, 0.23)
+    odds = max(0.0, float(model_weights.get("odds", 0.55)))
+    signals = max(0.0, float(model_weights.get("signals", 0.22)))
+    math = max(0.0, float(model_weights.get("dixon_coles", 0.23)))
+    total = odds + signals + math
+    if total <= 0:
+        return (0.55, 0.22, 0.23)
+    return (odds / total, signals / total, math / total)
 
 
 def _odds_to_probabilities(match: Match) -> dict[str, float]:
@@ -93,8 +115,16 @@ def _risk_label(top_prob: float, spread: float, pick_count: int) -> str:
     return "高"
 
 
-def _predict_scorelines(match: Match, probabilities: dict[str, float], limit: int = 3) -> tuple[Scoreline, ...]:
-    home_xg, away_xg = _fit_expected_goals(match, probabilities)
+def _predict_scorelines(
+    match: Match,
+    probabilities: dict[str, float],
+    math_forecast: DixonColesForecast | None = None,
+    limit: int = 3,
+) -> tuple[Scoreline, ...]:
+    if math_forecast and math_forecast.data_quality == "strength":
+        home_xg, away_xg = math_forecast.home_xg, math_forecast.away_xg
+    else:
+        home_xg, away_xg = _fit_expected_goals(match, probabilities)
     raw: list[Scoreline] = []
     for home_goals in range(6):
         for away_goals in range(6):
@@ -174,12 +204,21 @@ def _build_reasons(
     probabilities: dict[str, float],
     ranked: list[tuple[str, float]],
     spread: float,
+    math_forecast: DixonColesForecast,
 ) -> list[str]:
     top, top_prob = ranked[0]
     second, second_prob = ranked[1]
     reasons = [
         f"综合赔率和基本面，{OUTCOME_LABELS[top]}最高，约 {top_prob:.0%}；次选{OUTCOME_LABELS[second]}约 {second_prob:.0%}。",
     ]
+    math_probs = math_forecast.probabilities
+    reasons.append(
+        "Dixon-Coles 数学模型："
+        f"预期进球 {math_forecast.home_xg:.2f}-{math_forecast.away_xg:.2f}，"
+        f"胜/平/负 {math_probs['3']:.0%}/{math_probs['1']:.0%}/{math_probs['0']:.0%}。"
+    )
+    if math_forecast.data_quality != "strength":
+        reasons.append("数学模型当前未取得完整 xG/xGA 样本，已降为低权重基线。")
 
     if spread < 0.06:
         reasons.append("前两项概率接近，建议提高防守或在任9中谨慎处理。")
@@ -201,7 +240,7 @@ def _build_reasons(
 
 def _select_notes(notes: tuple[str, ...]) -> list[str]:
     selected = list(notes[:2])
-    priority_keywords = ("实力模型", "外盘赔率", "伤停数据", "情报", "主流媒体")
+    priority_keywords = ("实力模型", "阵容模型", "外盘赔率", "伤停数据", "情报", "主流媒体")
     for note in notes:
         if any(keyword in note for keyword in priority_keywords) and note not in selected:
             selected.append(note)

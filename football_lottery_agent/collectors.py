@@ -853,6 +853,19 @@ def _strength_notes(strength: Any) -> list[str]:
     if home_rating is not None and away_rating is not None:
         edge = home_rating - away_rating
         notes.append(f"实力模型：综合评分主队 {home_rating:.3f} / 客队 {away_rating:.3f}，差值 {edge:+.3f}。")
+    for squad in (getattr(strength, "home_squad", None), getattr(strength, "away_squad", None)):
+        if not squad:
+            continue
+        absence_text = f"，缺阵 {', '.join(squad.notable_absences)}" if squad.notable_absences else ""
+        form_text = (
+            f"，主力近期评分 {squad.recent_form_rating:.2f}（{squad.recent_form_samples} 人次）"
+            if squad.recent_form_rating is not None and squad.recent_form_samples >= 3
+            else ""
+        )
+        notes.append(
+            f"阵容模型：{squad.team.name} 估算主力11人身价约 €{squad.estimated_starting_value:.0f}m，"
+            f"可用度扣减 {squad.availability_penalty:.0%}{form_text}{absence_text}。"
+        )
     if not notes:
         notes.append("实力模型：FotMob 未匹配到球队或近期样本不足。")
     return notes[:8]
@@ -875,6 +888,8 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         return {}
     home = getattr(strength, "home", None)
     away = getattr(strength, "away", None)
+    home_squad = getattr(strength, "home_squad", None)
+    away_squad = getattr(strength, "away_squad", None)
     return {
         **getattr(strength, "source", {}),
         "home_rating": getattr(home, "rating", None),
@@ -882,7 +897,27 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "home_matches_used": getattr(home, "matches_used", None),
         "away_matches_used": getattr(away, "matches_used", None),
         "home_xg_for": getattr(home, "xg_for_per_match", None),
+        "home_xg_against": getattr(home, "xg_against_per_match", None),
         "away_xg_for": getattr(away, "xg_for_per_match", None),
+        "away_xg_against": getattr(away, "xg_against_per_match", None),
+        "home_goals_for": getattr(home, "goals_for_per_match", None),
+        "home_goals_against": getattr(home, "goals_against_per_match", None),
+        "away_goals_for": getattr(away, "goals_for_per_match", None),
+        "away_goals_against": getattr(away, "goals_against_per_match", None),
+        "home_squad_paper_rating": getattr(home_squad, "paper_rating", None),
+        "away_squad_paper_rating": getattr(away_squad, "paper_rating", None),
+        "home_squad_current_rating": getattr(home_squad, "current_rating", None),
+        "away_squad_current_rating": getattr(away_squad, "current_rating", None),
+        "home_squad_recent_form_rating": getattr(home_squad, "recent_form_rating", None),
+        "away_squad_recent_form_rating": getattr(away_squad, "recent_form_rating", None),
+        "home_squad_recent_form_samples": getattr(home_squad, "recent_form_samples", None),
+        "away_squad_recent_form_samples": getattr(away_squad, "recent_form_samples", None),
+        "home_squad_attack": getattr(home_squad, "attack_rating", None),
+        "away_squad_attack": getattr(away_squad, "attack_rating", None),
+        "home_squad_defence": getattr(home_squad, "defence_rating", None),
+        "away_squad_defence": getattr(away_squad, "defence_rating", None),
+        "home_squad_availability_penalty": getattr(home_squad, "availability_penalty", None),
+        "away_squad_availability_penalty": getattr(away_squad, "availability_penalty", None),
     }
 
 

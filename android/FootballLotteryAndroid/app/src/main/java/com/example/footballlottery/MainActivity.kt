@@ -103,6 +103,16 @@ data class AnalysisReport(
     val choose9Drop: List<Int>,
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
+    val modelCalibration: ModelCalibration?,
+)
+
+data class ModelCalibration(
+    val status: String,
+    val sampleCount: Int,
+    val minimumSamples: Int,
+    val oddsWeight: Double,
+    val signalsWeight: Double,
+    val dixonColesWeight: Double,
 )
 
 data class ReportMetrics(
@@ -611,6 +621,17 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                     },
                 )
             },
+            modelCalibration = json.optJSONObject("model_calibration")?.let { calibration ->
+                val weights = calibration.optJSONObject("weights") ?: JSONObject()
+                ModelCalibration(
+                    status = calibration.optString("status"),
+                    sampleCount = calibration.optInt("sample_count"),
+                    minimumSamples = calibration.optInt("minimum_samples"),
+                    oddsWeight = weights.optDouble("odds"),
+                    signalsWeight = weights.optDouble("signals"),
+                    dixonColesWeight = weights.optDouble("dixon_coles"),
+                )
+            },
         )
     }
 
@@ -808,6 +829,17 @@ class FootballLotteryApi(private val baseUrl: String) {
                     historyTags = diagnostics.optJSONArray("history_tags").orEmptyArray().mapObjects { item ->
                         DiagnosticCount(item.optString("label"), item.optInt("count"))
                     },
+                )
+            },
+            modelCalibration = json.optJSONObject("model_calibration")?.let { calibration ->
+                val weights = calibration.optJSONObject("weights") ?: JSONObject()
+                ModelCalibration(
+                    status = calibration.optString("status"),
+                    sampleCount = calibration.optInt("sample_count"),
+                    minimumSamples = calibration.optInt("minimum_samples"),
+                    oddsWeight = weights.optDouble("odds"),
+                    signalsWeight = weights.optDouble("signals"),
+                    dixonColesWeight = weights.optDouble("dixon_coles"),
                 )
             },
         )
@@ -1399,8 +1431,23 @@ private fun SummaryCard(report: AnalysisReport) {
             if (!isReview) {
                 SequenceLine("任选九保留", report.choose9Keep, Color(0xFF16845B))
                 SequenceLine("建议剔除", report.choose9Drop, Color(0xFFB42318))
+                report.modelCalibration?.let { calibration ->
+                    Text(
+                        text = calibrationText(calibration),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF667085),
+                    )
+                }
             }
         }
+    }
+}
+
+private fun calibrationText(calibration: ModelCalibration): String {
+    return if (calibration.status == "calibrated") {
+        "数学权重已由 ${calibration.sampleCount} 场滚动回测校准：赔率 ${"%.0f".format(calibration.oddsWeight * 100)}% · 基本面 ${"%.0f".format(calibration.signalsWeight * 100)}% · Dixon-Coles ${"%.0f".format(calibration.dixonColesWeight * 100)}%"
+    } else {
+        "数学权重校准：已收集 ${calibration.sampleCount}/${calibration.minimumSamples} 场真实复盘，当前使用默认权重。"
     }
 }
 
@@ -1516,6 +1563,13 @@ private fun PredictionCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = Color(0xFF087F8C),
                 )
+                prediction.reasons.firstOrNull { it.startsWith("Dixon-Coles") }?.let { modelReason ->
+                    Text(
+                        text = modelReason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF475467),
+                    )
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 import unittest
 
-from football_lottery_agent.strength_model import _rating, _team_score
+from football_lottery_agent.strength_model import _estimate_starting_eleven, _player_strength, _player_value, _rating, _team_score
 
 
 class StrengthModelTests(unittest.TestCase):
@@ -11,6 +11,32 @@ class StrengthModelTests(unittest.TestCase):
     def test_rating_is_bounded(self) -> None:
         self.assertGreater(_rating(0.7, 0.2, 2.0, 0.8, 1.9, 0.9), 0.5)
         self.assertLessEqual(_rating(1.0, 0.0, 5.0, 0.0, 5.0, 0.0), 1.0)
+
+    def test_estimated_eleven_prefers_value_with_position_balance(self) -> None:
+        players = [
+            {"id": 1, "positionId": 0, "transferValue": 1_000_000},
+            *[{"id": 10 + index, "positionId": 1, "transferValue": (index + 1) * 1_000_000} for index in range(5)],
+            *[{"id": 20 + index, "positionId": 2, "transferValue": (index + 1) * 1_000_000} for index in range(4)],
+            *[{"id": 30 + index, "positionId": 3, "transferValue": (index + 1) * 1_000_000} for index in range(4)],
+        ]
+
+        eleven = _estimate_starting_eleven(players)
+
+        self.assertEqual(len(eleven), 11)
+        self.assertEqual(sum(1 for player in eleven if player["positionId"] == 0), 1)
+        self.assertEqual(sum(1 for player in eleven if player["positionId"] == 1), 4)
+        self.assertGreater(_player_value(eleven[-1]), 0)
+
+    def test_recent_player_form_adjusts_strength_without_overriding_it(self) -> None:
+        player = {"id": 7, "positionId": 3, "transferValue": 30_000_000, "rating": 6.5}
+
+        baseline = _player_strength(player)
+        in_form = _player_strength(player, {"7": (6, 8.2)})
+        out_of_form = _player_strength(player, {"7": (6, 5.4)})
+
+        self.assertGreater(in_form, baseline)
+        self.assertLess(out_of_form, baseline)
+        self.assertLess(in_form / baseline, 1.13)
 
 
 if __name__ == "__main__":

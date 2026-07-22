@@ -7,6 +7,7 @@ from typing import Any
 import re
 
 from .collectors import collect_issue
+from .calibration import build_calibration
 from .history import archive_report, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
@@ -69,7 +70,17 @@ def run_analysis(
     )
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
-    plan = build_ticket_plan(load_issue(issue_path), max_ticket_cost_yuan=max_ticket_cost_yuan)
+    calibration = build_calibration(root)
+    learned_weights = calibration.get("weights") if calibration.get("status") == "calibrated" else None
+    issue_data = load_issue(issue_path)
+    if isinstance(learned_weights, dict):
+        plan = build_ticket_plan(
+            issue_data,
+            max_ticket_cost_yuan=max_ticket_cost_yuan,
+            model_weights=learned_weights,
+        )
+    else:
+        plan = build_ticket_plan(issue_data, max_ticket_cost_yuan=max_ticket_cost_yuan)
     write_report(plan, markdown_path)
     write_analysis_html(plan, html_path)
     history_path = archive_report(
@@ -83,7 +94,7 @@ def run_analysis(
     return {
         "ok": True,
         "message": f"{issue} 分析报告已在手机本机生成。",
-        "report": serialize_ticket_plan(plan),
+        "report": {**serialize_ticket_plan(plan), "model_calibration": calibration},
         "html_path": str(html_path),
         "markdown_path": str(markdown_path),
         "history_path": str(history_path),

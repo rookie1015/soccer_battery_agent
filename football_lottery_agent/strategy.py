@@ -10,9 +10,13 @@ DEFAULT_MAX_TICKET_COST_YUAN = 2000
 STAKE_PER_LINE_YUAN = 2
 
 
-def build_ticket_plan(issue: Issue, max_ticket_cost_yuan: int = DEFAULT_MAX_TICKET_COST_YUAN) -> TicketPlan:
+def build_ticket_plan(
+    issue: Issue,
+    max_ticket_cost_yuan: int = DEFAULT_MAX_TICKET_COST_YUAN,
+    model_weights: dict[str, float] | None = None,
+) -> TicketPlan:
     predictions = _fit_predictions_to_budget(
-        predict_issue(issue.matches),
+        predict_issue(issue.matches, model_weights=model_weights),
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
     choose9_keep, choose9_drop = _select_choose9(predictions)
