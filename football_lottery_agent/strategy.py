@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from math import log
 
 from .models import Issue, Prediction, TicketPlan
-from .predictor import predict_issue
+from .predictor import _draw_context, predict_issue
 
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
@@ -87,20 +88,24 @@ def _fit_predictions_to_budget(
 
 
 def _downgrade_loss(prediction: Prediction) -> float:
-    ranked_selected = sorted(
-        prediction.picks,
-        key=lambda outcome: prediction.probabilities.get(outcome, 0.0),
-        reverse=True,
-    )
-    removed = ranked_selected[-1]
-    return prediction.probabilities.get(removed, 0.0)
+    values = [_coverage_value(prediction, outcome) for outcome in prediction.picks]
+    if len(values) <= 1:
+        return float("inf")
+    removed = min(values)
+    coverage = sum(values)
+    remaining = coverage - removed
+    if remaining <= 0:
+        return float("inf")
+    coverage_loss = -log(remaining / coverage)
+    cost_reduction = log(len(values) / (len(values) - 1))
+    return coverage_loss / cost_reduction
 
 
 def _downgrade_prediction(prediction: Prediction) -> Prediction:
     ranked_selected = tuple(
         sorted(
             prediction.picks,
-            key=lambda outcome: prediction.probabilities.get(outcome, 0.0),
+            key=lambda outcome: _coverage_value(prediction, outcome),
             reverse=True,
         )
     )
@@ -110,3 +115,27 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
     if budget_note not in reasons:
         reasons = (*reasons, budget_note)
     return replace(prediction, picks=downgraded, reasons=reasons)
+
+
+def _coverage_value(prediction: Prediction, outcome: str) -> float:
+    probability = prediction.probabilities.get(outcome, 0.0)
+    if outcome != "1" or probability < 0.26:
+        return probability
+
+    non_draw_probabilities = [
+        prediction.probabilities.get(outcome, 0.0) for outcome in ("3", "0")
+    ]
+    nearest_non_draw_gap = min(abs(probability - value) for value in non_draw_probabilities)
+    if nearest_non_draw_gap > 0.04:
+        return probability
+
+    bonus = 0.02 * (1.0 - nearest_non_draw_gap / 0.04)
+    if prediction.match.sources.get("odds") == "default_placeholder":
+        bonus += 0.015
+
+    expected_total, recent_draw_rate = _draw_context(prediction.match)
+    if expected_total is not None and expected_total < 2.35:
+        bonus += min(0.025, (2.35 - expected_total) * 0.025)
+    if recent_draw_rate is not None and recent_draw_rate > 0.27:
+        bonus += min(0.02, (recent_draw_rate - 0.27) * 0.10)
+    return probability + min(0.05, bonus)

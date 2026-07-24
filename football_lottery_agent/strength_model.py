@@ -299,7 +299,15 @@ def _is_player(member: dict[str, Any]) -> bool:
 
 
 def _has_injury(value: Any) -> bool:
-    return bool(value) and value not in {"none", "None", "null"}
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "none", "null", "false", "0"}
+    if isinstance(value, dict):
+        return any(_has_injury(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return any(_has_injury(item) for item in value)
+    return bool(value)
 
 
 def _position_group(player: dict[str, Any]) -> str:

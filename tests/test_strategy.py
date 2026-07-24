@@ -1,8 +1,14 @@
 import unittest
+from dataclasses import replace
 
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.report import render_markdown
-from football_lottery_agent.strategy import _pick_coverage_probability, build_ticket_plan, ticket_cost_yuan
+from football_lottery_agent.strategy import (
+    _downgrade_prediction,
+    _pick_coverage_probability,
+    build_ticket_plan,
+    ticket_cost_yuan,
+)
 
 
 class StrategyTests(unittest.TestCase):
@@ -57,6 +63,23 @@ class StrategyTests(unittest.TestCase):
         }
 
         self.assertEqual(set(plan.choose9_keep), expected_keep)
+
+    def test_budget_downgrade_protects_near_tied_draw_without_real_odds(self) -> None:
+        prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        match = replace(
+            prediction.match,
+            sources={**prediction.match.sources, "odds": "default_placeholder"},
+        )
+        uncertain = replace(
+            prediction,
+            match=match,
+            probabilities={"3": 0.36, "1": 0.31, "0": 0.33},
+            picks=("3", "1", "0"),
+        )
+
+        adjusted = _downgrade_prediction(uncertain)
+
+        self.assertEqual(adjusted.picks, ("3", "1"))
 
 
 if __name__ == "__main__":

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from math import exp, factorial
+from math import exp, factorial, sqrt
 
 from .dixon_coles import DixonColesForecast, forecast as dixon_coles_forecast
 from .models import Match, Prediction, Scoreline
@@ -13,7 +13,7 @@ def predict_match(match: Match, model_weights: dict[str, float] | None = None) -
     odds_probs = _odds_to_probabilities(match)
     signal_scores = _signal_scores(match)
     math_forecast = dixon_coles_forecast(match)
-    odds_weight, signal_weight, math_weight = _blend_weights(math_forecast, model_weights)
+    odds_weight, signal_weight, math_weight = _blend_weights(match, math_forecast, model_weights)
 
     mixed = {
         outcome: (
@@ -30,12 +30,7 @@ def predict_match(match: Match, model_weights: dict[str, float] | None = None) -
     second_outcome, second_prob = ranked[1]
     spread = top_prob - second_prob
 
-    if top_prob >= 0.52 and spread >= 0.14:
-        picks = (top_outcome,)
-    elif top_prob >= 0.44 and spread >= 0.06:
-        picks = (top_outcome, second_outcome)
-    else:
-        picks = ("3", "1", "0")
+    picks = _select_picks(ranked)
 
     confidence = round(top_prob * 100, 1)
     risk = _risk_label(top_prob, spread, len(picks))
@@ -57,22 +52,56 @@ def predict_issue(matches: tuple[Match, ...], model_weights: dict[str, float] | 
     return tuple(predict_match(match, model_weights=model_weights) for match in matches)
 
 
+def _select_picks(ranked: list[tuple[str, float]]) -> tuple[str, ...]:
+    top_outcome, top_prob = ranked[0]
+    second_outcome, second_prob = ranked[1]
+    _, third_prob = ranked[2]
+    spread = top_prob - second_prob
+
+    if top_prob >= 0.52 and spread >= 0.14:
+        return (top_outcome,)
+    if top_prob >= 0.44 and spread >= 0.06:
+        if third_prob >= 0.25 and second_prob - third_prob < 0.02:
+            return ("3", "1", "0")
+        return (top_outcome, second_outcome)
+    return ("3", "1", "0")
+
+
 def _blend_weights(
+    match: Match,
     math_forecast: DixonColesForecast,
     model_weights: dict[str, float] | None,
 ) -> tuple[float, float, float]:
-    if math_forecast.data_quality != "strength" or not model_weights:
+    placeholder_odds = match.sources.get("odds") == "default_placeholder"
+    if not model_weights:
+        if placeholder_odds:
+            return (0.20, 0.60, 0.20)
         return (0.63, 0.25, 0.12) if math_forecast.data_quality != "strength" else (0.55, 0.22, 0.23)
+
     odds = max(0.0, float(model_weights.get("odds", 0.55)))
     signals = max(0.0, float(model_weights.get("signals", 0.22)))
     math = max(0.0, float(model_weights.get("dixon_coles", 0.23)))
     total = odds + signals + math
     if total <= 0:
-        return (0.55, 0.22, 0.23)
-    return (odds / total, signals / total, math / total)
+        return (0.20, 0.60, 0.20) if placeholder_odds else (0.55, 0.22, 0.23)
+    odds, signals, math = odds / total, signals / total, math / total
+
+    if placeholder_odds and odds > 0.20:
+        odds = 0.20
+        non_market_total = signals + math
+        if non_market_total <= 0:
+            signals, math = 0.60, 0.20
+        else:
+            signals, math = (
+                0.80 * signals / non_market_total,
+                0.80 * math / non_market_total,
+            )
+    return odds, signals, math
 
 
 def _odds_to_probabilities(match: Match) -> dict[str, float]:
+    if match.sources.get("odds") == "default_placeholder":
+        return {"3": 1 / 3, "1": 1 / 3, "0": 1 / 3}
     implied = {
         "3": 1.0 / match.odds.home,
         "1": 1.0 / match.odds.draw,
@@ -90,7 +119,16 @@ def _signal_scores(match: Match) -> dict[str, float]:
 
     away_strength = 1.0 - home_strength
     balance = 1.0 - abs(home_strength - 0.5) * 2.0
-    draw_score = 0.20 + 0.22 * max(0.0, balance)
+    balance = max(0.0, balance)
+    draw_score = 0.20 + 0.30 * balance
+
+    expected_total, recent_draw_rate = _draw_context(match)
+    if expected_total is not None:
+        low_score_adjustment = min(0.18, max(-0.12, (2.35 - expected_total) * 0.18))
+        draw_score += low_score_adjustment * balance
+    if recent_draw_rate is not None:
+        draw_rate_adjustment = min(0.08, max(-0.08, (recent_draw_rate - 0.27) * 0.40))
+        draw_score += draw_rate_adjustment * balance
 
     raw = {
         "3": max(0.05, home_strength),
@@ -98,6 +136,50 @@ def _signal_scores(match: Match) -> dict[str, float]:
         "0": max(0.05, away_strength),
     }
     return _normalize(raw)
+
+
+def _draw_context(match: Match) -> tuple[float | None, float | None]:
+    source = match.sources.get("strength_model") if isinstance(match.sources, dict) else {}
+    source = source if isinstance(source, dict) else {}
+
+    expected_total = None
+    for prefix in ("xg", "goals"):
+        home_for = _positive_number(source.get(f"home_{prefix}_for"))
+        home_against = _positive_number(source.get(f"home_{prefix}_against"))
+        away_for = _positive_number(source.get(f"away_{prefix}_for"))
+        away_against = _positive_number(source.get(f"away_{prefix}_against"))
+        if None not in (home_for, home_against, away_for, away_against):
+            expected_home = sqrt(home_for * away_against)
+            expected_away = sqrt(away_for * home_against)
+            expected_total = expected_home + expected_away
+            break
+
+    draw_rates = [
+        value
+        for value in (
+            _probability_number(source.get("home_draw_rate")),
+            _probability_number(source.get("away_draw_rate")),
+        )
+        if value is not None
+    ]
+    recent_draw_rate = sum(draw_rates) / len(draw_rates) if draw_rates else None
+    return expected_total, recent_draw_rate
+
+
+def _positive_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def _probability_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return min(1.0, max(0.0, number))
 
 
 def _normalize(values: dict[str, float]) -> dict[str, float]:

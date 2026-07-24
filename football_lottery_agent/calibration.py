@@ -12,6 +12,7 @@ from .dixon_coles import forecast as dixon_coles_forecast
 from .history import load_history_entries
 from .loader import load_issue
 from .models import Match
+from .predictor import _odds_to_probabilities, _signal_scores
 
 
 OUTCOMES = ("3", "1", "0")
@@ -132,23 +133,11 @@ def _brier_score(samples: Iterable[CalibrationSample], weights: dict[str, float]
 
 
 def _component_probabilities(match: Match) -> dict[str, dict[str, float]]:
-    odds = {"3": 1 / match.odds.home, "1": 1 / match.odds.draw, "0": 1 / match.odds.away}
     return {
-        "odds": _normalize(odds),
-        "signals": _signal_probabilities(match),
+        "odds": _odds_to_probabilities(match),
+        "signals": _signal_scores(match),
         "dixon_coles": dixon_coles_forecast(match).probabilities,
     }
-
-
-def _signal_probabilities(match: Match) -> dict[str, float]:
-    signals = match.signals
-    home = 0.52 + 0.28 * (signals.home_form - signals.away_form)
-    home += 0.16 * (signals.home_motivation - signals.away_motivation)
-    home += 0.14 * (signals.away_injury_impact - signals.home_injury_impact)
-    home += 0.10 * (signals.schedule_pressure_away - signals.schedule_pressure_home)
-    away = 1.0 - home
-    draw = 0.20 + 0.22 * max(0.0, 1.0 - abs(home - 0.5) * 2.0)
-    return _normalize({"3": max(0.05, home), "1": max(0.08, draw), "0": max(0.05, away)})
 
 
 def _review_outcomes(path: Path) -> dict[int, str]:

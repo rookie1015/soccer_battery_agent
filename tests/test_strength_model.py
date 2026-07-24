@@ -1,6 +1,13 @@
 import unittest
 
-from football_lottery_agent.strength_model import _estimate_starting_eleven, _player_strength, _player_value, _rating, _team_score
+from football_lottery_agent.strength_model import (
+    _estimate_starting_eleven,
+    _has_injury,
+    _player_strength,
+    _player_value,
+    _rating,
+    _team_score,
+)
 
 
 class StrengthModelTests(unittest.TestCase):
@@ -37,6 +44,13 @@ class StrengthModelTests(unittest.TestCase):
         self.assertGreater(in_form, baseline)
         self.assertLess(out_of_form, baseline)
         self.assertLess(in_form / baseline, 1.13)
+
+    def test_injury_detection_accepts_structured_api_values(self) -> None:
+        self.assertTrue(_has_injury({"description": "Hamstring injury"}))
+        self.assertTrue(_has_injury([{"type": "Knock"}]))
+        self.assertFalse(_has_injury({"description": None, "active": False}))
+        self.assertFalse(_has_injury("none"))
+        self.assertFalse(_has_injury(None))
 
 
 if __name__ == "__main__":

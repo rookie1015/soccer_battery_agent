@@ -894,6 +894,8 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         **getattr(strength, "source", {}),
         "home_rating": getattr(home, "rating", None),
         "away_rating": getattr(away, "rating", None),
+        "home_draw_rate": getattr(home, "draw_rate", None),
+        "away_draw_rate": getattr(away, "draw_rate", None),
         "home_matches_used": getattr(home, "matches_used", None),
         "away_matches_used": getattr(away, "matches_used", None),
         "home_xg_for": getattr(home, "xg_for_per_match", None),
