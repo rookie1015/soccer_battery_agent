@@ -226,6 +226,11 @@ def collect_issue(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    metadata = {
+        **metadata,
+        "snapshot_collected_at": datetime.now(timezone.utc).isoformat(),
+        "snapshot_schema_version": "1",
+    }
     output.write_text(
         json.dumps({"issue": issue_id, "metadata": metadata, "matches": matches}, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -867,7 +872,7 @@ def _strength_notes(strength: Any) -> list[str]:
             f"可用度扣减 {squad.availability_penalty:.0%}{form_text}{absence_text}。"
         )
     if not notes:
-        notes.append("实力模型：FotMob 未匹配到球队或近期样本不足。")
+        notes.append("实力模型：FotMob/SofaScore 未匹配到球队或近期样本不足。")
     return notes[:8]
 
 
@@ -898,6 +903,10 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "away_draw_rate": getattr(away, "draw_rate", None),
         "home_matches_used": getattr(home, "matches_used", None),
         "away_matches_used": getattr(away, "matches_used", None),
+        "home_xg_matches": getattr(home, "xg_matches_used", None),
+        "away_xg_matches": getattr(away, "xg_matches_used", None),
+        "home_xg_provider": getattr(home, "xg_provider", None),
+        "away_xg_provider": getattr(away, "xg_provider", None),
         "home_xg_for": getattr(home, "xg_for_per_match", None),
         "home_xg_against": getattr(home, "xg_against_per_match", None),
         "away_xg_for": getattr(away, "xg_for_per_match", None),

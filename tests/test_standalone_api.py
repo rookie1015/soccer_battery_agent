@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -98,6 +99,73 @@ class StandaloneApiTests(unittest.TestCase):
                 standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 288}, Path(tmp))
 
         build_ticket_plan.assert_called_once_with(load_issue.return_value, max_ticket_cost_yuan=288)
+
+    def test_analysis_uses_only_gate_approved_active_weights(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        active_weights = {"odds": 0.4, "signals": 0.2, "dixon_coles": 0.4}
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue"),
+                patch.object(standalone_api, "build_calibration", return_value={
+                    "status": "calibrated",
+                    "sample_count": 140,
+                    "minimum_samples": 84,
+                    "weights": {"odds": 0.9, "signals": 0.1, "dixon_coles": 0.0},
+                }),
+                patch.object(standalone_api, "load_active_model_weights", return_value=active_weights),
+                patch.object(standalone_api, "load_issue", return_value=Mock()) as load_issue,
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan) as build_ticket_plan,
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                result = standalone_api.run_analysis(
+                    {"issue": "26090", "max_ticket_cost_yuan": 288},
+                    Path(tmp),
+                )
+
+        build_ticket_plan.assert_called_once_with(
+            load_issue.return_value,
+            max_ticket_cost_yuan=288,
+            model_weights=active_weights,
+        )
+        self.assertEqual(result["report"]["model_calibration"]["status"], "experiment_active")
+
+    def test_analysis_does_not_use_ungated_calibration_weights(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue"),
+                patch.object(standalone_api, "build_calibration", return_value={
+                    "status": "calibrated",
+                    "sample_count": 140,
+                    "minimum_samples": 84,
+                    "weights": {"odds": 0.9, "signals": 0.1, "dixon_coles": 0.0},
+                }),
+                patch.object(standalone_api, "load_active_model_weights", return_value=None),
+                patch.object(standalone_api, "load_issue", return_value=Mock()) as load_issue,
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan) as build_ticket_plan,
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                result = standalone_api.run_analysis(
+                    {"issue": "26090", "max_ticket_cost_yuan": 288},
+                    Path(tmp),
+                )
+
+        build_ticket_plan.assert_called_once_with(load_issue.return_value, max_ticket_cost_yuan=288)
+        self.assertEqual(result["report"]["model_calibration"]["status"], "experiment_pending_gate")
 
     def test_analysis_rejects_too_small_ticket_budget(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -250,6 +318,52 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(parsed["choose9_drop"], [10, 11, 12, 13, 14])
         self.assertEqual(parsed["predictions"][0]["pick_labels"], ["主胜", "平"])
         self.assertEqual(parsed["predictions"][0]["kickoff_display"], "07-06 20:00")
+
+    def test_history_parses_purchase_deadline_from_new_markdown(self) -> None:
+        markdown_text = _analysis_markdown("26095", "3", tuple(range(1, 10))).replace(
+            "## 任九建议",
+            "## 期次信息\n\n"
+            "- 购彩截止时间：2026-07-25 20:30:00\n"
+            "- 截止时间来源：中国体彩网官方\n"
+            "- 开售时间：2026-07-22 20:00:00\n\n"
+            "## 任九建议",
+        )
+        parsed = standalone_api._parse_history_report(markdown_text, "26095", "analysis")
+
+        self.assertEqual(parsed["purchase_deadline"], "2026-07-25 20:30:00")
+        self.assertEqual(parsed["purchase_deadline_source"], "中国体彩网官方")
+        self.assertEqual(parsed["sale_begin_time"], "2026-07-22 20:00:00")
+
+    def test_history_restores_deadline_for_old_markdown_from_archived_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            issue_data = json.loads(Path("data/sample_issue.json").read_text(encoding="utf-8"))
+            issue_data["issue"] = "26090"
+            issue_data["metadata"] = {
+                "purchase_deadline": "2026-07-04 23:00:00",
+                "purchase_deadline_source": "中国体彩网官方",
+                "sale_begin_time": "2026-07-04 18:00:00",
+            }
+            data_dir = root / "data"
+            data_dir.mkdir(parents=True)
+            (data_dir / "26090_issue.json").write_text(
+                json.dumps(issue_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            report = root / "report.html"
+            markdown = root / "report.md"
+            report.write_text("<h1>report</h1>", encoding="utf-8")
+            markdown.write_text(
+                _analysis_markdown("26090", "3", tuple(range(1, 10))),
+                encoding="utf-8",
+            )
+            archive_report("analysis", "26090", report, markdown, history_dir=root / "reports" / "history")
+
+            result = standalone_api.run_history(root)
+
+        parsed = result["entries"][0]["report"]
+        self.assertEqual(parsed["purchase_deadline"], "2026-07-04 23:00:00")
+        self.assertEqual(parsed["purchase_deadline_source"], "中国体彩网官方")
 
     def test_history_parses_review_keep_rows_for_android_summary(self) -> None:
         markdown_text = """# 足球彩票复盘报告：26090

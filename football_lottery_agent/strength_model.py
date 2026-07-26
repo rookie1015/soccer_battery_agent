@@ -89,6 +89,8 @@ class StrengthProfile:
     xg_against_per_match: float | None
     rating: float
     notes: tuple[str, ...]
+    xg_matches_used: int = 0
+    xg_provider: str = ""
 
 
 @dataclass(frozen=True)
@@ -139,6 +141,20 @@ def build_strength_for_matches(
         ]
         for match, future in zip(matches, futures):
             result[match.seq] = future.result()
+
+    # SofaScore is an additive source: it fills missing team/xG history but
+    # never removes FotMob lineup, squad or form information.
+    from .sofascore import build_sofascore_for_matches
+
+    sofascore = build_sofascore_for_matches(
+        matches,
+        cache_dir=cache_dir,
+        lookback=lookback,
+        xg_matches=xg_matches,
+        team_score=_team_score,
+    )
+    for match in matches:
+        result[match.seq] = _merge_sofascore_strength(result.get(match.seq), sofascore.get(match.seq))
     return result
 
 
@@ -233,6 +249,98 @@ def _build_team_profile(team: TeamRef, cache: Path, lookback: int, xg_matches: i
         xg_against_per_match=round(xga, 3) if xga is not None else None,
         rating=round(rating, 3),
         notes=notes,
+        xg_matches_used=len(xg_for),
+        xg_provider="fotmob" if xg_for else "",
+    )
+
+
+def _merge_sofascore_strength(primary: FixtureStrength | None, sofascore: Any) -> FixtureStrength:
+    if primary is None:
+        primary = FixtureStrength(home=None, away=None, home_squad=None, away_squad=None, h2h=(), source={})
+    if not sofascore:
+        return primary
+
+    home = _merge_sofascore_profile(primary.home, getattr(sofascore, "home", None))
+    away = _merge_sofascore_profile(primary.away, getattr(sofascore, "away", None))
+    sofa_source = dict(getattr(sofascore, "source", {}) or {})
+    has_sofa_data = bool(getattr(sofascore, "home", None) or getattr(sofascore, "away", None))
+    provider = str(primary.source.get("provider") or "")
+    if has_sofa_data:
+        provider = f"{provider}+sofascore".strip("+")
+    return FixtureStrength(
+        home=home,
+        away=away,
+        home_squad=primary.home_squad,
+        away_squad=primary.away_squad,
+        h2h=primary.h2h,
+        source={**primary.source, "provider": provider or "sofascore", "sofascore": sofa_source},
+    )
+
+
+def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) -> StrengthProfile | None:
+    if sofascore is None:
+        return primary
+    if primary is None:
+        rating = _rating(
+            sofascore.win_rate,
+            sofascore.draw_rate,
+            sofascore.goals_for_per_match,
+            sofascore.goals_against_per_match,
+            sofascore.xg_for_per_match,
+            sofascore.xg_against_per_match,
+        )
+        return StrengthProfile(
+            team=TeamRef(sofascore.team_id, sofascore.team_name),
+            matches_used=sofascore.matches_used,
+            win_rate=sofascore.win_rate,
+            draw_rate=sofascore.draw_rate,
+            loss_rate=sofascore.loss_rate,
+            home_win_rate=sofascore.home_win_rate,
+            away_win_rate=sofascore.away_win_rate,
+            goals_for_per_match=sofascore.goals_for_per_match,
+            goals_against_per_match=sofascore.goals_against_per_match,
+            xg_for_per_match=sofascore.xg_for_per_match,
+            xg_against_per_match=sofascore.xg_against_per_match,
+            rating=round(rating, 3),
+            notes=sofascore.notes,
+            xg_matches_used=sofascore.xg_matches_used,
+            xg_provider="sofascore" if sofascore.xg_matches_used else "",
+        )
+
+    primary_has_xg = primary.xg_for_per_match is not None and primary.xg_against_per_match is not None
+    sofa_has_xg = sofascore.xg_for_per_match is not None and sofascore.xg_against_per_match is not None
+    use_sofascore_xg = sofa_has_xg and (
+        not primary_has_xg or sofascore.xg_matches_used > max(3, primary.xg_matches_used)
+    )
+    xgf = sofascore.xg_for_per_match if use_sofascore_xg else primary.xg_for_per_match
+    xga = sofascore.xg_against_per_match if use_sofascore_xg else primary.xg_against_per_match
+    xg_matches = sofascore.xg_matches_used if use_sofascore_xg else primary.xg_matches_used
+    xg_provider = "sofascore" if use_sofascore_xg else primary.xg_provider
+    notes = tuple(dict.fromkeys((*primary.notes, *sofascore.notes)))
+    rating = _rating(
+        primary.win_rate,
+        primary.draw_rate,
+        primary.goals_for_per_match,
+        primary.goals_against_per_match,
+        xgf,
+        xga,
+    )
+    return StrengthProfile(
+        team=primary.team,
+        matches_used=primary.matches_used,
+        win_rate=primary.win_rate,
+        draw_rate=primary.draw_rate,
+        loss_rate=primary.loss_rate,
+        home_win_rate=primary.home_win_rate,
+        away_win_rate=primary.away_win_rate,
+        goals_for_per_match=primary.goals_for_per_match,
+        goals_against_per_match=primary.goals_against_per_match,
+        xg_for_per_match=xgf,
+        xg_against_per_match=xga,
+        rating=round(rating, 3),
+        notes=notes,
+        xg_matches_used=xg_matches,
+        xg_provider=xg_provider,
     )
 
 

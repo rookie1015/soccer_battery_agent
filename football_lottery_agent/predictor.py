@@ -75,8 +75,18 @@ def _blend_weights(
     placeholder_odds = match.sources.get("odds") == "default_placeholder"
     if not model_weights:
         if placeholder_odds:
+            if math_forecast.data_quality == "strength":
+                return (0.20, 0.52, 0.28)
+            if math_forecast.data_quality in {"partial_strength", "hierarchical"}:
+                return (0.20, 0.56, 0.24)
             return (0.20, 0.60, 0.20)
-        return (0.63, 0.25, 0.12) if math_forecast.data_quality != "strength" else (0.55, 0.22, 0.23)
+        return {
+            "strength": (0.55, 0.22, 0.23),
+            "partial_strength": (0.58, 0.23, 0.19),
+            "hierarchical": (0.59, 0.23, 0.18),
+            "hybrid_fallback": (0.61, 0.24, 0.15),
+            "signal_fallback": (0.63, 0.25, 0.12),
+        }.get(math_forecast.data_quality, (0.63, 0.25, 0.12))
 
     odds = max(0.0, float(model_weights.get("odds", 0.55)))
     signals = max(0.0, float(model_weights.get("signals", 0.22)))
@@ -203,7 +213,7 @@ def _predict_scorelines(
     math_forecast: DixonColesForecast | None = None,
     limit: int = 3,
 ) -> tuple[Scoreline, ...]:
-    if math_forecast and math_forecast.data_quality == "strength":
+    if math_forecast and math_forecast.data_quality_score >= 0.50:
         home_xg, away_xg = math_forecast.home_xg, math_forecast.away_xg
     else:
         home_xg, away_xg = _fit_expected_goals(match, probabilities)
@@ -299,8 +309,14 @@ def _build_reasons(
         f"预期进球 {math_forecast.home_xg:.2f}-{math_forecast.away_xg:.2f}，"
         f"胜/平/负 {math_probs['3']:.0%}/{math_probs['1']:.0%}/{math_probs['0']:.0%}。"
     )
-    if math_forecast.data_quality != "strength":
-        reasons.append("数学模型当前未取得完整 xG/xGA 样本，已降为低权重基线。")
+    if math_forecast.data_quality == "partial_strength":
+        reasons.append("数学模型取得部分 xG/xGA，已按样本量向联赛均值收缩，避免少量比赛被过度放大。")
+    elif math_forecast.data_quality == "hierarchical":
+        reasons.append("数学模型暂缺完整 xG，已用近期进失球与联赛先验做分层估计，保留中等权重。")
+    elif math_forecast.data_quality == "hybrid_fallback":
+        reasons.append("仅一方取得可靠实力样本，另一方使用近期状态先验，数学权重已按数据质量调整。")
+    elif math_forecast.data_quality == "signal_fallback":
+        reasons.append("数学模型未取得球队进失球或 xG 样本，仅保留低权重状态基线。")
 
     if spread < 0.06:
         reasons.append("前两项概率接近，建议提高防守或在任9中谨慎处理。")

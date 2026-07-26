@@ -12,6 +12,19 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append("")
     lines.append("> 仅供信息分析和娱乐参考，不保证中奖。请控制预算，理性购彩。")
     lines.append("")
+    metadata = plan.issue.metadata
+    purchase_deadline = str(metadata.get("purchase_deadline") or "").strip()
+    if purchase_deadline:
+        lines.append("## 期次信息")
+        lines.append("")
+        lines.append(f"- 购彩截止时间：{purchase_deadline}")
+        purchase_deadline_source = str(metadata.get("purchase_deadline_source") or "").strip()
+        if purchase_deadline_source:
+            lines.append(f"- 截止时间来源：{purchase_deadline_source}")
+        sale_begin_time = str(metadata.get("sale_begin_time") or "").strip()
+        if sale_begin_time:
+            lines.append(f"- 开售时间：{sale_begin_time}")
+        lines.append("")
     lines.append("## 任九建议")
     lines.append("")
     lines.append(f"- 建议保留：{_join_seq(plan.choose9_keep)}")

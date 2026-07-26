@@ -39,6 +39,22 @@ class StrategyTests(unittest.TestCase):
         self.assertIn("比分倾向", report)
         self.assertRegex(report, r"\d-\d \d+%")
 
+    def test_report_persists_purchase_deadline_for_history(self) -> None:
+        issue = replace(
+            load_issue("data/sample_issue.json"),
+            metadata={
+                "purchase_deadline": "2026-07-25 20:30:00",
+                "purchase_deadline_source": "中国体彩网官方",
+                "sale_begin_time": "2026-07-22 20:00:00",
+            },
+        )
+
+        report = render_markdown(build_ticket_plan(issue))
+
+        self.assertIn("- 购彩截止时间：2026-07-25 20:30:00", report)
+        self.assertIn("- 截止时间来源：中国体彩网官方", report)
+        self.assertIn("- 开售时间：2026-07-22 20:00:00", report)
+
     def test_build_ticket_plan_respects_custom_budget(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)

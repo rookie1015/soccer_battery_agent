@@ -10,7 +10,8 @@
 - 自动采集新浪胜负彩当前期赛程、主客队、近况
 - 自动搜索赛前新闻、伤停、历史交锋线索
 - 支持用 CSV 补充欧赔/平均赔率
-- 用基础启发式模型估算胜 / 平 / 负概率
+- 融合赔率、基本面和 Dixon-Coles 估算胜 / 平 / 负概率
+- 纯胜平负赛前快照、按期走步回测和模型晋级门槛
 - 基于胜平负概率反推 Top3 比分倾向
 - 输出每场推荐：单选、双选、三选、风险等级、理由
 - 自动推荐任选9保留场次和剔除场次
@@ -130,19 +131,26 @@ python -m football_lottery_agent collect --output data\collected_issue.json --fo
 
 ### 球队实力模型
 
-启用 FotMob 球队实力模型：
+启用 FotMob + SofaScore 球队实力模型：
 
 ```powershell
 python -m football_lottery_agent collect --output data\collected_issue.json --strength-model
 ```
 
-模型会从 FotMob 读取：
+模型优先保留 FotMob 的球队、阵容和近期表现，并用 SofaScore 补充缺失的比赛级 xG：
 
 - 过去 20 场结果
 - 主场 / 客场胜率
 - 场均进球 / 失球
 - 最近若干场 xG / xGA
-- FotMob 当日赛程匹配到的球队 id
+- FotMob / SofaScore 当日赛程匹配到的球队 id
+
+SofaScore 网页数据接口没有稳定性承诺，采集器采用“缓存优先 + 403 熔断”：
+
+- 接口可用时保存历史响应，后续分析复用；
+- 接口受限时立即停止本轮继续请求，不拖慢 14 场分析；
+- SofaScore 缺失不会覆盖已有 FotMob 数据；
+- xG 仍不完整时，Dixon-Coles 会按样本量向联赛均值收缩；只有进失球历史时使用分层估计，不再直接退化为纯状态低权重基线。
 
 默认只抓最近 8 场 `matchDetails` 来计算 xG，避免请求过多。你可以改成 20 场：
 
@@ -331,6 +339,36 @@ python -m football_lottery_agent review `
 - 比分 Top1 / Top3 命中率
 - 任九保留场命中率
 - 任九剔除是否有效避开错误
+
+## 纯胜平负模型实验与回测
+
+该实验只评价 14 场的胜 / 平 / 负概率，不把任九取舍、投注金额或票面组合混进模型指标。每次手机端复盘完成后会自动刷新实验；也可以手工运行：
+
+```powershell
+python -m football_lottery_agent experiment --work-dir .
+```
+
+报告写入：
+
+```text
+reports\experiments\latest.json
+reports\experiments\latest.md
+```
+
+实验同时保留两个轨道：
+
+- 严格轨道：只接受采集时间早于本期全部开赛时间的快照，具备模型晋级资格。
+- 探索轨道：允许没有采集时间的旧数据用于观察，但绝不据此启用新权重。
+
+回测按完整期号向前走：训练集只能使用测试期之前的期次，避免同一期比赛互相泄漏。报告对比纯赔率、纯基本面、纯 Dixon-Coles、当前默认权重和走步学习权重，并输出 Top1、Top2、Brier、Log Loss、ECE、平局召回率、冷门召回率、混淆矩阵，以及联赛和数据质量切片。
+
+手工请求晋级：
+
+```powershell
+python -m football_lottery_agent experiment --work-dir . --promote
+```
+
+即使使用 `--promote`，也只有严格样本数量、测试期数、Brier、Log Loss、Top1、平局召回和冷门召回全部通过门槛时才会生成 `reports\experiments\active_model.json`。正式分析只读取这个文件；普通校准结果和旧快照不能直接改变生产预测。
 
 ## 历史中心
 

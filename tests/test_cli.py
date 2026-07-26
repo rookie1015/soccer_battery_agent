@@ -135,6 +135,34 @@ class CliTests(unittest.TestCase):
         self.assertEqual(fetch_results.call_args.args[0], "26087")
         build_review.assert_called_once()
 
+    def test_experiment_command_runs_walk_forward_and_requests_promotion(self) -> None:
+        result = {
+            "artifacts": {"markdown": "reports/experiments/latest.md"},
+            "promotion": {"status": "promoted"},
+        }
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "football-lottery-agent",
+                    "experiment",
+                    "--work-dir",
+                    "workspace",
+                    "--min-train-matches",
+                    "28",
+                    "--promote",
+                ],
+            ),
+            patch.object(cli, "run_experiment", return_value=result) as run_experiment,
+            patch("builtins.print"),
+        ):
+            cli.main()
+
+        self.assertEqual(run_experiment.call_args.args[0], Path("workspace"))
+        self.assertEqual(run_experiment.call_args.kwargs["min_train_matches"], 28)
+        self.assertTrue(run_experiment.call_args.kwargs["promote"])
+
 
 if __name__ == "__main__":
     unittest.main()

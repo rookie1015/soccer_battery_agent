@@ -1444,10 +1444,10 @@ private fun SummaryCard(report: AnalysisReport) {
 }
 
 private fun calibrationText(calibration: ModelCalibration): String {
-    return if (calibration.status == "calibrated") {
-        "数学权重已由 ${calibration.sampleCount} 场滚动回测校准：赔率 ${"%.0f".format(calibration.oddsWeight * 100)}% · 基本面 ${"%.0f".format(calibration.signalsWeight * 100)}% · Dixon-Coles ${"%.0f".format(calibration.dixonColesWeight * 100)}%"
+    return if (calibration.status == "experiment_active") {
+        "纯胜平负权重已通过严格赛前走步回测：赔率 ${"%.0f".format(calibration.oddsWeight * 100)}% · 基本面 ${"%.0f".format(calibration.signalsWeight * 100)}% · Dixon-Coles ${"%.0f".format(calibration.dixonColesWeight * 100)}%"
     } else {
-        "数学权重校准：已收集 ${calibration.sampleCount}/${calibration.minimumSamples} 场真实复盘，当前使用默认权重。"
+        "纯胜平负回测：已收集 ${calibration.sampleCount}/${calibration.minimumSamples} 场真实复盘，未通过晋级门槛前使用默认权重。"
     }
 }
 

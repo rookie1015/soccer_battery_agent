@@ -1,0 +1,696 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import re
+import shutil
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from .calibration import DEFAULT_WEIGHTS, CalibrationSample, fit_weights
+from .dixon_coles import forecast as dixon_coles_forecast
+from .history import load_history_entries
+from .loader import load_issue
+from .models import Match
+from .predictor import _odds_to_probabilities, _signal_scores
+
+
+OUTCOMES = ("3", "1", "0")
+MODEL_VERSION = "pure-1x2-v1"
+SNAPSHOT_SCHEMA_VERSION = "1"
+DEFAULT_MIN_TRAIN_MATCHES = 84
+DEFAULT_MIN_TEST_MATCHES = 84
+DEFAULT_MIN_TEST_ISSUES = 6
+DEFAULT_MIN_BRIER_GAIN = 0.002
+UPSET_MARKET_PROBABILITY = 0.25
+
+STATIC_MODELS = {
+    "odds_only": {"odds": 1.0, "signals": 0.0, "dixon_coles": 0.0},
+    "signals_only": {"odds": 0.0, "signals": 1.0, "dixon_coles": 0.0},
+    "dixon_coles_only": {"odds": 0.0, "signals": 0.0, "dixon_coles": 1.0},
+    "production_default": DEFAULT_WEIGHTS,
+}
+
+
+@dataclass(frozen=True)
+class ExperimentSample:
+    issue: str
+    seq: int
+    kickoff: datetime
+    league: str
+    outcome: str
+    components: dict[str, dict[str, float]]
+    data_quality: str
+    snapshot_status: str
+
+
+@dataclass(frozen=True)
+class PredictionRecord:
+    sample: ExperimentSample
+    probabilities: dict[str, float]
+
+
+def run_experiment(
+    work_dir: str | Path,
+    output_dir: str | Path | None = None,
+    *,
+    min_train_matches: int = DEFAULT_MIN_TRAIN_MATCHES,
+    min_test_matches: int = DEFAULT_MIN_TEST_MATCHES,
+    min_test_issues: int = DEFAULT_MIN_TEST_ISSUES,
+    min_brier_gain: float = DEFAULT_MIN_BRIER_GAIN,
+    promote: bool = False,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    root = Path(work_dir)
+    samples, audit = load_experiment_samples(root)
+    strict = [sample for sample in samples if sample.snapshot_status == "verified_pre_match"]
+    exploratory = [sample for sample in samples if sample.snapshot_status != "post_kickoff_excluded"]
+    timestamp = (created_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    experiment_id = f"{timestamp.strftime('%Y%m%dT%H%M%SZ')}-{MODEL_VERSION}"
+
+    strict_track = evaluate_track(strict, min_train_matches=min_train_matches)
+    exploratory_track = evaluate_track(exploratory, min_train_matches=min_train_matches)
+    promotion = _promotion_decision(
+        strict_track,
+        min_test_matches=min_test_matches,
+        min_test_issues=min_test_issues,
+        min_brier_gain=min_brier_gain,
+    )
+    result: dict[str, Any] = {
+        "experiment_id": experiment_id,
+        "model_version": MODEL_VERSION,
+        "created_at": timestamp.isoformat(),
+        "config": {
+            "min_train_matches": min_train_matches,
+            "min_test_matches": min_test_matches,
+            "min_test_issues": min_test_issues,
+            "min_brier_gain": min_brier_gain,
+            "upset_market_probability": UPSET_MARKET_PROBABILITY,
+            "static_models": STATIC_MODELS,
+        },
+        "dataset": {
+            "sample_count": len(samples),
+            "issue_count": len({sample.issue for sample in samples}),
+            "fingerprint": _dataset_fingerprint(samples),
+            "audit": audit,
+        },
+        "strict": strict_track,
+        "exploratory": exploratory_track,
+        "promotion": promotion,
+    }
+
+    target = Path(output_dir) if output_dir else root / "reports" / "experiments"
+    target.mkdir(parents=True, exist_ok=True)
+    json_path = target / f"{experiment_id}.json"
+    markdown_path = target / f"{experiment_id}.md"
+    result["artifacts"] = {
+        "json": str(json_path),
+        "markdown": str(markdown_path),
+        "latest_json": str(target / "latest.json"),
+        "latest_markdown": str(target / "latest.md"),
+    }
+    if promote and promotion["status"] == "eligible":
+        active = {
+            "status": "active",
+            "experiment_id": experiment_id,
+            "model_version": MODEL_VERSION,
+            "activated_at": timestamp.isoformat(),
+            "weights": strict_track["walk_forward"]["final_weights"],
+            "gates": promotion["gates"],
+            "strict_test_metrics": strict_track["walk_forward"]["models"]["walk_forward_blend"]["metrics"],
+        }
+        active_path = target / "active_model.json"
+        active_path.write_text(json.dumps(active, ensure_ascii=False, indent=2), encoding="utf-8")
+        result["promotion"]["status"] = "promoted"
+        result["promotion"]["active_model_path"] = str(active_path)
+    json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    markdown_path.write_text(render_experiment_markdown(result), encoding="utf-8")
+    shutil.copyfile(json_path, target / "latest.json")
+    shutil.copyfile(markdown_path, target / "latest.md")
+    return result
+
+
+def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], dict[str, Any]]:
+    work_dir = Path(root)
+    history_dir = work_dir / "reports" / "history"
+    latest_reviews: dict[str, dict[str, str]] = {}
+    for entry in load_history_entries(history_dir):
+        if entry.get("kind") != "review":
+            continue
+        issue = str(entry.get("issue") or "").strip()
+        if issue and issue not in latest_reviews:
+            latest_reviews[issue] = entry
+
+    samples: list[ExperimentSample] = []
+    issue_audit: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    skipped: dict[str, int] = {}
+    for issue, entry in latest_reviews.items():
+        issue_path = work_dir / "data" / f"{_slug(issue)}_issue.json"
+        markdown_path = history_dir / str(entry.get("markdown") or "")
+        if not issue_path.exists() or not markdown_path.exists():
+            skipped["missing_issue_or_review"] = skipped.get("missing_issue_or_review", 0) + 1
+            continue
+        outcomes = _review_outcomes(markdown_path)
+        if not outcomes:
+            skipped["missing_outcomes"] = skipped.get("missing_outcomes", 0) + 1
+            continue
+        try:
+            loaded = load_issue(issue_path)
+        except (OSError, ValueError, KeyError, TypeError):
+            skipped["invalid_issue"] = skipped.get("invalid_issue", 0) + 1
+            continue
+
+        snapshot_status, snapshot_reason = audit_snapshot(loaded.metadata, loaded.matches)
+        status_counts[snapshot_status] = status_counts.get(snapshot_status, 0) + 1
+        issue_audit.append(
+            {
+                "issue": issue,
+                "status": snapshot_status,
+                "reason": snapshot_reason,
+                "outcomes": len(outcomes),
+            }
+        )
+        for match in loaded.matches:
+            outcome = outcomes.get(match.seq)
+            if outcome not in OUTCOMES:
+                continue
+            math = dixon_coles_forecast(match)
+            samples.append(
+                ExperimentSample(
+                    issue=issue,
+                    seq=match.seq,
+                    kickoff=match.kickoff,
+                    league=match.league,
+                    outcome=outcome,
+                    components={
+                        "odds": _odds_to_probabilities(match),
+                        "signals": _signal_scores(match),
+                        "dixon_coles": math.probabilities,
+                    },
+                    data_quality=math.data_quality,
+                    snapshot_status=snapshot_status,
+                )
+            )
+    samples.sort(key=lambda item: (item.kickoff, item.issue, item.seq))
+    return samples, {
+        "issue_status_counts": status_counts,
+        "issues": issue_audit,
+        "skipped": skipped,
+        "strict_sample_count": sum(item.snapshot_status == "verified_pre_match" for item in samples),
+        "exploratory_sample_count": sum(item.snapshot_status != "post_kickoff_excluded" for item in samples),
+        "excluded_sample_count": sum(item.snapshot_status == "post_kickoff_excluded" for item in samples),
+    }
+
+
+def audit_snapshot(metadata: dict[str, Any], matches: Iterable[Match]) -> tuple[str, str]:
+    items = list(matches)
+    if not items:
+        return "post_kickoff_excluded", "快照没有比赛。"
+    collected_text = str(metadata.get("snapshot_collected_at") or "").strip()
+    if not collected_text:
+        return "legacy_unverified", "旧快照缺少采集时间，只进入探索性回测。"
+    collected = _parse_datetime(collected_text)
+    if collected is None:
+        return "post_kickoff_excluded", "快照采集时间无法解析。"
+    first_kickoff = min(_as_utc(match.kickoff) for match in items)
+    if _as_utc(collected) >= first_kickoff:
+        return "post_kickoff_excluded", "快照生成时已有比赛开赛，存在赛后信息泄漏风险。"
+    return "verified_pre_match", "采集时间早于本期全部比赛。"
+
+
+def evaluate_track(samples: Iterable[ExperimentSample], *, min_train_matches: int) -> dict[str, Any]:
+    items = sorted(samples, key=lambda item: (item.kickoff, item.issue, item.seq))
+    models: dict[str, Any] = {}
+    for name, weights in STATIC_MODELS.items():
+        records = [_record(sample, _blend(sample.components, weights)) for sample in items]
+        models[name] = {"weights": weights, "metrics": evaluate_records(records)}
+
+    walk_forward = walk_forward_evaluate(items, min_train_matches=min_train_matches)
+    return {
+        "sample_count": len(items),
+        "issue_count": len({sample.issue for sample in items}),
+        "models": models,
+        "walk_forward": walk_forward,
+        "slices": {
+            "production_default": slice_metrics(
+                [_record(sample, _blend(sample.components, DEFAULT_WEIGHTS)) for sample in items]
+            ),
+            "walk_forward_blend": slice_metrics(walk_forward["records_internal"]),
+        },
+    } | {"walk_forward": {key: value for key, value in walk_forward.items() if key != "records_internal"}}
+
+
+def walk_forward_evaluate(
+    samples: Iterable[ExperimentSample],
+    *,
+    min_train_matches: int,
+) -> dict[str, Any]:
+    items = sorted(samples, key=lambda item: (item.kickoff, item.issue, item.seq))
+    grouped: dict[str, list[ExperimentSample]] = {}
+    order: list[str] = []
+    for sample in items:
+        if sample.issue not in grouped:
+            grouped[sample.issue] = []
+            order.append(sample.issue)
+        grouped[sample.issue].append(sample)
+    order.sort(key=lambda issue: min(sample.kickoff for sample in grouped[issue]))
+
+    training: list[ExperimentSample] = []
+    candidate_records: list[PredictionRecord] = []
+    folds: list[dict[str, Any]] = []
+    for issue in order:
+        test = sorted(grouped[issue], key=lambda item: item.seq)
+        if len(training) >= min_train_matches:
+            weights = fit_weights(_calibration_samples(training))
+            fold_records = [_record(sample, _blend(sample.components, weights)) for sample in test]
+            candidate_records.extend(fold_records)
+            folds.append(
+                {
+                    "test_issue": issue,
+                    "train_matches": len(training),
+                    "train_issues": len({sample.issue for sample in training}),
+                    "test_matches": len(test),
+                    "weights": weights,
+                    "metrics": evaluate_records(fold_records),
+                }
+            )
+        training.extend(test)
+
+    test_samples = [record.sample for record in candidate_records]
+    compared_models: dict[str, Any] = {
+        "walk_forward_blend": {"metrics": evaluate_records(candidate_records)}
+    }
+    for name in ("odds_only", "production_default"):
+        weights = STATIC_MODELS[name]
+        records = [_record(sample, _blend(sample.components, weights)) for sample in test_samples]
+        compared_models[name] = {"weights": weights, "metrics": evaluate_records(records)}
+    final_weights = fit_weights(_calibration_samples(items)) if items else dict(DEFAULT_WEIGHTS)
+    return {
+        "min_train_matches": min_train_matches,
+        "fold_count": len(folds),
+        "test_matches": len(candidate_records),
+        "test_issues": len({record.sample.issue for record in candidate_records}),
+        "folds": folds,
+        "models": compared_models,
+        "final_weights": final_weights,
+        "predictions": [_serialize_record(record) for record in candidate_records],
+        "records_internal": candidate_records,
+    }
+
+
+def evaluate_records(records: Iterable[PredictionRecord]) -> dict[str, Any]:
+    items = list(records)
+    if not items:
+        return _empty_metrics()
+    correct = 0
+    top2_hits = 0
+    brier_total = 0.0
+    log_loss_total = 0.0
+    confusion = {actual: {predicted: 0 for predicted in OUTCOMES} for actual in OUTCOMES}
+    actual_counts = {outcome: 0 for outcome in OUTCOMES}
+    predicted_counts = {outcome: 0 for outcome in OUTCOMES}
+    correct_counts = {outcome: 0 for outcome in OUTCOMES}
+    upset_total = 0
+    upset_hits = 0
+    calibration_rows: list[tuple[float, float]] = []
+
+    for record in items:
+        sample = record.sample
+        probabilities = record.probabilities
+        ranked = sorted(OUTCOMES, key=lambda outcome: probabilities[outcome], reverse=True)
+        predicted = ranked[0]
+        hit = predicted == sample.outcome
+        correct += int(hit)
+        top2_hits += int(sample.outcome in ranked[:2])
+        actual_counts[sample.outcome] += 1
+        predicted_counts[predicted] += 1
+        correct_counts[sample.outcome] += int(hit)
+        confusion[sample.outcome][predicted] += 1
+        for outcome in OUTCOMES:
+            brier_total += (probabilities[outcome] - float(outcome == sample.outcome)) ** 2
+        log_loss_total += -math.log(max(1e-12, probabilities[sample.outcome]))
+        confidence = probabilities[predicted]
+        calibration_rows.append((confidence, float(hit)))
+        if sample.components["odds"][sample.outcome] <= UPSET_MARKET_PROBABILITY:
+            upset_total += 1
+            upset_hits += int(hit)
+
+    class_metrics = {}
+    for outcome in OUTCOMES:
+        recall = correct_counts[outcome] / actual_counts[outcome] if actual_counts[outcome] else None
+        precision = correct_counts[outcome] / predicted_counts[outcome] if predicted_counts[outcome] else None
+        class_metrics[outcome] = {
+            "support": actual_counts[outcome],
+            "predicted": predicted_counts[outcome],
+            "recall": _rounded(recall),
+            "precision": _rounded(precision),
+        }
+    return {
+        "matches": len(items),
+        "issues": len({record.sample.issue for record in items}),
+        "accuracy": round(correct / len(items), 4),
+        "top2_accuracy": round(top2_hits / len(items), 4),
+        "brier_score": round(brier_total / (len(items) * len(OUTCOMES)), 4),
+        "log_loss": round(log_loss_total / len(items), 4),
+        "ece": round(_ece(calibration_rows), 4),
+        "draw_recall": class_metrics["1"]["recall"],
+        "upset_support": upset_total,
+        "upset_recall": round(upset_hits / upset_total, 4) if upset_total else None,
+        "class_metrics": class_metrics,
+        "confusion_matrix": confusion,
+        "calibration_bins": _calibration_bins(calibration_rows),
+    }
+
+
+def slice_metrics(records: Iterable[PredictionRecord]) -> dict[str, Any]:
+    items = list(records)
+    by_league: dict[str, list[PredictionRecord]] = {}
+    by_quality: dict[str, list[PredictionRecord]] = {}
+    for record in items:
+        by_league.setdefault(record.sample.league or "未知联赛", []).append(record)
+        by_quality.setdefault(record.sample.data_quality, []).append(record)
+    return {
+        "league": {
+            name: evaluate_records(group)
+            for name, group in sorted(by_league.items(), key=lambda item: (-len(item[1]), item[0]))
+        },
+        "data_quality": {
+            name: evaluate_records(group)
+            for name, group in sorted(by_quality.items(), key=lambda item: (-len(item[1]), item[0]))
+        },
+    }
+
+
+def render_experiment_markdown(result: dict[str, Any]) -> str:
+    lines = [
+        f"# 纯胜平负模型实验：{result['experiment_id']}",
+        "",
+        f"- 模型版本：`{result['model_version']}`",
+        f"- 数据指纹：`{result['dataset']['fingerprint']}`",
+        f"- 总样本：{result['dataset']['sample_count']} 场 / {result['dataset']['issue_count']} 期",
+        f"- 严格赛前样本：{result['dataset']['audit']['strict_sample_count']} 场",
+        f"- 探索性样本：{result['dataset']['audit']['exploratory_sample_count']} 场",
+        f"- 排除样本：{result['dataset']['audit']['excluded_sample_count']} 场",
+        "",
+        "## 严格赛前回测",
+        "",
+    ]
+    lines.extend(_track_markdown(result["strict"]))
+    lines.extend(["", "## 探索性回测（不具备晋级资格）", ""])
+    lines.extend(_track_markdown(result["exploratory"]))
+    promotion = result["promotion"]
+    lines.extend(
+        [
+            "",
+            "## 模型晋级",
+            "",
+            f"- 状态：{promotion['status']}",
+            f"- 结论：{promotion['message']}",
+        ]
+    )
+    for gate in promotion.get("gates", []):
+        lines.append(f"- {'通过' if gate['passed'] else '未通过'}：{gate['name']}（{gate['detail']}）")
+    lines.extend(["", "## 快照审计", ""])
+    for item in result["dataset"]["audit"]["issues"]:
+        lines.append(f"- {item['issue']}：{item['status']}；{item['reason']}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def load_active_model_weights(work_dir: str | Path) -> dict[str, float] | None:
+    path = Path(work_dir) / "reports" / "experiments" / "active_model.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
+        return None
+    return _valid_weights(payload.get("weights"))
+
+
+def _promotion_decision(
+    track: dict[str, Any],
+    *,
+    min_test_matches: int,
+    min_test_issues: int,
+    min_brier_gain: float,
+) -> dict[str, Any]:
+    walk = track["walk_forward"]
+    candidate = walk["models"]["walk_forward_blend"]["metrics"]
+    production = walk["models"]["production_default"]["metrics"]
+    odds = walk["models"]["odds_only"]["metrics"]
+    gates = [
+        {
+            "name": "严格测试样本",
+            "passed": walk["test_matches"] >= min_test_matches,
+            "detail": f"{walk['test_matches']}/{min_test_matches} 场",
+        },
+        {
+            "name": "严格测试期数",
+            "passed": walk["test_issues"] >= min_test_issues,
+            "detail": f"{walk['test_issues']}/{min_test_issues} 期",
+        },
+    ]
+    if candidate["matches"]:
+        gates.extend(
+            [
+                {
+                    "name": "Brier优于生产基线",
+                    "passed": candidate["brier_score"] <= production["brier_score"] - min_brier_gain,
+                    "detail": f"{candidate['brier_score']:.4f} vs {production['brier_score']:.4f}",
+                },
+                {
+                    "name": "Brier优于赔率基线",
+                    "passed": candidate["brier_score"] <= odds["brier_score"] - min_brier_gain,
+                    "detail": f"{candidate['brier_score']:.4f} vs {odds['brier_score']:.4f}",
+                },
+                {
+                    "name": "Log Loss不退化",
+                    "passed": candidate["log_loss"] <= production["log_loss"],
+                    "detail": f"{candidate['log_loss']:.4f} vs {production['log_loss']:.4f}",
+                },
+                {
+                    "name": "Top1命中率不明显退化",
+                    "passed": candidate["accuracy"] + 0.01 >= production["accuracy"],
+                    "detail": f"{candidate['accuracy']:.1%} vs {production['accuracy']:.1%}",
+                },
+                _non_regression_gate("平局召回", candidate["draw_recall"], production["draw_recall"]),
+                _non_regression_gate("冷门召回", candidate["upset_recall"], production["upset_recall"]),
+            ]
+        )
+    else:
+        gates.append({"name": "存在样本外预测", "passed": False, "detail": "尚未形成walk-forward测试折"})
+    passed = all(gate["passed"] for gate in gates)
+    enough_data = gates[0]["passed"] and gates[1]["passed"]
+    return {
+        "status": "eligible" if passed else ("hold" if enough_data else "collecting"),
+        "message": (
+            "候选模型通过全部严格门禁，可以启用。"
+            if passed
+            else "严格样本仍不足，继续收集赛前快照和真实赛果。"
+            if not enough_data
+            else "候选模型未同时超过赔率与生产基线，保持当前生产模型。"
+        ),
+        "gates": gates,
+    }
+
+
+def _non_regression_gate(name: str, candidate: float | None, baseline: float | None) -> dict[str, Any]:
+    if candidate is None or baseline is None:
+        return {"name": name, "passed": True, "detail": "当前测试窗无该类样本，不作为阻断项"}
+    return {
+        "name": f"{name}不明显退化",
+        "passed": candidate + 0.05 >= baseline,
+        "detail": f"{candidate:.1%} vs {baseline:.1%}",
+    }
+
+
+def _track_markdown(track: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- 样本：{track['sample_count']} 场 / {track['issue_count']} 期",
+        f"- Walk-forward：{track['walk_forward']['fold_count']} 折，"
+        f"{track['walk_forward']['test_matches']} 场样本外预测",
+        "",
+        "| 模型 | 场次 | Top1 | Top2 | Brier | Log Loss | ECE | 平局召回 | 冷门召回 |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    models = dict(track["models"])
+    models["walk_forward_blend"] = track["walk_forward"]["models"]["walk_forward_blend"]
+    for name, payload in models.items():
+        metrics = payload["metrics"]
+        lines.append(
+            f"| {name} | {metrics['matches']} | {_percent(metrics['accuracy'])} | "
+            f"{_percent(metrics['top2_accuracy'])} | {metrics['brier_score']:.4f} | "
+            f"{metrics['log_loss']:.4f} | {metrics['ece']:.4f} | "
+            f"{_percent(metrics['draw_recall'])} | {_percent(metrics['upset_recall'])} |"
+        )
+    return lines
+
+
+def _record(sample: ExperimentSample, probabilities: dict[str, float]) -> PredictionRecord:
+    return PredictionRecord(sample=sample, probabilities=probabilities)
+
+
+def _blend(
+    components: dict[str, dict[str, float]],
+    weights: dict[str, float],
+) -> dict[str, float]:
+    values = {
+        outcome: sum(float(weights.get(name, 0.0)) * component[outcome] for name, component in components.items())
+        for outcome in OUTCOMES
+    }
+    total = sum(values.values())
+    return {outcome: values[outcome] / total for outcome in OUTCOMES} if total > 0 else {outcome: 1 / 3 for outcome in OUTCOMES}
+
+
+def _calibration_samples(samples: Iterable[ExperimentSample]) -> list[CalibrationSample]:
+    return [
+        CalibrationSample(kickoff=sample.kickoff, outcome=sample.outcome, components=sample.components)
+        for sample in samples
+    ]
+
+
+def _serialize_record(record: PredictionRecord) -> dict[str, Any]:
+    ranked = sorted(OUTCOMES, key=lambda outcome: record.probabilities[outcome], reverse=True)
+    return {
+        "issue": record.sample.issue,
+        "seq": record.sample.seq,
+        "kickoff": record.sample.kickoff.isoformat(),
+        "league": record.sample.league,
+        "actual": record.sample.outcome,
+        "predicted": ranked[0],
+        "probabilities": {key: round(value, 6) for key, value in record.probabilities.items()},
+        "data_quality": record.sample.data_quality,
+        "snapshot_status": record.sample.snapshot_status,
+    }
+
+
+def _empty_metrics() -> dict[str, Any]:
+    return {
+        "matches": 0,
+        "issues": 0,
+        "accuracy": 0.0,
+        "top2_accuracy": 0.0,
+        "brier_score": 0.0,
+        "log_loss": 0.0,
+        "ece": 0.0,
+        "draw_recall": None,
+        "upset_support": 0,
+        "upset_recall": None,
+        "class_metrics": {
+            outcome: {"support": 0, "predicted": 0, "recall": None, "precision": None}
+            for outcome in OUTCOMES
+        },
+        "confusion_matrix": {actual: {predicted: 0 for predicted in OUTCOMES} for actual in OUTCOMES},
+        "calibration_bins": [],
+    }
+
+
+def _ece(rows: list[tuple[float, float]], bins: int = 10) -> float:
+    if not rows:
+        return 0.0
+    total = len(rows)
+    result = 0.0
+    for index in range(bins):
+        lower = index / bins
+        upper = (index + 1) / bins
+        bucket = [row for row in rows if lower <= row[0] < upper or (index == bins - 1 and row[0] == 1.0)]
+        if bucket:
+            confidence = sum(row[0] for row in bucket) / len(bucket)
+            accuracy = sum(row[1] for row in bucket) / len(bucket)
+            result += len(bucket) / total * abs(confidence - accuracy)
+    return result
+
+
+def _calibration_bins(rows: list[tuple[float, float]], bins: int = 10) -> list[dict[str, Any]]:
+    result = []
+    for index in range(bins):
+        lower = index / bins
+        upper = (index + 1) / bins
+        bucket = [row for row in rows if lower <= row[0] < upper or (index == bins - 1 and row[0] == 1.0)]
+        if not bucket:
+            continue
+        result.append(
+            {
+                "lower": round(lower, 2),
+                "upper": round(upper, 2),
+                "count": len(bucket),
+                "mean_confidence": round(sum(row[0] for row in bucket) / len(bucket), 4),
+                "accuracy": round(sum(row[1] for row in bucket) / len(bucket), 4),
+            }
+        )
+    return result
+
+
+def _dataset_fingerprint(samples: Iterable[ExperimentSample]) -> str:
+    payload = [
+        {
+            "issue": item.issue,
+            "seq": item.seq,
+            "kickoff": item.kickoff.isoformat(),
+            "league": item.league,
+            "outcome": item.outcome,
+            "components": item.components,
+            "data_quality": item.data_quality,
+            "snapshot_status": item.snapshot_status,
+        }
+        for item in samples
+    ]
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _review_outcomes(path: Path) -> dict[int, str]:
+    result: dict[int, str] = {}
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 4 or not cells[0].isdigit():
+            continue
+        outcome = {"主胜": "3", "平": "1", "客胜": "0"}.get(cells[3])
+        if outcome:
+            result[int(cells[0])] = outcome
+    return result
+
+
+def _valid_weights(value: Any) -> dict[str, float] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        weights = {name: max(0.0, float(value[name])) for name in ("odds", "signals", "dixon_coles")}
+    except (KeyError, TypeError, ValueError):
+        return None
+    total = sum(weights.values())
+    if total <= 0:
+        return None
+    return {name: weight / total for name, weight in weights.items()}
+
+
+def _parse_datetime(value: str) -> datetime | None:
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _rounded(value: float | None) -> float | None:
+    return round(value, 4) if value is not None else None
+
+
+def _percent(value: float | None) -> str:
+    return "N/A" if value is None else f"{value:.1%}"
+
+
+def _slug(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "issue"

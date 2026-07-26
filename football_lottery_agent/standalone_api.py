@@ -8,6 +8,7 @@ import re
 
 from .collectors import collect_issue
 from .calibration import build_calibration
+from .experiments import load_active_model_weights, run_experiment
 from .history import archive_report, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
@@ -71,13 +72,26 @@ def run_analysis(
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
     calibration = build_calibration(root)
-    learned_weights = calibration.get("weights") if calibration.get("status") == "calibrated" else None
+    active_weights = load_active_model_weights(root)
+    if active_weights is not None:
+        calibration = {
+            **calibration,
+            "status": "experiment_active",
+            "weights": active_weights,
+            "message": "当前权重已通过严格赛前、按期走步回测的晋级门槛。",
+        }
+    elif calibration.get("status") == "calibrated":
+        calibration = {
+            **calibration,
+            "status": "experiment_pending_gate",
+            "message": "历史样本已足够拟合，但尚未通过严格赛前回测晋级门槛，当前继续使用默认权重。",
+        }
     issue_data = load_issue(issue_path)
-    if isinstance(learned_weights, dict):
+    if active_weights is not None:
         plan = build_ticket_plan(
             issue_data,
             max_ticket_cost_yuan=max_ticket_cost_yuan,
-            model_weights=learned_weights,
+            model_weights=active_weights,
         )
     else:
         plan = build_ticket_plan(issue_data, max_ticket_cost_yuan=max_ticket_cost_yuan)
@@ -112,11 +126,14 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
         entry["markdown_url"] = str((history_dir / markdown).resolve()) if markdown else ""
         markdown_text = _read_history_text(history_dir, markdown)
         entry["markdown_text"] = markdown_text
-        entry["report"] = _parse_history_report(
+        report = _parse_history_report(
             markdown_text,
             str(entry.get("issue") or ""),
             str(entry.get("kind") or ""),
         )
+        if report is not None and str(entry.get("kind") or "") == "analysis":
+            report = _restore_history_metadata(report, Path(work_dir), str(entry.get("issue") or ""))
+        entry["report"] = report
         entries.append(entry)
     return {"ok": True, "entries": entries}
 
@@ -186,11 +203,12 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
     low_risk = sum(1 for prediction in predictions if prediction["risk"] == "低")
     singles = sum(1 for prediction in predictions if "/" not in str(prediction["pick_text"]))
     avg_confidence = sum(float(prediction["confidence"]) for prediction in predictions) / len(predictions)
+    metadata = _parse_analysis_metadata(markdown_text)
     return {
         "issue": issue,
-        "purchase_deadline": "",
-        "purchase_deadline_source": "",
-        "sale_begin_time": "",
+        "purchase_deadline": metadata.get("purchase_deadline", ""),
+        "purchase_deadline_source": metadata.get("purchase_deadline_source", ""),
+        "sale_begin_time": metadata.get("sale_begin_time", ""),
         "metrics": {
             "match_count": len(predictions),
             "single_count": singles,
@@ -201,6 +219,46 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         "choose9_drop": drop,
         "predictions": predictions,
     }
+
+
+def _parse_analysis_metadata(markdown_text: str) -> dict[str, str]:
+    labels = {
+        "purchase_deadline": "购彩截止时间",
+        "purchase_deadline_source": "截止时间来源",
+        "sale_begin_time": "开售时间",
+    }
+    result: dict[str, str] = {}
+    for key, label in labels.items():
+        match = re.search(rf"^- {label}：(.+)$", markdown_text, re.MULTILINE)
+        if match:
+            result[key] = match.group(1).strip()
+    return result
+
+
+def _restore_history_metadata(report: dict[str, object], work_dir: Path, issue: str) -> dict[str, object]:
+    if report.get("purchase_deadline"):
+        return report
+    data_dir = work_dir / "data"
+    candidates = (data_dir / f"{_slug(issue)}_issue.json", data_dir / "collected_issue.json")
+    for path in candidates:
+        if not path.exists():
+            continue
+        try:
+            archived_issue = load_issue(path)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if archived_issue.issue != issue:
+            continue
+        metadata = archived_issue.metadata
+        if not metadata.get("purchase_deadline"):
+            continue
+        restored = dict(report)
+        for key in ("purchase_deadline", "purchase_deadline_source", "sale_begin_time"):
+            value = metadata.get(key)
+            if value:
+                restored[key] = value
+        return restored
+    return report
 
 
 def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, object] | None:
@@ -405,6 +463,7 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     write_review_report(review, markdown_path, post_match_evidence)
     write_review_html(review, html_path)
     archive_report("review", plan.issue.issue, html_path, markdown_path, history_dir=history_dir)
+    experiment = _refresh_model_experiment(root)
 
     return {
         "ok": True,
@@ -412,6 +471,24 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         "report": _serialize_review_report(review, diagnostics, post_match_evidence),
         "html_path": str(html_path),
         "markdown_path": str(markdown_path),
+        "model_experiment": experiment,
+    }
+
+
+def _refresh_model_experiment(root: Path) -> dict[str, object]:
+    try:
+        result = run_experiment(root, promote=True)
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": f"复盘已保存，但模型回测刷新失败：{exc}",
+        }
+    promotion = result["promotion"]
+    return {
+        "status": promotion["status"],
+        "message": promotion["message"],
+        "experiment_id": result["experiment_id"],
+        "report_path": result["artifacts"]["markdown"],
     }
 
 

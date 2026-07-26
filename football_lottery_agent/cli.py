@@ -4,6 +4,13 @@ import argparse
 from pathlib import Path
 
 from .collectors import collect_issue
+from .experiments import (
+    DEFAULT_MIN_TEST_ISSUES,
+    DEFAULT_MIN_TEST_MATCHES,
+    DEFAULT_MIN_TRAIN_MATCHES,
+    load_active_model_weights,
+    run_experiment,
+)
 from .history import archive_report
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
@@ -56,6 +63,22 @@ def main() -> None:
     review_parser.add_argument("--history-dir", default="reports/history", help="Directory for 52-entry HTML history.")
     review_parser.add_argument("--no-history", action="store_true", help="Do not add this HTML report to history.")
 
+    experiment_parser = subparsers.add_parser(
+        "experiment",
+        help="Run the pure 1X2 walk-forward experiment and promotion gates.",
+    )
+    experiment_parser.add_argument("--work-dir", default=".", help="Workspace containing data/ and reports/history/.")
+    experiment_parser.add_argument("--output-dir", help="Experiment artifact directory.")
+    experiment_parser.add_argument("--min-train-matches", type=int, default=DEFAULT_MIN_TRAIN_MATCHES)
+    experiment_parser.add_argument("--min-test-matches", type=int, default=DEFAULT_MIN_TEST_MATCHES)
+    experiment_parser.add_argument("--min-test-issues", type=int, default=DEFAULT_MIN_TEST_ISSUES)
+    experiment_parser.add_argument("--min-brier-gain", type=float, default=0.002)
+    experiment_parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="Activate the learned weights only when every strict gate passes.",
+    )
+
     ui_parser = subparsers.add_parser("ui", help="Start a local browser UI for one-click workflows.")
     ui_parser.add_argument("--host", default="127.0.0.1", help="Local UI host.")
     ui_parser.add_argument("--port", type=int, default=8765, help="Local UI port.")
@@ -105,6 +128,18 @@ def main() -> None:
         except ValueError as exc:
             raise SystemExit(f"Review not ready: {exc}") from exc
         print(f"Review written: {output}")
+    elif args.command == "experiment":
+        result = run_experiment(
+            Path(args.work_dir),
+            output_dir=Path(args.output_dir) if args.output_dir else None,
+            min_train_matches=args.min_train_matches,
+            min_test_matches=args.min_test_matches,
+            min_test_issues=args.min_test_issues,
+            min_brier_gain=args.min_brier_gain,
+            promote=args.promote,
+        )
+        print(f"Experiment written: {result['artifacts']['markdown']}")
+        print(f"Promotion status: {result['promotion']['status']}")
     elif args.command == "ui":
         run_ui(host=args.host, port=args.port, open_browser=not args.no_open)
 
@@ -156,7 +191,8 @@ def _generate_report(
     archive_history: bool = True,
 ) -> Path:
     issue = load_issue(input_path)
-    plan = build_ticket_plan(issue)
+    active_weights = load_active_model_weights(Path.cwd())
+    plan = build_ticket_plan(issue, model_weights=active_weights) if active_weights else build_ticket_plan(issue)
     output = write_report(plan, output_path)
     print(f"Report written: {output}")
     if html_output_path:

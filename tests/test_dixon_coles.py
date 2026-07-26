@@ -37,6 +37,77 @@ class DixonColesTests(unittest.TestCase):
         self.assertEqual(result.data_quality, "strength")
         self.assertGreater(result.probabilities["3"], result.probabilities["0"])
 
+    def test_goals_only_history_uses_hierarchical_fallback(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        goals_match = replace(
+            match,
+            sources={
+                "strength_model": {
+                    "home_goals_for": 2.4,
+                    "home_goals_against": 0.7,
+                    "away_goals_for": 0.8,
+                    "away_goals_against": 1.9,
+                    "home_matches_used": 10,
+                    "away_matches_used": 10,
+                }
+            },
+        )
+
+        result = forecast(goals_match)
+        weights = _blend_weights(goals_match, result, None)
+
+        self.assertEqual(result.data_quality, "hierarchical")
+        self.assertGreater(result.data_quality_score, 0.5)
+        self.assertGreater(result.probabilities["3"], result.probabilities["0"])
+        self.assertAlmostEqual(weights[2], 0.18)
+
+    def test_short_xg_sample_is_shrunk_toward_league_prior(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        short_sample = replace(
+            match,
+            sources={
+                "strength_model": {
+                    "home_xg_for": 3.0,
+                    "home_xg_against": 0.4,
+                    "away_xg_for": 0.5,
+                    "away_xg_against": 2.8,
+                    "home_xg_matches": 1,
+                    "away_xg_matches": 1,
+                }
+            },
+        )
+
+        result = forecast(short_sample)
+
+        self.assertEqual(result.data_quality, "partial_strength")
+        self.assertLess(result.home_xg, 2.0)
+        self.assertGreater(result.away_xg, 0.6)
+
+    def test_recent_draw_rates_adjust_low_score_correlation(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        base = {
+            "home_xg_for": 1.0,
+            "home_xg_against": 1.0,
+            "away_xg_for": 1.0,
+            "away_xg_against": 1.0,
+            "home_xg_matches": 8,
+            "away_xg_matches": 8,
+        }
+        high_draw = forecast(
+            replace(
+                match,
+                sources={"strength_model": {**base, "home_draw_rate": 0.45, "away_draw_rate": 0.45}},
+            )
+        )
+        low_draw = forecast(
+            replace(
+                match,
+                sources={"strength_model": {**base, "home_draw_rate": 0.10, "away_draw_rate": 0.10}},
+            )
+        )
+
+        self.assertGreater(high_draw.probabilities["1"], low_draw.probabilities["1"])
+
     def test_predictor_includes_math_model_reason(self) -> None:
         prediction = predict_match(load_issue("data/sample_issue.json").matches[0])
 
