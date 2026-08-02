@@ -1,301 +1,168 @@
 # Football Lottery Agent
 
-面向中国大陆足球彩票「14场胜平负」和「任选9场」的分析辅助项目。
+面向中国大陆足球彩票「14 场胜平负」和「任选 9 场」的分析辅助工具。项目提供独立 Android App、Python 命令行和本地浏览器控制台。
 
-定位：自动整理比赛信息、估算胜平负概率、生成 14 场和任 9 的投注参考报告。它不是保赚工具，只做信息和策略辅助。
+> 本项目只用于信息整理、概率分析和策略研究，不保证中奖。请控制预算，理性购彩。
 
-## 当前能力
+## 当前版本
 
-- 读取一期 14 场赛程 JSON
-- 自动采集新浪胜负彩当前期赛程、主客队、近况
-- 自动搜索赛前新闻、伤停、历史交锋线索
-- 支持用 CSV 补充欧赔/平均赔率
-- 融合赔率、基本面和 Dixon-Coles 估算胜 / 平 / 负概率
-- 完整分析区分“数值判断资料”和“仅展示资料”，并对每场输出抓取状态审计
-- 使用去水后的公司概率共识、欧赔变化、亚洲让球，以及可用时的外盘大小球
-- 纯胜平负赛前快照、按期走步回测和模型晋级门槛
-- 每次分析独立保存赛前快照，单/双/全包阈值也必须通过样本外门禁
-- 内部仍基于胜平负概率估算比分，供单场预测和赛后复盘使用
-- 标准分析报告输出每场单选、双选、三选、置信度和理由，不再展示风险等级及比分倾向
-- 自动推荐任选9保留场次和剔除场次
-- 在给定预算内用离散全局搜索选择复式覆盖，不再逐场贪心删项
-- 生成 Markdown 报告
-- 支持通过飞书或企业微信群机器人推送报告
-- 内置示例数据，可直接跑通
+- Android：`0.2.0`（versionCode `2`）
+- 更新日期：`2026-08-02`
+- Python：`3.10+`
+- 自动测试：`142` 项
 
-## 快速开始
+## Android App
 
-不想敲命令时，直接双击项目目录里的：
+Android App 已通过 Chaquopy 内置完整 Python 分析引擎，不需要电脑后端，也不需要填写服务器地址。手机在分析当前期次时仍需联网获取赛程、赔率和球队资料。
+
+目前包含四个页面：
+
+1. **分析**：输入期号和最高购彩金额，生成 14 场及任九建议。
+2. **复盘**：自动获取赛果或使用手工 CSV，对照指定的历史分析快照。
+3. **单场**：输入主客队，可选填 1X2 欧赔，生成单场概率和比分参考。
+4. **设置**：保存 The Odds API Key、查看 API 用量、测试手机内置分析引擎。
+
+### 手机分析的默认行为
+
+- 不再提供“简单 / 完整”模式选择，每次优先执行完整分析。
+- 球队增强样本固定为最近 `20` 场，不由用户调整。
+- 当约三分之二比赛的多个关键资料源同时发生网络请求失败时，自动重新按简单分析生成报告。
+- 单个来源没有数据、未匹配球队或确认无伤停，不会被误判为全局网络故障。
+- 最高购彩金额用于限制整张复式票成本；系统通过离散动态规划在预算内选择覆盖组合。
+- 标准分析报告展示推荐、胜平负概率、置信度和分析依据，不再展示风险等级及比分倾向。
+- 比分模型仍在内部保留，供单场预测和赛后复盘使用。
+
+### 构建 APK
+
+在 Windows PowerShell 中运行：
+
+```powershell
+cd android\FootballLotteryAndroid
+.\gradlew.bat assembleDebug
+```
+
+生成位置：
 
 ```text
-start_ui.bat
+android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 ```
 
-浏览器会打开“足球彩票助手控制台”。在页面里填期号，点击“生成分析报告”即可。赛果出来后，复盘默认会自动从新浪拉取赛果；如果自动赛果没更新，再把比分粘到复盘框里手工生成。
-
-控制台顶部还提供“单场比分预测”。手动输入主队和客队即可获得首选比分、两个备选比分、胜平负概率、置信度和风险。若比赛不在当前采集期中，可选填主胜、平局、客胜三项欧洲赔率以提高参考价值。
-
-如需自动推送，在控制台勾选“每次生成后自动发送到飞书”，并填写飞书群机器人的 Webhook。Webhook 不会写入项目文件；也可以预先设置 `FEISHU_WEBHOOK_URL` 环境变量后将输入框留空。
-
-如果是给手机 App 使用，直接双击：
+安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-start_mobile_backend.bat
+App 版本 0.2.0（2） · 已包含 API 用量显示
 ```
 
-手机 App 不再要求选择分析模式：每次默认优先执行完整分析，增强样本固定为最近 20 场；关键资料源出现大范围网络失败时会自动重新按简单分析生成报告。最高购彩金额与期号在同一行填写。
+## 数据来源
 
-这个窗口会自动列出手机 App 设置里应该填写的后端地址。保持窗口打开，手机和电脑连同一个 Wi-Fi，在 App 设置里粘贴地址后点“测试连接”。
+| 来源 | 主要用途 | 是否直接影响概率 |
+| --- | --- | --- |
+| 中国体彩网官方接口 | 期号、开售时间、购彩截止时间 | 用于期次校验，不直接调概率 |
+| 新浪胜负彩与新浪数据网关 | 14 场赛程、欧赔、初盘/即盘、亚洲让球、伤停、交锋、赛前情报、赛果 | 结构化且有效时参与 |
+| FotMob | 近期比赛、进失球、阵容、球员状态、球队实力 | 匹配成功且样本有效时参与 |
+| SofaScore | 补充比赛级 xG/xGA 和缺失球队数据 | 作为 FotMob 的补充来源 |
+| The Odds API | 国外 bookmaker 的 1X2、让球和大小球 | 匹配成功时参与 |
+| ESPN / BBC Sport / Sky Sports | 主流媒体标题 | 仅展示，不通过关键词改变概率 |
+| Google News / GDELT / DuckDuckGo | 新闻搜索与资料线索 | 仅展示，不通过关键词改变概率 |
+| Polymarket | 预测市场背景信息 | 仅展示，不直接改变概率 |
 
-本次版本的完整功能变化见 [CHANGELOG.md](CHANGELOG.md)。
+所有来源都可能出现无数据、球队名称不一致、地区限制或临时不可用。完整分析会为每场保存资料审计状态，区分：可用、确认无记录、未匹配、请求失败和供应商错误。
 
-如果你熟悉命令行，也可以继续使用下面的命令方式。
+## 判断流程
 
-```powershell
-cd football-lottery-agent
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m football_lottery_agent run --input data\sample_issue.json --output reports\sample_report.md
-```
+一次完整分析大致按以下顺序执行：
 
-## 推送到飞书或企业微信
+1. 获取并校验期号、14 场赛程与截止时间。
+2. 收集新浪结构化资料、主流媒体、新闻搜索和预测市场信息。
+3. 获取 FotMob / SofaScore 最近 20 场球队数据、xG 和阵容信息。
+4. 如果设置了 The Odds API Key，查询国外 1X2、让球和大小球数据。
+5. 对公司欧赔去除水位，计算市场共识、离散度以及初盘到即盘变化。
+6. 以赔率概率为市场基线，融合有效基本面和 Dixon-Coles 进球模型。
+7. 根据伤停位置、阵容可用度、近期表现、交锋平局率和盘口证据修正概率。
+8. 主选取最高综合概率；第二选项通过其他证据排序决定，不会无条件优先选择平局。
+9. 在最高购彩金额内全局优化单选、双选和全包组合，再选出任九保留场次。
+10. 保存本次赛前 JSON 快照、分析报告和历史记录，供赛后复盘与严格回测使用。
 
-推荐使用群机器人 webhook。
+### 关于平局
 
-飞书：
+平局不是固定第二选项。系统会综合考虑：
 
-```powershell
-$env:FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/你的token"
-python -m football_lottery_agent send-report --channel feishu --report reports\sample_report.md
-```
+- 去水后的平局概率及公司共识；
+- 主客两项概率差距；
+- Dixon-Coles 低比分相关性；
+- 双方近期平局率、进球能力和防守强度；
+- 亚洲让球、大小球和赔率变化；
+- 伤停、阵容、赛程及结构化赛前情报。
 
-企业微信：
+当多个选项概率接近时，完整分析会使用这些证据决定第二项。没有可靠证据时保持保守，不会用默认中性数值冒充已采集资料。
 
-```powershell
-$env:WECOM_WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
-python -m football_lottery_agent send-report --channel wechat --report reports\sample_report.md
-```
+## The Odds API
 
-也可以生成报告后立刻发送：
+The Odds API 是可选外盘来源。没有 Key 时系统仍可使用新浪等来源完成分析；有 Key 且成功匹配时，国外 bookmaker 数据会进入赔率判断。
 
-```powershell
-python -m football_lottery_agent run --input data\sample_issue.json --output reports\sample_report.md --send feishu
-```
+在 Android 第四页填写并保存 Key 后，可以查看：
 
-如果你不想建虚拟环境，也可以直接：
+- Key 是否有效；
+- 剩余额度；
+- 当前周期累计已用额度；
+- 本次用量查询消耗；
+- 当前开放的体育项目数量。
 
-```powershell
-cd football-lottery-agent
-python -m football_lottery_agent run --input data\sample_issue.json --output reports\sample_report.md
-```
+用量刷新调用官方 `/v4/sports` 接口，本身不消耗赔率额度。“刷新 API 用量”和“测试本机引擎”是两个独立功能。
 
-## 数据格式
+每次分析报告顶部还会记录：
 
-## 自动采集
+- 本次是否真实联网调用；
+- 是否使用 5 分钟缓存；
+- 请求次数与成功次数；
+- 外盘赛事匹配数；
+- Key 无效、额度耗尽、请求受限或调用成功但未匹配等原因；
+- API 响应头返回的剩余、累计使用和本次赔率请求消耗。
 
-采集当前胜负彩期号和 14 场赛程，并自动补充新浪欧赔均值、历史交锋、伤停、情报线索：
+外盘失败时会自动回退到新浪等现有赔率来源，不会让整期分析直接中断。
 
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json
-```
-
-### 国外主流 bookmaker 赔率
-
-外盘赔率使用 [The Odds API](https://the-odds-api.com/) 聚合国外 bookmaker 的 `h2h` 赔率，也就是足球 1X2：主胜 / 平 / 客胜。
-
-手机分析报告顶部会显示本次 The Odds API 的实际状态：是否联网调用、是否只命中 5 分钟缓存、请求/成功次数、赛事匹配数，以及响应头提供的剩余额度、累计已用额度和本次消耗。额度耗尽、Key 无效、请求受限、调用成功但未匹配等情况会分别提示，并自动回退到新浪等现有赔率来源。
-
-手机 App 第四页还可以直接验证已保存的 Key，并显示剩余额度、累计已用、本次查询消耗和当前开放项目数。用量刷新调用官方 `/v4/sports` 接口，本身不消耗额度；“测试本机引擎”与 API 检查是两个独立功能。
-
-先设置 API Key：
+命令行使用方式：
 
 ```powershell
 $env:THE_ODDS_API_KEY="你的_api_key"
+python -m football_lottery_agent collect `
+  --output data\collected_issue.json `
+  --foreign-odds `
+  --foreign-odds-regions uk,eu
 ```
 
-采集时启用外盘：
+也可以限定 bookmaker 或 sport key：
 
 ```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --foreign-odds
+python -m football_lottery_agent collect `
+  --output data\collected_issue.json `
+  --foreign-odds `
+  --foreign-odds-bookmakers pinnacle,betfair,unibet,williamhill `
+  --foreign-odds-sports soccer_fifa_world_cup
 ```
 
-指定地区：
+## 赛后复盘与学习
+
+手机上的历史结果不会仅因为“已经存在”就自动改变模型。只有执行复盘后，赛果才会与对应的赛前快照关联并进入实验样本。
+
+复盘和学习遵循以下规则：
+
+- 每次分析保存独立赛前快照，避免同一期最后一次采集覆盖旧判断。
+- 同一期存在多次分析时，复盘会要求选择具体分析记录。
+- 回测按完整期号向前走，训练集只能使用测试期之前的数据，避免未来信息泄漏。
+- 旧数据或采集时间不完整的数据只能进入探索轨道，不能直接启用新模型。
+- 概率权重与单选/双选/全包策略分别通过样本外门槛后，才会写入生产配置。
+- 未通过 Brier、Log Loss、Top1、平局召回和冷门召回等门槛时，继续使用默认模型。
+
+命令行复盘：
 
 ```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --foreign-odds --foreign-odds-regions uk,eu
+python -m football_lottery_agent review `
+  --issue data\collected_issue.json `
+  --output reports\review_report.md
 ```
 
-指定 bookmaker：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --foreign-odds --foreign-odds-bookmakers pinnacle,betfair,unibet,williamhill
-```
-
-指定 The Odds API sport key：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --foreign-odds --foreign-odds-sports soccer_fifa_world_cup
-```
-
-如果某场匹配成功，`odds` 会优先使用国外 bookmaker 均值，并在 `sources.foreign_odds` 保留 bookmaker 数量、匹配赛事、sport key 等信息。没有 API Key 或匹配失败时，会自动退回新浪欧赔均值。
-
-### 球队实力模型
-
-启用 FotMob + SofaScore 球队实力模型：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --strength-model
-```
-
-模型优先保留 FotMob 的球队、阵容和近期表现，并用 SofaScore 补充缺失的比赛级 xG：
-
-- 过去 20 场结果
-- 主场 / 客场胜率
-- 场均进球 / 失球
-- 最近若干场 xG / xGA
-- FotMob / SofaScore 当日赛程匹配到的球队 id
-
-SofaScore 网页数据接口没有稳定性承诺，采集器采用“缓存优先 + 403 熔断”：
-
-- 接口可用时保存历史响应，后续分析复用；
-- 接口受限时立即停止本轮继续请求，不拖慢 14 场分析；
-- SofaScore 缺失不会覆盖已有 FotMob 数据；
-- xG 仍不完整时，Dixon-Coles 会按样本量向联赛均值收缩；只有进失球历史时使用分层估计，不再直接退化为纯状态低权重基线。
-
-默认只抓最近 8 场 `matchDetails` 来计算 xG，避免请求过多。你可以改成 20 场：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --strength-model --strength-xg-matches 20
-```
-
-如果某队自动匹配失败，可以用 `data\team_ids.example.csv` 的格式维护映射：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --strength-model --strength-team-ids data\team_ids.csv
-```
-
-### 一键日常流程
-
-一条命令完成采集当前期、生成报告：
-
-```powershell
-python -m football_lottery_agent daily --strength-model
-```
-
-生成后直接推送飞书或企业微信：
-
-```powershell
-python -m football_lottery_agent daily --strength-model --send feishu
-```
-
-默认输出：
-
-```text
-data\collected_issue.json
-reports\collected_report.md
-reports\collected_report.html
-reports\history\index.html
-```
-
-也可以指定输出位置：
-
-```powershell
-python -m football_lottery_agent daily --issue-output data\today.json --report-output reports\today.md
-```
-
-生成报告：
-
-```powershell
-python -m football_lottery_agent run --input data\collected_issue.json --output reports\collected_report.md
-```
-
-同时生成可视化 HTML：
-
-```powershell
-python -m football_lottery_agent run `
-  --input data\collected_issue.json `
-  --output reports\collected_report.md `
-  --html-output reports\collected_report.html
-```
-
-一键采集、生成、推送飞书：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json
-python -m football_lottery_agent run --input data\collected_issue.json --output reports\collected_report.md --send feishu
-```
-
-默认会使用新浪指数页的欧赔均值。如果你更信任自己整理的赔率，按 `data\odds.example.csv` 的格式保存：
-
-```csv
-seq,home,draw,away
-1,1.62,4.10,5.20
-```
-
-然后采集时带上：
-
-```powershell
-python -m football_lottery_agent collect --output data\collected_issue.json --odds data\odds.csv
-```
-
-如果新浪源失效，或者你想手工指定 14 场，用 `data\seed_matches.csv`：
-
-```powershell
-python -m football_lottery_agent collect --seed data\seed_matches.csv --output data\collected_issue.json --offline
-```
-
-一期数据是 JSON，核心结构：
-
-```json
-{
-  "issue": "sample-001",
-  "matches": [
-    {
-      "seq": 1,
-      "kickoff": "2026-06-20T22:00:00+08:00",
-      "league": "英超",
-      "home": "曼城",
-      "away": "热刺",
-      "odds": {"home": 1.62, "draw": 4.1, "away": 5.2},
-      "signals": {
-        "home_form": 0.78,
-        "away_form": 0.61,
-        "home_motivation": 0.72,
-        "away_motivation": 0.65,
-        "home_injury_impact": 0.08,
-        "away_injury_impact": 0.18,
-        "schedule_pressure_home": 0.22,
-        "schedule_pressure_away": 0.15
-      },
-      "notes": ["主队主场稳定", "客队后防有伤停"]
-    }
-  ]
-}
-```
-
-`signals` 里的数值范围是 0 到 1。初版先用人工、半自动或后续采集器填充这些信息。
-
-## 推荐含义
-
-- `3`：主胜
-- `1`：平
-- `0`：客胜
-- `3/1`、`1/0` 等：双选防守
-- `3/1/0`：三选，风险高或信息混乱
-
-## 比分模型
-
-模型内部仍会估算每场 Top3 比分，例如：
-
-```text
-1-0 14%，1-1 12%，2-0 11%
-```
-
-当前比分模型会先用赔率和基本面生成胜 / 平 / 负概率，再反推预期进球并用 Poisson 分布估算常见比分。标准分析报告已隐藏比分倾向和风险字段，只保留置信度；比分结果仍供单场预测和赛后复盘使用。
-
-## 赛后复盘
-
-准备赛果 CSV，推荐格式：
+如果自动赛果尚未更新，可使用 CSV：
 
 ```csv
 seq,score
@@ -304,123 +171,130 @@ seq,score
 3,0-2
 ```
 
-也支持：
-
-```csv
-seq,home_goals,away_goals
-1,2,1
-2,1,1
-3,0,2
-```
-
-生成复盘报告：
-
-```powershell
-python -m football_lottery_agent review --issue data\collected_issue.json --output reports\review_report.md
-```
-
-默认会按 issue 期号从新浪胜负彩页面自动拉取赛果。若自动源还没有更新，或你想手工指定结果，可以加 `--results`：
-
-```powershell
-python -m football_lottery_agent review --issue data\collected_issue.json --results data\results.csv --output reports\review_report.md
-```
-
-`review` 默认也会生成可视化 HTML：
-
-```text
-reports\review_report.html
-reports\history\index.html
-```
-
-也可以显式指定：
-
 ```powershell
 python -m football_lottery_agent review `
   --issue data\collected_issue.json `
   --results data\results.csv `
-  --output reports\review_report.md `
-  --html-output reports\review_report.html
+  --output reports\review_report.md
 ```
 
-复盘会统计：
-
-- 胜平负命中率
-- 单选命中率
-- 比分 Top1 / Top3 命中率
-- 任九保留场命中率
-- 任九剔除是否有效避开错误
-
-## 纯胜平负模型实验与回测
-
-该实验只评价 14 场的胜 / 平 / 负概率，不把任九取舍、投注金额或票面组合混进模型指标。每次手机端复盘完成后会自动刷新实验；也可以手工运行：
+运行纯胜平负走步回测：
 
 ```powershell
 python -m football_lottery_agent experiment --work-dir .
 ```
 
-报告写入：
-
-```text
-reports\experiments\latest.json
-reports\experiments\latest.md
-```
-
-实验同时保留两个轨道：
-
-- 严格轨道：只接受采集时间早于本期全部开赛时间的快照，具备模型晋级资格。
-- 探索轨道：允许没有采集时间的旧数据用于观察，但绝不据此启用新权重。
-
-回测按完整期号向前走：训练集只能使用测试期之前的期次，避免同一期比赛互相泄漏。报告对比纯赔率、纯基本面、纯 Dixon-Coles、当前默认权重和走步学习权重，并输出 Top1、Top2、Brier、Log Loss、ECE、平局召回率、冷门召回率、混淆矩阵，以及联赛和数据质量切片。
-
-手工请求晋级：
+手工请求晋级仍会执行全部门槛，不会强制覆盖生产模型：
 
 ```powershell
 python -m football_lottery_agent experiment --work-dir . --promote
 ```
 
-即使使用 `--promote`，也只有严格样本数量、测试期数、Brier、Log Loss、Top1、平局召回和冷门召回全部通过门槛时才会生成 `reports\experiments\active_model.json`。正式分析只读取这个文件；普通校准结果和旧快照不能直接改变生产预测。
+## Python 快速开始
 
-## 历史中心
+创建环境：
 
-生成 HTML 报告时，系统会默认把当次分析/复盘存入历史中心：
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
+
+使用示例数据生成报告：
+
+```powershell
+python -m football_lottery_agent run `
+  --input data\sample_issue.json `
+  --output reports\sample_report.md `
+  --html-output reports\sample_report.html
+```
+
+一键采集当前期并生成报告：
+
+```powershell
+python -m football_lottery_agent daily --strength-model
+```
+
+完整采集命令示例：
+
+```powershell
+python -m football_lottery_agent collect `
+  --output data\collected_issue.json `
+  --strength-model `
+  --strength-lookback 20 `
+  --strength-xg-matches 20
+```
+
+如果更信任自己整理的赔率，可提供 CSV：
+
+```csv
+seq,home,draw,away
+1,1.62,4.10,5.20
+```
+
+```powershell
+python -m football_lottery_agent collect `
+  --output data\collected_issue.json `
+  --odds data\odds.csv
+```
+
+如果自动球队匹配失败，可参考 `data/team_ids.example.csv` 维护球队映射。
+
+## 本地浏览器控制台
+
+Windows 可直接双击：
 
 ```text
-reports\history\index.html
-reports\history\index.json
-reports\history\items\
+start_ui.bat
 ```
 
-历史中心保留最近 52 条记录。即使 `reports\collected_report.html` 或 `reports\review_report.html` 被下一次运行覆盖，`reports\history\items\` 中的历史副本仍会保留。
-
-打开历史中心后，可以用下拉框或左侧列表切换历史分析/复盘页面。
-
-如果某次不想存入历史：
+或运行：
 
 ```powershell
-python -m football_lottery_agent daily --no-history
+python -m football_lottery_agent ui
 ```
 
-也可以指定历史目录：
+控制台支持分析、复盘、单场预测，以及飞书 / 企业微信群机器人推送。Webhook 建议通过环境变量配置：
 
 ```powershell
-python -m football_lottery_agent daily --history-dir reports\history
+$env:FEISHU_WEBHOOK_URL="https://open.feishu.cn/open-apis/bot/v2/hook/你的token"
+$env:WECOM_WEBHOOK_URL="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=你的key"
+```
+
+## 测试
+
+运行 Python 测试：
+
+```powershell
+python -m pytest -q
+```
+
+构建 Android：
+
+```powershell
+cd android\FootballLotteryAndroid
+.\gradlew.bat assembleDebug
 ```
 
 ## 项目结构
 
 ```text
 football-lottery-agent/
-  data/                  示例输入
-  football_lottery_agent/ 核心代码
-  reports/               输出报告目录
-  tests/                 单元测试
+  android/FootballLotteryAndroid/  Android 独立客户端
+  data/                            示例输入和映射模板
+  docs/                            接口说明
+  football_lottery_agent/          Python 核心分析代码
+  ios/                             iOS 客户端草稿
+  reports/                         本地生成的报告与历史记录（不提交）
+  tests/                           自动测试
+  CHANGELOG.md                     更新记录
 ```
 
-## 下一步可接入
+## 推荐符号
 
-- 真实赛程来源
-- 欧赔 / 亚盘 / 赔率变化采集
-- 伤停新闻和官方阵容
-- 大模型新闻摘要
-- 历史复盘数据库
-- Web 页面或微信/飞书推送
+- `3`：主胜
+- `1`：平局
+- `0`：客胜
+- `3/1`、`1/0` 等：双选防守
+- `3/1/0`：三项全包
+
+更多版本变化见 [CHANGELOG.md](CHANGELOG.md)。
