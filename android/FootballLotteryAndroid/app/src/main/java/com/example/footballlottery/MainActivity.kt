@@ -37,14 +37,12 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableDoubleStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -92,18 +90,47 @@ private enum class AppTab(val label: String) {
 
 private const val SETTINGS_PREFS = "football_lottery_settings"
 private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
+private const val STRENGTH_XG_MATCHES = 20
 
 data class AnalysisReport(
     val issue: String,
     val purchaseDeadline: String,
     val purchaseDeadlineSource: String,
     val saleBeginTime: String,
+    val analysisMode: String,
+    val analysisModeMessage: String,
+    val foreignOddsStatus: ForeignOddsStatus?,
     val metrics: ReportMetrics,
     val choose9Keep: List<Int>,
     val choose9Drop: List<Int>,
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
     val modelCalibration: ModelCalibration?,
+)
+
+data class ForeignOddsStatus(
+    val status: String,
+    val message: String,
+    val requested: Boolean,
+    val configured: Boolean,
+    val attemptedQueries: Int,
+    val successfulQueries: Int,
+    val cacheHits: Int,
+    val matchedMatches: Int,
+    val totalMatches: Int,
+    val creditsRemaining: Int?,
+    val creditsUsed: Int?,
+    val creditsLast: Int?,
+)
+
+data class ForeignOddsUsage(
+    val status: String,
+    val message: String,
+    val creditsRemaining: Int?,
+    val creditsUsed: Int?,
+    val creditsLast: Int?,
+    val activeSports: Int,
+    val checkedAt: String,
 )
 
 data class ModelCalibration(
@@ -214,6 +241,10 @@ class AppViewModel : ViewModel() {
         private set
     var settingsMessage by mutableStateOf("")
         private set
+    var isCheckingApiUsage by mutableStateOf(false)
+        private set
+    var apiUsage by mutableStateOf<ForeignOddsUsage?>(null)
+        private set
 
     fun loadSettings(context: Context) {
         val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
@@ -223,6 +254,7 @@ class AppViewModel : ViewModel() {
     fun updateTheOddsApiKey(value: String) {
         theOddsApiKey = value
         settingsMessage = ""
+        apiUsage = null
     }
 
     fun saveSettings(context: Context) {
@@ -233,6 +265,28 @@ class AppViewModel : ViewModel() {
             .apply()
         theOddsApiKey = cleanApiKey
         settingsMessage = "外盘设置已保存。"
+    }
+
+    fun refreshForeignOddsUsage(engine: FootballLotteryLocalEngine) {
+        viewModelScope.launch {
+            isCheckingApiUsage = true
+            runCatching {
+                engine.checkForeignOddsUsage(theOddsApiKey.trim())
+            }.onSuccess { usage ->
+                apiUsage = usage
+            }.onFailure { throwable ->
+                apiUsage = ForeignOddsUsage(
+                    status = "network_error",
+                    message = throwable.message ?: "The Odds API 用量查询失败。",
+                    creditsRemaining = null,
+                    creditsUsed = null,
+                    creditsLast = null,
+                    activeSports = 0,
+                    checkedAt = "",
+                )
+            }
+            isCheckingApiUsage = false
+        }
     }
 
     fun testLocalEngine(engine: FootballLotteryLocalEngine) {
@@ -257,10 +311,6 @@ class AnalysisViewModel : ViewModel() {
         private set
     var maxTicketCostYuan by mutableStateOf("500")
         private set
-    var xgMatches by mutableDoubleStateOf(8.0)
-        private set
-    var fullAnalysis by mutableStateOf(false)
-        private set
     var isLoading by mutableStateOf(false)
         private set
     var message by mutableStateOf("")
@@ -276,14 +326,6 @@ class AnalysisViewModel : ViewModel() {
 
     fun updateMaxTicketCostYuan(value: String) {
         maxTicketCostYuan = value
-    }
-
-    fun updateXgMatches(value: Double) {
-        xgMatches = value
-    }
-
-    fun updateFullAnalysis(value: Boolean) {
-        fullAnalysis = value
     }
 
     fun generateAnalysis(engine: FootballLotteryLocalEngine, foreignOddsApiKey: String) {
@@ -306,14 +348,16 @@ class AnalysisViewModel : ViewModel() {
                 engine.generateAnalysis(
                     issue = cleanIssue,
                     maxTicketCostYuan = cleanMaxTicketCostYuan,
-                    xgMatches = xgMatches.toInt(),
-                    fullAnalysis = fullAnalysis,
-                    foreignOdds = fullAnalysis && cleanForeignOddsApiKey.isNotEmpty(),
+                    foreignOdds = cleanForeignOddsApiKey.isNotEmpty(),
                     foreignOddsApiKey = cleanForeignOddsApiKey,
                 )
             }.onSuccess { response ->
                 report = response
-                message = "${response.issue} 分析报告已生成。"
+                message = if (response.analysisMode == "simple_fallback") {
+                    "${response.issue} 分析报告已生成；检测到网络问题，已自动使用简单分析。"
+                } else {
+                    "${response.issue} 完整分析报告已生成。"
+                }
             }.onFailure { throwable ->
                 error = throwable.message ?: "生成分析报告失败。"
             }
@@ -357,7 +401,7 @@ class HistoryViewModel : ViewModel() {
     }
 
     fun select(entry: HistoryEntry) {
-        selectedEntry = entry
+        selectedEntry = if (selectedEntry?.id == entry.id) null else entry
         expandedGroups = expandedGroups + historyGroupKey(entry)
     }
 
@@ -385,9 +429,15 @@ class ReviewViewModel : ViewModel() {
         private set
     var report by mutableStateOf<AnalysisReport?>(null)
         private set
+    var analysisCandidates by mutableStateOf<List<HistoryEntry>>(emptyList())
+        private set
+    var selectedAnalysisId by mutableStateOf("")
+        private set
 
     fun updateIssue(value: String) {
         issue = value
+        analysisCandidates = emptyList()
+        selectedAnalysisId = ""
     }
 
     fun updateAutoResults(value: Boolean) {
@@ -396,6 +446,11 @@ class ReviewViewModel : ViewModel() {
 
     fun updateResultsCsv(value: String) {
         resultsCsv = value
+    }
+
+    fun selectAnalysis(entry: HistoryEntry) {
+        selectedAnalysisId = entry.id
+        error = ""
     }
 
     fun generateReview(engine: FootballLotteryLocalEngine) {
@@ -413,7 +468,20 @@ class ReviewViewModel : ViewModel() {
             error = ""
             message = ""
             runCatching {
-                engine.generateReview(cleanIssue, autoResults, resultsCsv)
+                val matchingAnalyses = engine.fetchHistory().filter { entry ->
+                    entry.kind == "analysis" && entry.issue.trim() == cleanIssue
+                }
+                analysisCandidates = matchingAnalyses
+                val selectedAnalysis = matchingAnalyses.firstOrNull { it.id == selectedAnalysisId }
+                if (matchingAnalyses.size > 1 && selectedAnalysis == null) {
+                    throw IllegalStateException("发现 ${matchingAnalyses.size} 次分析结果，请先选择要依据哪一次分析进行复盘。")
+                }
+                engine.generateReview(
+                    cleanIssue,
+                    autoResults,
+                    resultsCsv,
+                    selectedAnalysis?.id ?: matchingAnalyses.singleOrNull()?.id.orEmpty(),
+                )
             }.onSuccess { response ->
                 report = response
                 message = "${response.issue} 复盘报告已生成。"
@@ -518,11 +586,18 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         json.optString("service", "football-lottery-agent-local")
     }
 
+    suspend fun checkForeignOddsUsage(apiKey: String): ForeignOddsUsage = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("foreign_odds_api_key", apiKey)
+        val json = JSONObject(bridge.callAttr("foreign_odds_usage", body.toString()).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "The Odds API 用量查询失败。"))
+        }
+        parseForeignOddsUsage(json.optJSONObject("usage") ?: JSONObject())
+    }
+
     suspend fun generateAnalysis(
         issue: String,
         maxTicketCostYuan: Int,
-        xgMatches: Int,
-        fullAnalysis: Boolean,
         foreignOdds: Boolean,
         foreignOddsApiKey: String,
     ): AnalysisReport = withContext(Dispatchers.IO) {
@@ -530,8 +605,8 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             .put("issue", issue)
             .put("max_ticket_cost_yuan", maxTicketCostYuan)
             .put("strength_model", true)
-            .put("strength_xg_matches", xgMatches)
-            .put("full_analysis", fullAnalysis)
+            .put("strength_xg_matches", STRENGTH_XG_MATCHES)
+            .put("full_analysis", true)
             .put("foreign_odds", foreignOdds)
             .put("foreign_odds_api_key", foreignOddsApiKey)
         val json = JSONObject(bridge.callAttr("analysis", body.toString(), workDir).toString())
@@ -561,11 +636,17 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         }
     }
 
-    suspend fun generateReview(issue: String, autoResults: Boolean, resultsCsv: String): AnalysisReport = withContext(Dispatchers.IO) {
+    suspend fun generateReview(
+        issue: String,
+        autoResults: Boolean,
+        resultsCsv: String,
+        analysisId: String = "",
+    ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("auto_results", autoResults)
             .put("results_csv", resultsCsv)
+            .put("analysis_id", analysisId)
         val json = JSONObject(bridge.callAttr("review", body.toString(), workDir).toString())
         if (!json.optBoolean("ok", false)) {
             throw IllegalStateException(json.optString("error", "本机复盘失败。"))
@@ -600,6 +681,9 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             purchaseDeadline = json.optString("purchase_deadline"),
             purchaseDeadlineSource = json.optString("purchase_deadline_source"),
             saleBeginTime = json.optString("sale_begin_time"),
+            analysisMode = json.optString("analysis_mode", "full"),
+            analysisModeMessage = json.optString("analysis_mode_message"),
+            foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
@@ -710,17 +794,15 @@ class FootballLotteryApi(private val baseUrl: String) {
     suspend fun generateAnalysis(
         issue: String,
         maxTicketCostYuan: Int,
-        xgMatches: Int,
-        fullAnalysis: Boolean,
         foreignOdds: Boolean,
         foreignOddsApiKey: String,
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("max_ticket_cost_yuan", maxTicketCostYuan)
-            .put("strength_model", fullAnalysis)
-            .put("strength_xg_matches", xgMatches)
-            .put("full_analysis", fullAnalysis)
+            .put("strength_model", true)
+            .put("strength_xg_matches", STRENGTH_XG_MATCHES)
+            .put("full_analysis", true)
             .put("foreign_odds", foreignOdds)
             .put("foreign_odds_api_key", foreignOddsApiKey)
             .put("no_history", false)
@@ -745,11 +827,17 @@ class FootballLotteryApi(private val baseUrl: String) {
         }
     }
 
-    suspend fun generateReview(issue: String, autoResults: Boolean, resultsCsv: String): AnalysisReport = withContext(Dispatchers.IO) {
+    suspend fun generateReview(
+        issue: String,
+        autoResults: Boolean,
+        resultsCsv: String,
+        analysisId: String = "",
+    ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("auto_results", autoResults)
             .put("results_csv", resultsCsv)
+            .put("analysis_id", analysisId)
             .put("no_history", false)
         val json = requestJson("POST", "/api/review", body)
         parseReport(json.getJSONObject("report"))
@@ -810,6 +898,9 @@ class FootballLotteryApi(private val baseUrl: String) {
             purchaseDeadline = json.optString("purchase_deadline"),
             purchaseDeadlineSource = json.optString("purchase_deadline_source"),
             saleBeginTime = json.optString("sale_begin_time"),
+            analysisMode = json.optString("analysis_mode", "full"),
+            analysisModeMessage = json.optString("analysis_mode_message"),
+            foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
@@ -1097,6 +1188,11 @@ fun SinglePredictionScreen(localEngine: FootballLotteryLocalEngine, viewModel: S
 @Composable
 fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocalEngine) {
     val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        if (appViewModel.theOddsApiKey.isNotBlank() && appViewModel.apiUsage == null) {
+            appViewModel.refreshForeignOddsUsage(localEngine)
+        }
+    }
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -1107,6 +1203,12 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
             Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "App 版本 0.2.0（2） · 已包含 API 用量显示",
+                        color = Color(0xFF2364AA),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
                     Text(
                         "当前为手机本机独立模式：分析引擎已经打包进 App，不需要电脑后端，也不需要填写后端地址。生成当前期分析时，手机需要联网抓取赛程和赔率数据。",
                         color = Color(0xFF667085),
@@ -1122,14 +1224,36 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                         visualTransformation = PasswordVisualTransformation(),
                     )
                     Button(
-                        onClick = { appViewModel.saveSettings(context.applicationContext) },
+                        onClick = {
+                            appViewModel.saveSettings(context.applicationContext)
+                            appViewModel.refreshForeignOddsUsage(localEngine)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("保存外盘设置")
+                        Text("保存并检查 API Key")
                     }
                     if (appViewModel.settingsMessage.isNotBlank()) {
                         StatusCard(text = appViewModel.settingsMessage, color = Color(0xFF16845B))
                     }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("The Odds API 用量", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                        Button(
+                            onClick = { appViewModel.refreshForeignOddsUsage(localEngine) },
+                            enabled = !appViewModel.isCheckingApiUsage,
+                        ) {
+                            LoadingPrefix(appViewModel.isCheckingApiUsage)
+                            Text(if (appViewModel.isCheckingApiUsage) "查询中" else "刷新用量")
+                        }
+                    }
+                    appViewModel.apiUsage?.let { usage ->
+                        ForeignOddsUsageCard(usage)
+                    }
+                    Text(
+                        "用量查询调用官方 /v4/sports 接口，不消耗赔率额度。这里的 API 状态与下面的本机引擎状态相互独立。",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    HorizontalDivider()
                     Button(
                         onClick = { appViewModel.testLocalEngine(localEngine) },
                         enabled = !appViewModel.isTestingConnection,
@@ -1146,6 +1270,36 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ForeignOddsUsageCard(usage: ForeignOddsUsage) {
+    val color = when (usage.status) {
+        "valid" -> Color(0xFF16845B)
+        "not_configured" -> Color(0xFF667085)
+        else -> Color(0xFFB42318)
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Text(usage.message, color = color, fontWeight = FontWeight.Bold)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MetricTile("剩余额度", usage.creditsRemaining?.toString() ?: "--", Modifier.weight(1f))
+            MetricTile("累计已用", usage.creditsUsed?.toString() ?: "--", Modifier.weight(1f))
+            MetricTile("本次查询", usage.creditsLast?.toString() ?: "--", Modifier.weight(1f))
+        }
+        val details = buildList {
+            if (usage.activeSports > 0) add("当前开放项目 ${usage.activeSports} 个")
+            if (usage.checkedAt.isNotBlank()) add("查询时间 ${usage.checkedAt.replace('T', ' ')}")
+        }
+        if (details.isNotEmpty()) {
+            Text(details.joinToString(" · "), color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
         }
     }
 }
@@ -1169,39 +1323,19 @@ private fun RequestCard(
                     modifier = Modifier.weight(1f),
                     singleLine = true,
                 )
-                AnalysisModeDropdown(
-                    fullAnalysis = viewModel.fullAnalysis,
-                    onFullAnalysisChange = viewModel::updateFullAnalysis,
+                OutlinedTextField(
+                    value = viewModel.maxTicketCostYuan,
+                    onValueChange = viewModel::updateMaxTicketCostYuan,
+                    label = { Text("最高购彩金额") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
+                    singleLine = true,
                 )
             }
-            OutlinedTextField(
-                value = viewModel.maxTicketCostYuan,
-                onValueChange = viewModel::updateMaxTicketCostYuan,
-                label = { Text("最高购彩金额") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("增强样本场次")
-                Spacer(modifier = Modifier.weight(1f))
-                Text(viewModel.xgMatches.toInt().toString(), fontWeight = FontWeight.Bold)
-            }
             Text(
-                if (viewModel.fullAnalysis) {
-                    "完整分析会抓取新闻、伤停、交锋、实力模型、Polymarket 和已保存的外盘赔率，生成会明显变慢。"
-                } else {
-                    "简单分析只抓取赛程和轻量赔率，生成更快。"
-                },
+                "默认执行完整分析，增强样本固定为最近 20 场；检测到关键资料源网络故障时自动降级为简单分析。",
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
-            )
-            Slider(
-                value = viewModel.xgMatches.toFloat(),
-                onValueChange = { viewModel.updateXgMatches(it.toDouble()) },
-                valueRange = 0f..20f,
-                steps = 19,
             )
             Button(
                 onClick = { viewModel.generateAnalysis(localEngine, appViewModel.theOddsApiKey) },
@@ -1211,54 +1345,6 @@ private fun RequestCard(
                 LoadingPrefix(viewModel.isLoading)
                 Text(if (viewModel.isLoading) "生成中" else "生成分析报告")
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AnalysisModeDropdown(
-    fullAnalysis: Boolean,
-    onFullAnalysisChange: (Boolean) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    var expanded by remember { mutableStateOf(false) }
-    val selectedText = if (fullAnalysis) "完整分析" else "简单分析"
-
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it },
-        modifier = modifier,
-    ) {
-        OutlinedTextField(
-            value = selectedText,
-            onValueChange = {},
-            readOnly = true,
-            label = { Text("分析模式") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .menuAnchor()
-                .fillMaxWidth(),
-            singleLine = true,
-        )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false },
-        ) {
-            DropdownMenuItem(
-                text = { Text("简单分析") },
-                onClick = {
-                    onFullAnalysisChange(false)
-                    expanded = false
-                },
-            )
-            DropdownMenuItem(
-                text = { Text("完整分析") },
-                onClick = {
-                    onFullAnalysisChange(true)
-                    expanded = false
-                },
-            )
         }
     }
 }
@@ -1340,6 +1426,14 @@ private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel
                     minLines = 4,
                 )
             }
+            if (viewModel.analysisCandidates.size > 1) {
+                AnalysisHistoryDropdown(
+                    entries = viewModel.analysisCandidates,
+                    selectedId = viewModel.selectedAnalysisId,
+                    onSelect = viewModel::selectAnalysis,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
             Button(
                 onClick = { viewModel.generateReview(localEngine) },
                 enabled = !viewModel.isLoading,
@@ -1350,6 +1444,55 @@ private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AnalysisHistoryDropdown(
+    entries: List<HistoryEntry>,
+    selectedId: String,
+    onSelect: (HistoryEntry) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = entries.firstOrNull { it.id == selectedId }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = selected?.let(::analysisHistoryLabel).orEmpty(),
+            onValueChange = {},
+            readOnly = true,
+            label = { Text("选择复盘依据") },
+            placeholder = { Text("请选择一次分析结果") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth(),
+            singleLine = true,
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            entries.forEach { entry ->
+                DropdownMenuItem(
+                    text = { Text(analysisHistoryLabel(entry)) },
+                    onClick = {
+                        onSelect(entry)
+                        expanded = false
+                    },
+                )
+            }
+        }
+    }
+    Text(
+        text = "该期有 ${entries.size} 次分析，请选择本次复盘要对照的结果。",
+        color = Color(0xFF667085),
+        style = MaterialTheme.typography.bodySmall,
+    )
 }
 
 @Composable
@@ -1411,21 +1554,37 @@ private fun SummaryCard(report: AnalysisReport) {
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF667085),
             )
+            if (!isReview && report.analysisModeMessage.isNotBlank()) {
+                Text(
+                    text = report.analysisModeMessage,
+                    color = if (report.analysisMode == "simple_fallback") Color(0xFFB54708) else Color(0xFF16845B),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (!isReview) {
+                report.foreignOddsStatus?.let { status ->
+                    ForeignOddsStatusCard(status)
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile("比赛", report.metrics.matchCount.toString(), Modifier.weight(1f))
                 MetricTile(if (isReview) "单选命中" else "单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile(if (isReview) "胜平负命中" else "低风险", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
-                MetricTile(if (isReview) "胜平负命中率" else "平均置信", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
-            }
             if (isReview) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MetricTile("胜平负命中", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
+                    MetricTile("胜平负命中率", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
+                }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     MetricTile("任选九命中", "$choose9Hits/$choose9Total", Modifier.weight(1f))
                     MetricTile("任选九命中率", "%.1f%%".format(choose9Rate), Modifier.weight(1f))
                 }
                 report.reviewDiagnostics?.let { diagnostics ->
                     ReviewDiagnosticsCard(diagnostics)
+                }
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    MetricTile("平均置信度", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
                 }
             }
             if (!isReview) {
@@ -1439,6 +1598,57 @@ private fun SummaryCard(report: AnalysisReport) {
                     )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ForeignOddsStatusCard(status: ForeignOddsStatus) {
+    val color = when (status.status) {
+        "success_live", "success_cache" -> Color(0xFF16845B)
+        "not_requested" -> Color(0xFF667085)
+        "not_configured", "no_supported_leagues", "called_no_match", "called_no_events",
+        "cache_no_match", "cache_no_events" -> Color(0xFFB26A00)
+        else -> Color(0xFFB42318)
+    }
+    val title = when (status.status) {
+        "success_live" -> "The Odds API：本次已联网调用"
+        "success_cache" -> "The Odds API：本次使用缓存"
+        "not_requested" -> "The Odds API：本次未启用"
+        "not_configured" -> "The Odds API：尚未配置 Key"
+        "out_of_credits" -> "The Odds API：额度已用完"
+        "invalid_key" -> "The Odds API：Key 无效"
+        "rate_limited" -> "The Odds API：请求受限"
+        "called_no_match" -> "The Odds API：已调用但未匹配"
+        "called_no_events" -> "The Odds API：已调用但无赛事"
+        "cache_no_match", "cache_no_events" -> "The Odds API：缓存无可用匹配"
+        else -> "The Odds API：调用异常"
+    }
+    val requestText = "联网请求 ${status.attemptedQueries} 次 · 成功 ${status.successfulQueries} 次 · " +
+        "缓存 ${status.cacheHits} 次 · 匹配 ${status.matchedMatches}/${status.totalMatches} 场"
+    val quotaParts = buildList {
+        status.creditsRemaining?.let { add("剩余 $it") }
+        status.creditsUsed?.let { add("累计已用 $it") }
+        status.creditsLast?.let { add("本次消耗 $it") }
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.10f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+    ) {
+        Text(title, color = color, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.bodyMedium)
+        if (status.message.isNotBlank()) {
+            Text(status.message, color = Color(0xFF344054), style = MaterialTheme.typography.bodySmall)
+        }
+        Text(requestText, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+        if (quotaParts.isNotEmpty()) {
+            Text(
+                "额度：${quotaParts.joinToString(" · ")}",
+                color = Color(0xFF667085),
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
     }
 }
@@ -1554,20 +1764,22 @@ private fun PredictionCard(
                 ProbabilityLine("平", prediction.probabilities.draw, Color(0xFF2364AA))
                 ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
                 Text(
-                    text = "置信度 ${"%.1f".format(prediction.confidence)}% · 风险 ${prediction.risk}",
+                    text = "置信度 ${"%.1f".format(prediction.confidence)}%",
                     color = Color(0xFF667085),
                     style = MaterialTheme.typography.bodySmall,
-                )
-                Text(
-                    text = "比分倾向：" + prediction.scorelines.joinToString("，") { "${it.score} ${"%.1f".format(it.probability)}%" },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = Color(0xFF087F8C),
                 )
                 prediction.reasons.firstOrNull { it.startsWith("Dixon-Coles") }?.let { modelReason ->
                     Text(
                         text = modelReason,
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF475467),
+                    )
+                }
+                prediction.reasons.firstOrNull { it.startsWith("完整分析资料审计") }?.let { auditReason ->
+                    Text(
+                        text = auditReason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if ("缺失或未匹配 无" in auditReason) Color(0xFF16845B) else Color(0xFFB54708),
                     )
                 }
             }
@@ -1654,7 +1866,7 @@ private fun HistoryEntryCard(entry: HistoryEntry, selected: Boolean, onClick: ()
                 Text(kindLabel(entry.kind), color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
             }
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
-            Text(if (selected) "已展开" else "点击展开", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            Text(if (selected) "再次点击收起" else "点击展开", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (isWebUrl(entry.htmlUrl)) {
                     Button(onClick = { openUrl(entry.htmlUrl) }) {
@@ -1723,6 +1935,11 @@ private fun historyGroups(entries: List<HistoryEntry>): List<HistoryGroup> {
 
 private fun historyGroupKey(entry: HistoryEntry): String {
     return "${entry.kind.ifBlank { "analysis" }}:${entry.issue.ifBlank { "unknown" }}"
+}
+
+private fun analysisHistoryLabel(entry: HistoryEntry): String {
+    val time = entry.createdAt.ifBlank { entry.id }
+    return "$time · ${entry.title.ifBlank { "第 ${entry.issue} 期分析报告" }}"
 }
 
 private fun kindLabel(kind: String): String {
@@ -1861,6 +2078,34 @@ private fun deadlineText(report: AnalysisReport): String {
         "购彩截止时间：${report.purchaseDeadline} · ${report.purchaseDeadlineSource}"
     }
 }
+
+private fun parseForeignOddsStatus(json: JSONObject): ForeignOddsStatus = ForeignOddsStatus(
+    status = json.optString("status"),
+    message = json.optString("message"),
+    requested = json.optBoolean("requested"),
+    configured = json.optBoolean("configured"),
+    attemptedQueries = json.optInt("attempted_queries"),
+    successfulQueries = json.optInt("successful_queries"),
+    cacheHits = json.optInt("cache_hits"),
+    matchedMatches = json.optInt("matched_matches"),
+    totalMatches = json.optInt("total_matches"),
+    creditsRemaining = json.optNullableInt("credits_remaining"),
+    creditsUsed = json.optNullableInt("credits_used"),
+    creditsLast = json.optNullableInt("credits_last"),
+)
+
+private fun parseForeignOddsUsage(json: JSONObject): ForeignOddsUsage = ForeignOddsUsage(
+    status = json.optString("status"),
+    message = json.optString("message"),
+    creditsRemaining = json.optNullableInt("credits_remaining"),
+    creditsUsed = json.optNullableInt("credits_used"),
+    creditsLast = json.optNullableInt("credits_last"),
+    activeSports = json.optInt("active_sports"),
+    checkedAt = json.optString("checked_at"),
+)
+
+private fun JSONObject.optNullableInt(key: String): Int? =
+    if (has(key) && !isNull(key)) optInt(key) else null
 
 private fun JSONArray?.orEmptyArray(): JSONArray = this ?: JSONArray()
 

@@ -1,10 +1,14 @@
 import unittest
 from dataclasses import replace
+from itertools import product
+from math import prod
 
 from football_lottery_agent.loader import load_issue
+from football_lottery_agent.predictor import _has_informative_signals, _select_picks
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import (
     _downgrade_prediction,
+    _fit_predictions_to_budget,
     _pick_coverage_probability,
     build_ticket_plan,
     ticket_cost_yuan,
@@ -31,13 +35,14 @@ class StrategyTests(unittest.TestCase):
         self.assertGreater(prediction.scorelines[0].probability, 0)
         self.assertGreaterEqual(prediction.scorelines[0].probability, prediction.scorelines[1].probability)
 
-    def test_report_renders_scoreline_summary(self) -> None:
+    def test_report_hides_scoreline_and_risk_but_keeps_confidence(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue)
         report = render_markdown(plan)
 
-        self.assertIn("比分倾向", report)
-        self.assertRegex(report, r"\d-\d \d+%")
+        self.assertNotIn("比分倾向", report)
+        self.assertNotIn("| 风险 |", report)
+        self.assertIn("置信度", report)
 
     def test_report_persists_purchase_deadline_for_history(self) -> None:
         issue = replace(
@@ -96,6 +101,113 @@ class StrategyTests(unittest.TestCase):
         adjusted = _downgrade_prediction(uncertain)
 
         self.assertEqual(adjusted.picks, ("3", "1"))
+
+    def test_simple_analysis_keeps_existing_near_tie_behavior(self) -> None:
+        ranked = [("3", 0.46), ("0", 0.275), ("1", 0.265)]
+
+        self.assertEqual(_select_picks(ranked), ("3", "1", "0"))
+
+    def test_full_analysis_without_evidence_does_not_apply_legacy_draw_bonus(self) -> None:
+        prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        match = replace(
+            prediction.match,
+            sources={**prediction.match.sources, "collection_audit": {"mode": "full"}},
+        )
+        uncertain = replace(
+            prediction,
+            match=match,
+            probabilities={"3": 0.36, "1": 0.31, "0": 0.33},
+            picks=("3", "1", "0"),
+            selection_scores={},
+        )
+
+        adjusted = _downgrade_prediction(uncertain)
+
+        self.assertEqual(adjusted.picks, ("3", "0"))
+
+    def test_full_analysis_can_choose_draw_from_supporting_evidence(self) -> None:
+        ranked = [("3", 0.46), ("0", 0.275), ("1", 0.265)]
+        evidence_scores = {"3": 0.46, "1": 0.30, "0": 0.25}
+
+        self.assertEqual(
+            _select_picks(ranked, selection_scores=evidence_scores),
+            ("3", "1"),
+        )
+
+    def test_full_analysis_can_choose_non_draw_from_supporting_evidence(self) -> None:
+        ranked = [("3", 0.46), ("1", 0.275), ("0", 0.265)]
+        evidence_scores = {"3": 0.46, "1": 0.25, "0": 0.31}
+
+        self.assertEqual(
+            _select_picks(ranked, selection_scores=evidence_scores),
+            ("3", "0"),
+        )
+
+    def test_full_analysis_keeps_three_choices_when_evidence_is_inconclusive(self) -> None:
+        ranked = [("3", 0.46), ("0", 0.275), ("1", 0.265)]
+        evidence_scores = {"3": 0.46, "1": 0.272, "0": 0.275}
+
+        self.assertEqual(
+            _select_picks(ranked, selection_scores=evidence_scores),
+            ("3", "1", "0"),
+        )
+
+    def test_full_analysis_budget_downgrade_uses_evidence_scores(self) -> None:
+        prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        uncertain = replace(
+            prediction,
+            probabilities={"3": 0.46, "1": 0.26, "0": 0.28},
+            picks=("3", "1", "0"),
+            selection_scores={"3": 0.46, "1": 0.30, "0": 0.25},
+        )
+
+        adjusted = _downgrade_prediction(uncertain)
+
+        self.assertEqual(adjusted.picks, ("3", "1"))
+
+    def test_full_evidence_gate_does_not_treat_default_numbers_as_real_evidence(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        audit = {
+            "mode": "full",
+            "injuries": {"status": "confirmed_empty", "count": 0},
+            "intelligence": {"status": "confirmed_empty", "count": 0},
+            "history": {"status": "confirmed_empty", "count": 0},
+            "strength": {"status": "unmatched"},
+            "xg": {"status": "missing"},
+        }
+        no_evidence = replace(match, sources={**match.sources, "collection_audit": audit})
+        with_evidence = replace(
+            match,
+            sources={
+                **match.sources,
+                "collection_audit": {**audit, "intelligence": {"status": "available", "count": 2}},
+            },
+        )
+
+        self.assertFalse(_has_informative_signals(no_evidence))
+        self.assertTrue(_has_informative_signals(with_evidence))
+
+    def test_budget_optimizer_finds_global_best_discrete_coverage(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[:3]
+        probabilities = (
+            {"3": 0.55, "1": 0.25, "0": 0.20},
+            {"3": 0.46, "1": 0.30, "0": 0.24},
+            {"3": 0.40, "1": 0.33, "0": 0.27},
+        )
+        predictions = tuple(
+            replace(item, probabilities=values, selection_scores=values, picks=("3", "1", "0"))
+            for item, values in zip(base, probabilities)
+        )
+
+        adjusted = _fit_predictions_to_budget(predictions, max_ticket_cost_yuan=16)
+        actual = prod(sum(item.probabilities[pick] for pick in item.picks) for item in adjusted)
+        expected = max(
+            prod(sum(sorted(values.values(), reverse=True)[:count]) for values, count in zip(probabilities, counts))
+            for counts in product((1, 2, 3), repeat=3)
+            if prod(counts) <= 8
+        )
+
+        self.assertAlmostEqual(actual, expected, places=8)
 
 
 if __name__ == "__main__":

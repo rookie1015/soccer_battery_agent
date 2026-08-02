@@ -24,6 +24,7 @@ class HistoryEntry:
     created_at: str
     html: str
     markdown: str
+    snapshot: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -34,6 +35,7 @@ class HistoryEntry:
             "created_at": self.created_at,
             "html": self.html,
             "markdown": self.markdown,
+            "snapshot": self.snapshot,
         }
 
 
@@ -45,6 +47,7 @@ def archive_report(
     history_dir: str | Path = DEFAULT_HISTORY_DIR,
     max_entries: int = MAX_HISTORY_ENTRIES,
     created_at: datetime | None = None,
+    snapshot_path: str | Path | None = None,
 ) -> Path:
     root = Path(history_dir)
     items_dir = root / "items"
@@ -66,6 +69,14 @@ def archive_report(
             shutil.copyfile(markdown_source, md_target)
             markdown_target = _relative_link(root, md_target)
 
+    snapshot_target = ""
+    if snapshot_path:
+        snapshot_source = Path(snapshot_path)
+        if snapshot_source.exists():
+            data_target = items_dir / f"{entry_id}.json"
+            shutil.copyfile(snapshot_source, data_target)
+            snapshot_target = _relative_link(root, data_target)
+
     entry = HistoryEntry(
         id=entry_id,
         kind=kind,
@@ -74,6 +85,7 @@ def archive_report(
         created_at=(created_at or datetime.now()).isoformat(timespec="seconds"),
         html=_relative_link(root, html_target),
         markdown=markdown_target,
+        snapshot=snapshot_target,
     )
     entries = _load_entries(root)
     entries = [item for item in entries if item.get("id") != entry.id]

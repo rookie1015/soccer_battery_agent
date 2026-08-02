@@ -7,9 +7,27 @@ from .models import Match, Prediction, Scoreline
 
 
 OUTCOME_LABELS = {"3": "主胜", "1": "平", "0": "客胜"}
+SECONDARY_RAW_GAP_LIMIT = 0.04
+SECONDARY_EVIDENCE_MARGIN = 0.015
+MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
+DEFAULT_SELECTION_POLICY = {
+    "single_top": 0.52,
+    "single_spread": 0.14,
+    "double_top": 0.44,
+    "double_spread": 0.06,
+    "triple_third": 0.25,
+    "triple_gap": 0.02,
+    "secondary_raw_gap": SECONDARY_RAW_GAP_LIMIT,
+    "secondary_evidence_margin": SECONDARY_EVIDENCE_MARGIN,
+}
 
 
-def predict_match(match: Match, model_weights: dict[str, float] | None = None) -> Prediction:
+def predict_match(
+    match: Match,
+    model_weights: dict[str, float] | None = None,
+    evidence_aware_secondary: bool = False,
+    selection_policy: dict[str, float] | None = None,
+) -> Prediction:
     odds_probs = _odds_to_probabilities(match)
     signal_scores = _signal_scores(match)
     math_forecast = dixon_coles_forecast(match)
@@ -30,12 +48,25 @@ def predict_match(match: Match, model_weights: dict[str, float] | None = None) -
     second_outcome, second_prob = ranked[1]
     spread = top_prob - second_prob
 
-    picks = _select_picks(ranked)
+    selection_scores = (
+        _full_analysis_selection_scores(
+            match,
+            probabilities,
+            odds_probs,
+            signal_scores,
+            math_forecast,
+        )
+        if evidence_aware_secondary
+        else {}
+    )
+    picks = _select_picks(ranked, selection_scores=selection_scores, selection_policy=selection_policy)
 
     confidence = round(top_prob * 100, 1)
     risk = _risk_label(top_prob, spread, len(picks))
     scorelines = _predict_scorelines(match, probabilities, math_forecast)
     reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
+    if selection_scores:
+        reasons.append(_selection_score_reason(selection_scores))
 
     return Prediction(
         match=match,
@@ -45,26 +76,204 @@ def predict_match(match: Match, model_weights: dict[str, float] | None = None) -
         confidence=confidence,
         risk=risk,
         reasons=tuple(reasons),
+        selection_scores=selection_scores,
     )
 
 
-def predict_issue(matches: tuple[Match, ...], model_weights: dict[str, float] | None = None) -> tuple[Prediction, ...]:
-    return tuple(predict_match(match, model_weights=model_weights) for match in matches)
+def predict_issue(
+    matches: tuple[Match, ...],
+    model_weights: dict[str, float] | None = None,
+    evidence_aware_secondary: bool = False,
+    selection_policy: dict[str, float] | None = None,
+) -> tuple[Prediction, ...]:
+    return tuple(
+        predict_match(
+            match,
+            model_weights=model_weights,
+            evidence_aware_secondary=evidence_aware_secondary,
+            selection_policy=selection_policy,
+        )
+        for match in matches
+    )
 
 
-def _select_picks(ranked: list[tuple[str, float]]) -> tuple[str, ...]:
+def _select_picks(
+    ranked: list[tuple[str, float]],
+    selection_scores: dict[str, float] | None = None,
+    selection_policy: dict[str, float] | None = None,
+) -> tuple[str, ...]:
+    policy = {**DEFAULT_SELECTION_POLICY, **(selection_policy or {})}
     top_outcome, top_prob = ranked[0]
     second_outcome, second_prob = ranked[1]
-    _, third_prob = ranked[2]
+    third_outcome, third_prob = ranked[2]
     spread = top_prob - second_prob
 
-    if top_prob >= 0.52 and spread >= 0.14:
+    if top_prob >= policy["single_top"] and spread >= policy["single_spread"]:
         return (top_outcome,)
-    if top_prob >= 0.44 and spread >= 0.06:
-        if third_prob >= 0.25 and second_prob - third_prob < 0.02:
+    if top_prob >= policy["double_top"] and spread >= policy["double_spread"]:
+        evidence_choice = _resolved_secondary_choice(
+            second_outcome,
+            third_outcome,
+            second_prob - third_prob,
+            selection_scores,
+            raw_gap_limit=policy["secondary_raw_gap"],
+            evidence_margin=policy["secondary_evidence_margin"],
+        )
+        if third_prob >= policy["triple_third"] and second_prob - third_prob < policy["triple_gap"] and evidence_choice is None:
             return ("3", "1", "0")
-        return (top_outcome, second_outcome)
+        return (top_outcome, evidence_choice or second_outcome)
     return ("3", "1", "0")
+
+
+def _resolved_secondary_choice(
+    second_outcome: str,
+    third_outcome: str,
+    raw_gap: float,
+    selection_scores: dict[str, float] | None,
+    raw_gap_limit: float = SECONDARY_RAW_GAP_LIMIT,
+    evidence_margin: float = SECONDARY_EVIDENCE_MARGIN,
+) -> str | None:
+    if not selection_scores or raw_gap > raw_gap_limit:
+        return None
+    ranked = sorted(
+        (second_outcome, third_outcome),
+        key=lambda outcome: selection_scores.get(outcome, 0.0),
+        reverse=True,
+    )
+    margin = selection_scores.get(ranked[0], 0.0) - selection_scores.get(ranked[1], 0.0)
+    return ranked[0] if margin >= evidence_margin else None
+
+
+def _full_analysis_selection_scores(
+    match: Match,
+    probabilities: dict[str, float],
+    odds_probabilities: dict[str, float],
+    signal_probabilities: dict[str, float],
+    math_forecast: DixonColesForecast,
+) -> dict[str, float]:
+    """Build secondary-pick scores only when full analysis found real evidence.
+
+    These scores do not replace or relabel the calibrated 1X2 probabilities. They
+    only resolve close second/third choices and guide budget downgrades. At least
+    one non-market evidence family is required, so a failed full-data collection
+    cannot silently turn into a different odds-only strategy.
+    """
+    contributors: list[tuple[float, dict[str, float]]] = []
+    if match.sources.get("odds") != "default_placeholder":
+        market = _market_selection_probabilities(match, odds_probabilities)
+        contributors.append((_market_evidence_weight(match), market))
+    if _has_informative_signals(match):
+        contributors.append((0.25, signal_probabilities))
+    if math_forecast.data_quality_score >= 0.50 and math_forecast.data_quality != "signal_fallback":
+        contributors.append((0.40 * math_forecast.data_quality_score, math_forecast.probabilities))
+
+    if len(contributors) < 2:
+        return {}
+
+    total_weight = sum(weight for weight, _ in contributors)
+    consensus = {
+        outcome: sum(weight * values[outcome] for weight, values in contributors) / total_weight
+        for outcome in ("3", "1", "0")
+    }
+    top_outcome = max(probabilities, key=probabilities.get)
+    scores = dict(probabilities)
+    for outcome in ("3", "1", "0"):
+        if outcome == top_outcome:
+            continue
+        # Keep the primary outcome anchored to the calibrated blend. Only close
+        # secondary candidates receive a bounded evidence-based adjustment.
+        adjustment = 0.45 * (consensus[outcome] - probabilities[outcome])
+        adjustment = max(-MAX_SECONDARY_SCORE_ADJUSTMENT, min(MAX_SECONDARY_SCORE_ADJUSTMENT, adjustment))
+        scores[outcome] = probabilities[outcome] + adjustment
+    return {outcome: round(score, 6) for outcome, score in scores.items()}
+
+
+def _has_informative_signals(match: Match) -> bool:
+    audit = match.sources.get("collection_audit") if isinstance(match.sources, dict) else None
+    if isinstance(audit, dict) and audit.get("mode") == "full":
+        injuries = audit.get("injuries") if isinstance(audit.get("injuries"), dict) else {}
+        intelligence = audit.get("intelligence") if isinstance(audit.get("intelligence"), dict) else {}
+        history = audit.get("history") if isinstance(audit.get("history"), dict) else {}
+        strength = audit.get("strength") if isinstance(audit.get("strength"), dict) else {}
+        xg = audit.get("xg") if isinstance(audit.get("xg"), dict) else {}
+        return bool(
+            (injuries.get("status") == "available" and int(injuries.get("count") or 0) > 0)
+            or intelligence.get("status") == "available"
+            or history.get("status") == "available"
+            or strength.get("status") in {"complete", "partial"}
+            or xg.get("status") in {"complete", "partial"}
+        )
+
+    signals = match.signals
+    return any(
+        abs(value - baseline) >= 0.02
+        for value, baseline in (
+            (signals.home_form, 0.5),
+            (signals.away_form, 0.5),
+            (signals.home_motivation, 0.5),
+            (signals.away_motivation, 0.5),
+            (signals.home_injury_impact, 0.0),
+            (signals.away_injury_impact, 0.0),
+            (signals.schedule_pressure_home, 0.0),
+            (signals.schedule_pressure_away, 0.0),
+        )
+    )
+
+
+def _market_evidence_weight(match: Match) -> float:
+    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
+    market = market if isinstance(market, dict) else {}
+    dispersion = market.get("market_dispersion")
+    if not isinstance(dispersion, dict):
+        return 0.35
+    values = [_probability_number(dispersion.get(outcome)) for outcome in ("3", "1", "0")]
+    available = [value for value in values if value is not None]
+    average = sum(available) / len(available) if available else 0.0
+    return 0.35 * max(0.60, 1.0 - average * 2.0)
+
+
+def _market_selection_probabilities(match: Match, fallback: dict[str, float]) -> dict[str, float]:
+    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
+    market = market if isinstance(market, dict) else {}
+    consensus = market.get("market_consensus")
+    values = dict(fallback)
+    if isinstance(consensus, dict):
+        parsed = {outcome: _probability_number(consensus.get(outcome)) for outcome in ("3", "1", "0")}
+        if all(value is not None for value in parsed.values()):
+            values = _normalize({outcome: float(value) for outcome, value in parsed.items()})
+
+    movement = market.get("market_movement")
+    if isinstance(movement, dict):
+        for outcome in ("3", "1", "0"):
+            try:
+                shift = float(movement.get(outcome) or 0.0)
+            except (TypeError, ValueError):
+                shift = 0.0
+            values[outcome] += max(-0.012, min(0.012, shift * 0.30))
+
+    try:
+        handicap = float(
+            market.get("asian_current_line")
+            if market.get("asian_current_line") is not None
+            else market.get("spread_home_point") or 0.0
+        )
+        price_edge = float(market.get("asian_home_price_edge") or 0.0)
+    except (TypeError, ValueError):
+        handicap = 0.0
+        price_edge = 0.0
+    home_adjustment = max(-0.015, min(0.015, -handicap * 0.009 + price_edge * 0.025))
+    values["3"] += home_adjustment
+    values["0"] -= home_adjustment
+    return _normalize({outcome: max(0.01, value) for outcome, value in values.items()})
+
+
+def _selection_score_reason(selection_scores: dict[str, float]) -> str:
+    ordered = sorted(selection_scores, key=selection_scores.get, reverse=True)
+    summary = "/".join(
+        f"{OUTCOME_LABELS[outcome]} {selection_scores[outcome]:.1%}"
+        for outcome in ordered
+    )
+    return f"完整分析第二选项复核：赔率、基本面与数学模型的证据排序分为 {summary}。"
 
 
 def _blend_weights(
@@ -112,6 +321,12 @@ def _blend_weights(
 def _odds_to_probabilities(match: Match) -> dict[str, float]:
     if match.sources.get("odds") == "default_placeholder":
         return {"3": 1 / 3, "1": 1 / 3, "0": 1 / 3}
+    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
+    consensus = market.get("market_consensus") if isinstance(market, dict) else None
+    if isinstance(consensus, dict):
+        parsed = {outcome: _probability_number(consensus.get(outcome)) for outcome in ("3", "1", "0")}
+        if all(value is not None for value in parsed.values()):
+            return _normalize({outcome: float(value) for outcome, value in parsed.items()})
     implied = {
         "3": 1.0 / match.odds.home,
         "1": 1.0 / match.odds.draw,
@@ -153,6 +368,9 @@ def _draw_context(match: Match) -> tuple[float | None, float | None]:
     source = source if isinstance(source, dict) else {}
 
     expected_total = None
+    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
+    market = market if isinstance(market, dict) else {}
+    market_total = _positive_number(market.get("total_points"))
     for prefix in ("xg", "goals"):
         home_for = _positive_number(source.get(f"home_{prefix}_for"))
         home_against = _positive_number(source.get(f"home_{prefix}_against"))
@@ -163,6 +381,8 @@ def _draw_context(match: Match) -> tuple[float | None, float | None]:
             expected_away = sqrt(away_for * home_against)
             expected_total = expected_home + expected_away
             break
+    if expected_total is None and market_total is not None:
+        expected_total = market_total
 
     draw_rates = [
         value
@@ -172,6 +392,15 @@ def _draw_context(match: Match) -> tuple[float | None, float | None]:
         )
         if value is not None
     ]
+    sina_detail = match.sources.get("sina_detail") if isinstance(match.sources, dict) else {}
+    sina_detail = sina_detail if isinstance(sina_detail, dict) else {}
+    history_draw_rate = _probability_number(sina_detail.get("history_draw_rate"))
+    history_matches = int(sina_detail.get("history_matches") or 0)
+    if history_draw_rate is not None and history_matches:
+        # H2H is supporting evidence, not a standalone forecast. Shrink it
+        # toward the generic draw baseline before combining it with team form.
+        shrunk_history_rate = (history_draw_rate * min(history_matches, 10) + 0.27 * 6) / (min(history_matches, 10) + 6)
+        draw_rates.append(shrunk_history_rate)
     recent_draw_rate = sum(draw_rates) / len(draw_rates) if draw_rates else None
     return expected_total, recent_draw_rate
 
@@ -318,6 +547,10 @@ def _build_reasons(
     elif math_forecast.data_quality == "signal_fallback":
         reasons.append("数学模型未取得球队进失球或 xG 样本，仅保留低权重状态基线。")
 
+    audit_reason = _collection_audit_reason(match)
+    if audit_reason:
+        reasons.append(audit_reason)
+
     if spread < 0.06:
         reasons.append("前两项概率接近，建议提高防守或在任9中谨慎处理。")
     elif top == "3" and probabilities["3"] >= 0.5:
@@ -334,6 +567,42 @@ def _build_reasons(
         reasons.append("赛程压力需要临场继续跟踪。")
     reasons.extend(_select_notes(match.notes))
     return reasons
+
+
+def _collection_audit_reason(match: Match) -> str:
+    audit = match.sources.get("collection_audit") if isinstance(match.sources, dict) else {}
+    if not isinstance(audit, dict) or audit.get("mode") != "full":
+        return ""
+    labels = {
+        "odds": "赔率",
+        "news": "新闻",
+        "injuries": "伤停",
+        "intelligence": "情报",
+        "strength": "实力",
+        "xg": "xG",
+        "history": "交锋",
+        "odds_movement": "赔率变化",
+        "asian_handicap": "亚洲让球",
+        "totals": "大小球",
+        "mainstream_media": "主流媒体",
+        "polymarket": "Polymarket",
+    }
+    available = []
+    missing = []
+    for key, label in labels.items():
+        item = audit.get(key) if isinstance(audit.get(key), dict) else {}
+        status = str(item.get("status") or "")
+        if status in {"available", "complete", "partial", "confirmed_empty"}:
+            available.append(label)
+        else:
+            missing.append(label)
+    available_text = "、".join(available) or "无"
+    missing_text = "、".join(missing) or "无"
+    usage = match.sources.get("data_usage") if isinstance(match.sources, dict) else {}
+    numerical = "、".join(usage.get("numerical") or []) if isinstance(usage, dict) else ""
+    display_only = "、".join(usage.get("display_only") or []) if isinstance(usage, dict) else ""
+    suffix = f"；数值判断 {numerical or '无'}；仅展示 {display_only or '无'}"
+    return f"完整分析资料审计：有效 {available_text}；缺失或未匹配 {missing_text}{suffix}。"
 
 
 def _select_notes(notes: tuple[str, ...]) -> list[str]:

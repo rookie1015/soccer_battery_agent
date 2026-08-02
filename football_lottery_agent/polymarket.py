@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from .collectors import RawMatch
-from .foreign_odds import TEAM_ALIASES
 from .json_utils import loads_json
+from .team_identity import TEAM_ALIASES
 
 
 GAMMA_API_BASE = "https://gamma-api.polymarket.com"

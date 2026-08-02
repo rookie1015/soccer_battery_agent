@@ -8,6 +8,28 @@ from football_lottery_agent.history import archive_report, load_history_entries,
 
 
 class HistoryTests(unittest.TestCase):
+    def test_archive_report_copies_exact_analysis_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html = root / "report.html"
+            snapshot = root / "issue.json"
+            html.write_text("<html>report</html>", encoding="utf-8")
+            snapshot.write_text('{"issue":"26098"}', encoding="utf-8")
+
+            archive_report(
+                "analysis",
+                "26098",
+                html,
+                history_dir=root / "history",
+                snapshot_path=snapshot,
+                created_at=datetime(2026, 8, 2, 18, 0, 0),
+            )
+            entry = load_history_entries(root / "history")[0]
+            copied = root / "history" / entry["snapshot"]
+
+            self.assertTrue(copied.exists())
+            self.assertEqual(copied.read_text(encoding="utf-8"), '{"issue":"26098"}')
+
     def test_archive_report_keeps_latest_52_entries(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

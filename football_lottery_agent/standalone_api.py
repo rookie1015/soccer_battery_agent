@@ -4,11 +4,13 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+import json
 import re
+import urllib.error
 
 from .collectors import collect_issue
 from .calibration import build_calibration
-from .experiments import load_active_model_weights, run_experiment
+from .experiments import load_active_model_weights, load_active_selection_policy, run_experiment
 from .history import archive_report, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
@@ -23,8 +25,18 @@ from .strategy import DEFAULT_MAX_TICKET_COST_YUAN, build_ticket_plan
 import tempfile
 
 
+STRENGTH_XG_MATCHES = 20
+
+
 def run_health() -> dict[str, object]:
     return {"ok": True, "service": "football-lottery-agent-local"}
+
+
+def run_foreign_odds_usage(payload: dict[str, Any]) -> dict[str, object]:
+    from .foreign_odds import check_the_odds_api_usage
+
+    usage = check_the_odds_api_usage(str(payload.get("foreign_odds_api_key") or ""))
+    return {"ok": True, "usage": usage}
 
 
 def run_analysis(
@@ -34,13 +46,11 @@ def run_analysis(
     issue = str(payload.get("issue") or "").strip()
     if not issue:
         raise ValueError("请填写期号。")
-    strength_xg_matches = int(payload.get("strength_xg_matches") or 8)
-    if strength_xg_matches < 0 or strength_xg_matches > 20:
-        raise ValueError("xG 样本场次必须是 0 到 20 之间的整数。")
     max_ticket_cost_yuan = int(payload.get("max_ticket_cost_yuan") or DEFAULT_MAX_TICKET_COST_YUAN)
     if max_ticket_cost_yuan < 2:
         raise ValueError("最高购彩金额不能低于 2 元。")
-    full_analysis = bool(payload.get("full_analysis", False))
+    # 手机端始终优先完整分析。样本数是模型参数，不再暴露给用户调整。
+    full_analysis = True
     foreign_odds = bool(payload.get("foreign_odds", False))
     foreign_odds_api_key = str(payload.get("foreign_odds_api_key") or "").strip() or None
     use_foreign_odds = foreign_odds or (full_analysis and foreign_odds_api_key is not None)
@@ -58,21 +68,37 @@ def run_analysis(
     markdown_path = report_dir / f"{_slug(issue)}_report.md"
     html_path = report_dir / f"{_slug(issue)}_report.html"
 
-    collect_issue(
-        output_path=issue_path,
-        issue=issue,
-        cache_dir=cache_dir,
-        foreign_odds=use_foreign_odds,
-        foreign_odds_api_key=foreign_odds_api_key,
-        strength_model=full_analysis,
-        strength_xg_matches=strength_xg_matches,
-        skip_context_fetches=not full_analysis,
-        sina_odds_only=not full_analysis,
-    )
+    fallback_reason = ""
+    try:
+        _collect_mobile_analysis(
+            issue_path=issue_path,
+            issue=issue,
+            cache_dir=cache_dir,
+            full=True,
+            use_foreign_odds=use_foreign_odds,
+            foreign_odds_api_key=foreign_odds_api_key,
+        )
+    except (OSError, TimeoutError, urllib.error.URLError) as exc:
+        fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
+    else:
+        if _full_collection_has_broad_network_failure(issue_path):
+            fallback_reason = "完整分析的关键资料源出现大范围网络请求失败，已自动降级为简单分析。"
+
+    if fallback_reason:
+        _collect_mobile_analysis(
+            issue_path=issue_path,
+            issue=issue,
+            cache_dir=cache_dir,
+            full=False,
+            use_foreign_odds=False,
+            foreign_odds_api_key=None,
+        )
+    _record_analysis_mode(issue_path, fallback_reason)
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
     calibration = build_calibration(root)
     active_weights = load_active_model_weights(root)
+    active_selection_policy = load_active_selection_policy(root)
     if active_weights is not None:
         calibration = {
             **calibration,
@@ -87,14 +113,14 @@ def run_analysis(
             "message": "历史样本已足够拟合，但尚未通过严格赛前回测晋级门槛，当前继续使用默认权重。",
         }
     issue_data = load_issue(issue_path)
+    strategy_options: dict[str, Any] = {"max_ticket_cost_yuan": max_ticket_cost_yuan}
     if active_weights is not None:
-        plan = build_ticket_plan(
-            issue_data,
-            max_ticket_cost_yuan=max_ticket_cost_yuan,
-            model_weights=active_weights,
-        )
-    else:
-        plan = build_ticket_plan(issue_data, max_ticket_cost_yuan=max_ticket_cost_yuan)
+        strategy_options["model_weights"] = active_weights
+    if active_selection_policy is not None:
+        strategy_options["selection_policy"] = active_selection_policy
+    if full_analysis:
+        strategy_options["evidence_aware_secondary"] = True
+    plan = build_ticket_plan(issue_data, **strategy_options)
     write_report(plan, markdown_path)
     write_analysis_html(plan, html_path)
     history_path = archive_report(
@@ -103,6 +129,7 @@ def run_analysis(
         html_path,
         markdown_path,
         history_dir=history_dir,
+        snapshot_path=issue_path,
     )
 
     return {
@@ -113,6 +140,68 @@ def run_analysis(
         "markdown_path": str(markdown_path),
         "history_path": str(history_path),
     }
+
+
+def _collect_mobile_analysis(
+    *,
+    issue_path: Path,
+    issue: str,
+    cache_dir: Path,
+    full: bool,
+    use_foreign_odds: bool,
+    foreign_odds_api_key: str | None,
+) -> None:
+    collect_issue(
+        output_path=issue_path,
+        issue=issue,
+        cache_dir=cache_dir,
+        foreign_odds=use_foreign_odds if full else False,
+        foreign_odds_requested=full,
+        foreign_odds_api_key=foreign_odds_api_key if full else None,
+        strength_model=full,
+        strength_xg_matches=STRENGTH_XG_MATCHES,
+        skip_context_fetches=not full,
+        sina_odds_only=not full,
+    )
+
+
+def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
+    try:
+        payload = json.loads(issue_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    audits = []
+    for match in payload.get("matches", []):
+        sources = match.get("sources") if isinstance(match, dict) else None
+        audit = sources.get("collection_audit") if isinstance(sources, dict) else None
+        if isinstance(audit, dict):
+            audits.append(audit)
+    if not audits:
+        return False
+    network_sensitive = ("injuries", "history", "intelligence", "odds_movement", "asian_handicap")
+    broad_failures = 0
+    for audit in audits:
+        failed = sum(
+            1
+            for key in network_sensitive
+            if isinstance(audit.get(key), dict) and audit[key].get("status") == "request_failed"
+        )
+        if failed >= 3:
+            broad_failures += 1
+    threshold = max(3, (len(audits) * 2 + 2) // 3)
+    return broad_failures >= threshold
+
+
+def _record_analysis_mode(issue_path: Path, fallback_reason: str) -> None:
+    try:
+        payload = json.loads(issue_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    metadata = payload.setdefault("metadata", {})
+    metadata["analysis_mode_requested"] = "full"
+    metadata["analysis_mode"] = "simple_fallback" if fallback_reason else "full"
+    metadata["analysis_mode_message"] = fallback_reason or "已完成完整分析，增强样本固定为最近 20 场。"
+    issue_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def run_history(work_dir: str | Path) -> dict[str, object]:
@@ -170,12 +259,14 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         if "---" in line or "序号" in line:
             continue
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if len(cells) < 8 or not cells[0].isdigit():
+        if len(cells) < 6 or not cells[0].isdigit():
             continue
 
         seq = int(cells[0])
         home, away = _split_matchup(cells[2])
-        probabilities = _parse_probabilities(cells[7])
+        legacy_layout = len(cells) >= 8
+        confidence_cell = cells[5] if legacy_layout else cells[4]
+        probability_cell = cells[7] if legacy_layout else cells[5]
         predictions.append(
             {
                 "seq": seq,
@@ -185,10 +276,10 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
                 "away": away,
                 "pick_text": cells[3],
                 "pick_labels": [OUTCOME_LABELS.get(pick, pick) for pick in cells[3].split("/") if pick],
-                "confidence": _parse_percent(cells[5]),
-                "risk": cells[6],
-                "probabilities": probabilities,
-                "scorelines": _parse_scorelines(cells[4]),
+                "confidence": _parse_percent(confidence_cell),
+                "risk": cells[6] if legacy_layout else "",
+                "probabilities": _parse_probabilities(probability_cell),
+                "scorelines": _parse_scorelines(cells[4]) if legacy_layout else [],
                 "reasons": [],
                 "final_score": "",
                 "final_result": "",
@@ -209,6 +300,9 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         "purchase_deadline": metadata.get("purchase_deadline", ""),
         "purchase_deadline_source": metadata.get("purchase_deadline_source", ""),
         "sale_begin_time": metadata.get("sale_begin_time", ""),
+        "analysis_mode": "full",
+        "analysis_mode_message": "",
+        "foreign_odds_status": None,
         "metrics": {
             "match_count": len(predictions),
             "single_count": singles,
@@ -236,7 +330,7 @@ def _parse_analysis_metadata(markdown_text: str) -> dict[str, str]:
 
 
 def _restore_history_metadata(report: dict[str, object], work_dir: Path, issue: str) -> dict[str, object]:
-    if report.get("purchase_deadline"):
+    if report.get("purchase_deadline") and report.get("foreign_odds_status"):
         return report
     data_dir = work_dir / "data"
     candidates = (data_dir / f"{_slug(issue)}_issue.json", data_dir / "collected_issue.json")
@@ -250,13 +344,20 @@ def _restore_history_metadata(report: dict[str, object], work_dir: Path, issue: 
         if archived_issue.issue != issue:
             continue
         metadata = archived_issue.metadata
-        if not metadata.get("purchase_deadline"):
-            continue
         restored = dict(report)
-        for key in ("purchase_deadline", "purchase_deadline_source", "sale_begin_time"):
+        for key in (
+            "purchase_deadline",
+            "purchase_deadline_source",
+            "sale_begin_time",
+            "analysis_mode",
+            "analysis_mode_message",
+        ):
             value = metadata.get(key)
             if value:
                 restored[key] = value
+        foreign_odds_status = metadata.get("foreign_odds_audit")
+        if isinstance(foreign_odds_status, dict):
+            restored["foreign_odds_status"] = foreign_odds_status
         return restored
     return report
 
@@ -430,7 +531,8 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     report_dir.mkdir(parents=True, exist_ok=True)
 
     issue_path = _resolve_local_issue_path(data_dir, issue)
-    plan = _load_latest_analysis_plan(issue_path, history_dir, issue)
+    analysis_id = str(payload.get("analysis_id") or "").strip()
+    plan = _load_analysis_plan(issue_path, history_dir, issue, analysis_id)
     auto_results = bool(payload.get("auto_results", True))
     results_csv = str(payload.get("results_csv") or "").strip()
 
@@ -462,7 +564,14 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     html_path = report_dir / f"{_slug(plan.issue.issue)}_review.html"
     write_review_report(review, markdown_path, post_match_evidence)
     write_review_html(review, html_path)
-    archive_report("review", plan.issue.issue, html_path, markdown_path, history_dir=history_dir)
+    archive_report(
+        "review",
+        plan.issue.issue,
+        html_path,
+        markdown_path,
+        history_dir=history_dir,
+        snapshot_path=_resolve_analysis_snapshot(history_dir, issue, analysis_id, issue_path),
+    )
     experiment = _refresh_model_experiment(root)
 
     return {
@@ -502,11 +611,28 @@ def _resolve_local_issue_path(data_dir: Path, issue: str) -> Path:
     raise ValueError(f"找不到 {issue} 的赛前数据。请先生成该期分析。")
 
 
-def _load_latest_analysis_plan(issue_path: Path, history_dir: Path, issue: str) -> TicketPlan:
-    plan = build_ticket_plan(load_issue(issue_path))
-    for entry in load_history_entries(history_dir):
-        if entry.get("kind") != "analysis" or str(entry.get("issue") or "").strip() != issue:
-            continue
+def _load_analysis_plan(
+    issue_path: Path,
+    history_dir: Path,
+    issue: str,
+    analysis_id: str = "",
+) -> TicketPlan:
+    entries = [
+        entry
+        for entry in load_history_entries(history_dir)
+        if entry.get("kind") == "analysis" and str(entry.get("issue") or "").strip() == issue
+    ]
+    if analysis_id:
+        entries = [entry for entry in entries if str(entry.get("id") or "") == analysis_id]
+        if not entries:
+            raise ValueError("找不到所选的分析记录，请重新选择后再复盘。")
+    elif len(entries) > 1:
+        raise ValueError(f"发现 {len(entries)} 次分析结果，请先选择要依据哪一次分析进行复盘。")
+
+    selected_issue_path = _entry_snapshot_path(history_dir, entries[0]) if entries else None
+    plan = build_ticket_plan(load_issue(selected_issue_path or issue_path))
+
+    for entry in entries:
         report = _parse_history_report(
             _read_history_text(history_dir, str(entry.get("markdown") or "")),
             fallback_issue=issue,
@@ -515,7 +641,35 @@ def _load_latest_analysis_plan(issue_path: Path, history_dir: Path, issue: str) 
         restored = _restore_analysis_recommendations(plan, report)
         if restored:
             return restored
+        if analysis_id:
+            raise ValueError("所选分析记录不完整，无法用于复盘，请选择其他记录。")
     return plan
+
+
+def _resolve_analysis_snapshot(
+    history_dir: Path,
+    issue: str,
+    analysis_id: str,
+    fallback: Path,
+) -> Path:
+    entries = [
+        entry
+        for entry in load_history_entries(history_dir)
+        if entry.get("kind") == "analysis"
+        and str(entry.get("issue") or "").strip() == issue
+        and (not analysis_id or str(entry.get("id") or "") == analysis_id)
+    ]
+    if len(entries) == 1:
+        return _entry_snapshot_path(history_dir, entries[0]) or fallback
+    return fallback
+
+
+def _entry_snapshot_path(history_dir: Path, entry: dict[str, str]) -> Path | None:
+    relative = str(entry.get("snapshot") or "").strip()
+    if not relative:
+        return None
+    candidate = history_dir / relative
+    return candidate if candidate.exists() else None
 
 
 def _restore_analysis_recommendations(
@@ -575,7 +729,7 @@ def _serialize_review_report(
     diagnostics: dict[str, object] | None = None,
     post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
-    report = serialize_ticket_plan(review.plan)
+    report = serialize_ticket_plan(review.plan, include_review_fields=True)
     by_seq = {row.prediction.match.seq: row for row in review.rows}
     predictions = []
     for prediction in report["predictions"]:

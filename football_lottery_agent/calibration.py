@@ -49,7 +49,7 @@ def load_review_samples(root: Path) -> list[CalibrationSample]:
 
     samples: list[CalibrationSample] = []
     for issue, entry in latest_reviews.items():
-        issue_path = root / "data" / f"{_slug(issue)}_issue.json"
+        issue_path = _history_snapshot_path(history_dir, entry) or root / "data" / f"{_slug(issue)}_issue.json"
         markdown = _history_markdown_path(history_dir, entry)
         if not issue_path.exists() or not markdown.exists():
             continue
@@ -155,6 +155,14 @@ def _review_outcomes(path: Path) -> dict[int, str]:
 
 def _history_markdown_path(history_dir: Path, entry: dict[str, str]) -> Path:
     return history_dir / str(entry.get("markdown") or "")
+
+
+def _history_snapshot_path(history_dir: Path, entry: dict[str, str]) -> Path | None:
+    relative = str(entry.get("snapshot") or "").strip()
+    if not relative:
+        return None
+    path = history_dir / relative
+    return path if path.exists() else None
 
 
 def _normalize(values: dict[str, float]) -> dict[str, float]:

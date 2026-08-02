@@ -126,13 +126,17 @@ def _combined_quality(home: str, away: str) -> str:
 
 def _apply_squad_strength(source: dict[str, object], home_xg: float, away_xg: float) -> tuple[float, float]:
     """Apply a deliberately small paper-squad adjustment to the xG prior."""
-    home_rating = _number(source.get("home_squad_current_rating")) or _number(source.get("home_squad_paper_rating"))
-    away_rating = _number(source.get("away_squad_current_rating")) or _number(source.get("away_squad_paper_rating"))
+    home_current = _number(source.get("home_squad_current_rating"))
+    away_current = _number(source.get("away_squad_current_rating"))
+    home_rating = home_current or _number(source.get("home_squad_paper_rating"))
+    away_rating = away_current or _number(source.get("away_squad_paper_rating"))
     if home_rating is None or away_rating is None:
         return home_xg, away_xg
     edge = max(-0.16, min(0.16, log(home_rating / away_rating) * 0.12))
-    home_availability = _number(source.get("home_squad_availability_penalty")) or 0.0
-    away_availability = _number(source.get("away_squad_availability_penalty")) or 0.0
+    # Current ratings are already estimated from the available XI. Applying the
+    # absence penalty again would count the same missing player twice.
+    home_availability = 0.0 if home_current is not None else (_number(source.get("home_squad_availability_penalty")) or 0.0)
+    away_availability = 0.0 if away_current is not None else (_number(source.get("away_squad_availability_penalty")) or 0.0)
     home_factor = 1.0 + edge - min(0.10, home_availability * 0.30)
     away_factor = 1.0 - edge - min(0.10, away_availability * 0.30)
     return _clamp_xg(home_xg * home_factor), _clamp_xg(away_xg * away_factor)

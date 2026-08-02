@@ -15,47 +15,10 @@ from typing import Any
 
 from .collectors import RawMatch
 from .json_utils import loads_json
+from .team_identity import TEAM_ALIASES, register_team_alias, team_match_score
 
 
 FOTMOB_BASE = "https://www.fotmob.com/api/data"
-
-TEAM_ALIASES = {
-    "荷兰": ("netherlands", "holland"),
-    "瑞典": ("sweden",),
-    "德国": ("germany",),
-    "科特迪瓦": ("ivory coast", "cote d ivoire", "côte d'ivoire"),
-    "突尼斯": ("tunisia",),
-    "日本": ("japan",),
-    "西班牙": ("spain",),
-    "沙特": ("saudi arabia", "saudi"),
-    "乌拉圭": ("uruguay",),
-    "佛得角": ("cape verde",),
-    "新西兰": ("new zealand",),
-    "埃及": ("egypt",),
-    "阿根廷": ("argentina",),
-    "奥地利": ("austria",),
-    "法国": ("france",),
-    "伊拉克": ("iraq",),
-    "挪威": ("norway",),
-    "塞内加尔": ("senegal",),
-    "约旦": ("jordan",),
-    "阿尔及利亚": ("algeria",),
-    "葡萄牙": ("portugal",),
-    "乌兹别克": ("uzbekistan", "uzbekistan u20"),
-    "英格兰": ("england",),
-    "加纳": ("ghana",),
-    "巴拿马": ("panama",),
-    "克罗地亚": ("croatia",),
-    "哥伦比亚": ("colombia",),
-    "民主刚果": ("dr congo", "congo dr", "democratic republic of congo"),
-    "曼城": ("manchester city", "man city"),
-    "热刺": ("tottenham hotspur", "tottenham", "spurs"),
-    "皇家社会": ("real sociedad",),
-    "比利亚雷亚尔": ("villarreal",),
-    "多特蒙德": ("borussia dortmund", "dortmund"),
-    "法兰克福": ("eintracht frankfurt", "frankfurt"),
-}
-
 
 @dataclass(frozen=True)
 class TeamRef:
@@ -132,6 +95,7 @@ def build_strength_for_matches(
     cache = Path(cache_dir) / "fotmob"
     id_overrides = load_team_ids(team_ids_path) if team_ids_path else {}
     fotmob_events = _fetch_events_for_dates(matches, cache)
+    _learn_one_sided_provider_aliases(matches, fotmob_events)
 
     result: dict[int, FixtureStrength] = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -538,6 +502,49 @@ def _match_fotmob_event(match: RawMatch, events_by_date: dict[str, list[dict[str
     return best if best_score >= 1.6 else None
 
 
+def _learn_one_sided_provider_aliases(
+    matches: list[RawMatch],
+    events_by_date: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Learn the unknown opponent name when one side identifies one fixture.
+
+    This is intentionally conservative: a local match must have exactly one
+    provider fixture on its date where one side already matches strongly and
+    the opposite provider side is still unknown. It improves new-team coverage
+    without guessing from date alone.
+    """
+    for _ in range(2):
+        changed = False
+        for match in matches:
+            events = [
+                event
+                for date in _candidate_date_keys(match.kickoff)
+                for event in events_by_date.get(date, ())
+            ]
+            candidates: list[tuple[str, str]] = []
+            for event in events:
+                home = str((event.get("home") or {}).get("name") or "")
+                away = str((event.get("away") or {}).get("name") or "")
+                local_home = _team_score(match.home, home)
+                local_away = _team_score(match.away, away)
+                if local_home >= 0.8 and local_away == 0.0:
+                    candidates.append((match.away, away))
+                elif local_away >= 0.8 and local_home == 0.0:
+                    candidates.append((match.home, home))
+                reverse_home = _team_score(match.home, away)
+                reverse_away = _team_score(match.away, home)
+                if reverse_home >= 0.8 and reverse_away == 0.0:
+                    candidates.append((match.away, home))
+                elif reverse_away >= 0.8 and reverse_home == 0.0:
+                    candidates.append((match.home, away))
+            unique = {(local, provider) for local, provider in candidates if provider}
+            if len(unique) == 1:
+                local, provider = next(iter(unique))
+                changed = register_team_alias(local, provider) or changed
+        if not changed:
+            break
+
+
 def _team_ref(local_name: str, side: str, event: dict[str, Any] | None, overrides: dict[str, int]) -> TeamRef | None:
     if local_name in overrides:
         return TeamRef(overrides[local_name], local_name)
@@ -642,14 +649,7 @@ def _walk_dicts(value: Any):
 
 
 def _team_score(local: str, candidate: str) -> float:
-    candidate_norm = _normalize(candidate)
-    for alias in (local, *TEAM_ALIASES.get(local, ())):
-        alias_norm = _normalize(alias)
-        if alias_norm == candidate_norm:
-            return 1.0
-        if alias_norm and (alias_norm in candidate_norm or candidate_norm in alias_norm):
-            return 0.8
-    return 0.0
+    return team_match_score(local, candidate)
 
 
 def _rating(win_rate: float, draw_rate: float, gf: float, ga: float, xgf: float | None, xga: float | None) -> float:

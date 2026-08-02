@@ -31,7 +31,9 @@ class MobileApiTests(unittest.TestCase):
         first = report["predictions"][0]
         self.assertEqual(first["seq"], 1)
         self.assertIn("home", first["probabilities"])
-        self.assertIn("score", first["scorelines"][0])
+        self.assertNotIn("scorelines", first)
+        self.assertNotIn("risk", first)
+        self.assertIn("confidence", first)
         self.assertIn("pick_labels", first)
 
 

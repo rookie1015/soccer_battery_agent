@@ -15,9 +15,16 @@ def build_ticket_plan(
     issue: Issue,
     max_ticket_cost_yuan: int = DEFAULT_MAX_TICKET_COST_YUAN,
     model_weights: dict[str, float] | None = None,
+    evidence_aware_secondary: bool = False,
+    selection_policy: dict[str, float] | None = None,
 ) -> TicketPlan:
     predictions = _fit_predictions_to_budget(
-        predict_issue(issue.matches, model_weights=model_weights),
+        predict_issue(
+            issue.matches,
+            model_weights=model_weights,
+            evidence_aware_secondary=evidence_aware_secondary,
+            selection_policy=selection_policy,
+        ),
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
     choose9_keep, choose9_drop = _select_choose9(predictions)
@@ -73,18 +80,50 @@ def _fit_predictions_to_budget(
         return predictions
 
     max_units = max(1, max_ticket_cost_yuan // STAKE_PER_LINE_YUAN)
-    adjusted = list(predictions)
-    while ticket_units(tuple(adjusted)) > max_units:
-        candidates = [
-            (index, _downgrade_loss(prediction))
-            for index, prediction in enumerate(adjusted)
-            if len(prediction.picks) > 1
-        ]
-        if not candidates:
-            break
-        index, _ = min(candidates, key=lambda item: (item[1], adjusted[item[0]].confidence, adjusted[item[0]].match.seq))
-        adjusted[index] = _downgrade_prediction(adjusted[index])
-    return tuple(adjusted)
+    if ticket_units(predictions) <= max_units:
+        return predictions
+
+    # Exact dynamic programming over the discrete 1/2/3-choice products. The
+    # former greedy loop could remove a locally cheap option and still end with
+    # a lower global coverage probability. States are keyed by ticket units, so
+    # the search remains small even for fourteen fixtures.
+    states: dict[int, tuple[float, tuple[Prediction, ...]]] = {1: (0.0, ())}
+    for prediction in predictions:
+        options = _prediction_budget_options(prediction)
+        next_states: dict[int, tuple[float, tuple[Prediction, ...]]] = {}
+        for units, (score, selected) in states.items():
+            for option in options:
+                new_units = units * max(1, len(option.picks))
+                if new_units > max_units:
+                    continue
+                coverage = sum(_coverage_value(option, outcome) for outcome in option.picks)
+                option_score = log(max(coverage, 1e-12))
+                candidate = (score + option_score, (*selected, option))
+                existing = next_states.get(new_units)
+                if existing is None or candidate[0] > existing[0]:
+                    next_states[new_units] = candidate
+        states = next_states
+        if not states:
+            return tuple(_single_only(prediction) for prediction in predictions)
+
+    _, best = max(states.items(), key=lambda item: (item[1][0], item[0]))
+    return best[1]
+
+
+def _prediction_budget_options(prediction: Prediction) -> tuple[Prediction, ...]:
+    options = [prediction]
+    current = prediction
+    while len(current.picks) > 1:
+        current = _downgrade_prediction(current)
+        options.append(current)
+    return tuple(options)
+
+
+def _single_only(prediction: Prediction) -> Prediction:
+    current = prediction
+    while len(current.picks) > 1:
+        current = _downgrade_prediction(current)
+    return current
 
 
 def _downgrade_loss(prediction: Prediction) -> float:
@@ -119,6 +158,13 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
 
 def _coverage_value(prediction: Prediction, outcome: str) -> float:
     probability = prediction.probabilities.get(outcome, 0.0)
+    if prediction.selection_scores:
+        return prediction.selection_scores.get(outcome, probability)
+    audit = prediction.match.sources.get("collection_audit") if isinstance(prediction.match.sources, dict) else {}
+    if isinstance(audit, dict) and audit.get("mode") == "full":
+        # A full analysis with insufficient corroborating evidence must stay
+        # neutral. The legacy simple-mode draw bonus is not evidence.
+        return probability
     if outcome != "1" or probability < 0.26:
         return probability
 

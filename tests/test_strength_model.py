@@ -6,14 +6,40 @@ from football_lottery_agent.strength_model import (
     _player_strength,
     _player_value,
     _rating,
+    _learn_one_sided_provider_aliases,
     _team_score,
 )
+from football_lottery_agent.collectors import RawMatch
+from football_lottery_agent.team_identity import TEAM_ALIASES, normalize_team_name
 
 
 class StrengthModelTests(unittest.TestCase):
     def test_team_score_uses_aliases(self) -> None:
         self.assertEqual(_team_score("荷兰", "Netherlands"), 1.0)
         self.assertEqual(_team_score("热刺", "Tottenham Hotspur"), 1.0)
+        self.assertEqual(_team_score("赫根", "Häcken"), 1.0)
+        self.assertEqual(_team_score("迈阿密国际", "Inter Miami CF"), 1.0)
+
+    def test_team_normalization_does_not_delete_chinese_names(self) -> None:
+        self.assertEqual(normalize_team_name("圣路易斯城"), "圣路易斯城")
+
+    def test_fixture_pairing_learns_unknown_opponent_from_known_side(self) -> None:
+        local = "测试新队"
+        match = RawMatch(
+            seq=1,
+            kickoff="2026-08-02T18:00:00+08:00",
+            league="测试联赛",
+            home="赫根",
+            away=local,
+        )
+        events = {
+            "20260802": [{"home": {"name": "Häcken"}, "away": {"name": "Novel City FC"}}]
+        }
+        try:
+            _learn_one_sided_provider_aliases([match], events)
+            self.assertEqual(_team_score(local, "Novel City FC"), 1.0)
+        finally:
+            TEAM_ALIASES.pop(local, None)
 
     def test_rating_is_bounded(self) -> None:
         self.assertGreater(_rating(0.7, 0.2, 2.0, 0.8, 1.9, 0.9), 0.5)

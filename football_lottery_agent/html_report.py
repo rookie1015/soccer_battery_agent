@@ -23,17 +23,14 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 
 
 def render_analysis_html(plan: TicketPlan) -> str:
-    low_risk = sum(1 for pred in plan.predictions if pred.risk == "低")
     singles = sum(1 for pred in plan.predictions if len(pred.picks) == 1)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     outcome_rows = "\n".join(_analysis_row(pred, plan) for pred in plan.predictions)
-    score_rows = "\n".join(_score_prediction_row(pred) for pred in plan.predictions)
     cards = "\n".join(
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("单选", str(singles), "模型倾向最明确"),
-            _metric_card("低风险", str(low_risk), "适合作胆材候选"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
     )
@@ -49,14 +46,10 @@ def render_analysis_html(plan: TicketPlan) -> str:
               <h1>足球彩票分析报告：{escape(plan.issue.issue)}</h1>
               <span class="deadline">购彩截止时间：{escape(purchase_deadline)}</span>
             </div>
-            <p class="subtle">胜平负、比分倾向、任九取舍集中展示。仅供信息分析和娱乐参考。</p>
+            <p class="subtle">胜平负、置信度和任九取舍集中展示。仅供信息分析和娱乐参考。</p>
           </div>
         </section>
-        <div class="tabs" role="tablist" aria-label="预测类型">
-          <button class="tab-button active" id="outcome-tab" role="tab" aria-selected="true" aria-controls="outcome-panel" data-tab="outcome-panel">胜平负预测</button>
-          <button class="tab-button" id="score-tab" role="tab" aria-selected="false" aria-controls="score-panel" data-tab="score-panel">单场比分预测</button>
-        </div>
-        <div class="tab-panel active" id="outcome-panel" role="tabpanel" aria-labelledby="outcome-tab">
+        <div class="tab-panel active" id="outcome-panel">
           <section class="metrics">{cards}</section>
           <section class="split">
             <div class="panel">
@@ -81,7 +74,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
                     <th>对阵</th>
                     <th>推荐</th>
                     <th>概率</th>
-                    <th>风险</th>
+                    <th>置信度</th>
                     <th>任九</th>
                   </tr>
                 </thead>
@@ -90,27 +83,6 @@ def render_analysis_html(plan: TicketPlan) -> str:
             </div>
           </details>
         </div>
-        <section class="panel tab-panel" id="score-panel" role="tabpanel" aria-labelledby="score-tab" hidden>
-          <div class="section-title">
-            <h2>单场比分预测</h2>
-            <span>首选比分 + 两个备选比分，百分比为模型估算概率</span>
-          </div>
-          <div class="table-wrap">
-            <table class="score-table">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>对阵</th>
-                  <th>首选比分</th>
-                  <th>备选比分</th>
-                  <th>胜平负倾向</th>
-                  <th>风险</th>
-                </tr>
-              </thead>
-              <tbody>{score_rows}</tbody>
-            </table>
-          </div>
-        </section>
         """,
     )
 
@@ -183,7 +155,7 @@ def _analysis_row(prediction: Prediction, plan: TicketPlan) -> str:
       </td>
       <td>{_pick_badge(prediction)}</td>
       <td>{_probability_bars(prediction)}</td>
-      <td>{_risk_badge(prediction.risk)}</td>
+      <td><strong>{prediction.confidence:.1f}%</strong></td>
       <td>{_bucket_badge("保留" if keep else "剔除", keep)}</td>
     </tr>
     """

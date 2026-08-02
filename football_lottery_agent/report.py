@@ -25,6 +25,31 @@ def render_markdown(plan: TicketPlan) -> str:
         if sale_begin_time:
             lines.append(f"- 开售时间：{sale_begin_time}")
         lines.append("")
+    analysis_mode_message = str(metadata.get("analysis_mode_message") or "").strip()
+    if analysis_mode_message:
+        lines.append("## 分析模式")
+        lines.append("")
+        lines.append(f"- {analysis_mode_message}")
+        lines.append("")
+    foreign_status = metadata.get("foreign_odds_audit")
+    if isinstance(foreign_status, dict) and foreign_status.get("requested"):
+        lines.append("## 外盘调用状态")
+        lines.append("")
+        lines.append(f"- 状态：{foreign_status.get('status', '')}")
+        lines.append(f"- 说明：{foreign_status.get('message', '')}")
+        lines.append(
+            f"- 匹配：{int(foreign_status.get('matched_matches') or 0)}/"
+            f"{int(foreign_status.get('total_matches') or 0)} 场"
+        )
+        lines.append(
+            f"- 请求：本次联网 {int(foreign_status.get('attempted_queries') or 0)} 次，"
+            f"成功 {int(foreign_status.get('successful_queries') or 0)} 次，"
+            f"缓存命中 {int(foreign_status.get('cache_hits') or 0)} 次"
+        )
+        quota = _quota_text(foreign_status)
+        if quota:
+            lines.append(f"- 额度：{quota}")
+        lines.append("")
     lines.append("## 任九建议")
     lines.append("")
     lines.append(f"- 建议保留：{_join_seq(plan.choose9_keep)}")
@@ -32,14 +57,14 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append("")
     lines.append("## 14场逐场建议")
     lines.append("")
-    lines.append("| 序号 | 联赛 | 对阵 | 推荐 | 比分倾向 | 置信度 | 风险 | 概率(3/1/0) |")
-    lines.append("| --- | --- | --- | --- | --- | ---: | --- | --- |")
+    lines.append("| 序号 | 联赛 | 对阵 | 推荐 | 置信度 | 概率(3/1/0) |")
+    lines.append("| --- | --- | --- | --- | ---: | --- |")
     for pred in plan.predictions:
         match = pred.match
         prob_text = f"{pred.probabilities['3']:.0%}/{pred.probabilities['1']:.0%}/{pred.probabilities['0']:.0%}"
         lines.append(
             f"| {match.seq} | {match.league} | {match.home} vs {match.away} | "
-            f"{pred.pick_text} | {_scoreline_summary(pred)} | {pred.confidence:.1f}% | {pred.risk} | {prob_text} |"
+            f"{pred.pick_text} | {pred.confidence:.1f}% | {prob_text} |"
         )
 
     lines.append("")
@@ -72,8 +97,7 @@ def _render_prediction(prediction: Prediction) -> list[str]:
         "",
         f"- 比赛：{match.league}，{match.kickoff.isoformat()}",
         f"- 推荐：`{prediction.pick_text}`（{_pick_labels(prediction.picks)}）",
-        f"- 比分倾向：{_scoreline_summary(prediction)}",
-        f"- 风险：{prediction.risk}",
+        f"- 置信度：{prediction.confidence:.1f}%",
     ]
     for reason in prediction.reasons:
         lines.append(f"- {reason}")
@@ -90,3 +114,17 @@ def _scoreline_summary(prediction: Prediction) -> str:
 
 def _join_seq(items: tuple[int, ...]) -> str:
     return "、".join(str(item) for item in items)
+
+
+def _quota_text(status: dict[str, object]) -> str:
+    parts = []
+    labels = (
+        ("credits_remaining", "剩余"),
+        ("credits_used", "累计已用"),
+        ("credits_last", "本次消耗"),
+    )
+    for key, label in labels:
+        value = status.get(key)
+        if value is not None:
+            parts.append(f"{label} {value}")
+    return "，".join(parts)

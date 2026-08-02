@@ -10,6 +10,7 @@ from football_lottery_agent.experiments import (
     audit_snapshot,
     evaluate_records,
     load_active_model_weights,
+    load_active_selection_policy,
     run_experiment,
     walk_forward_evaluate,
 )
@@ -88,9 +89,11 @@ class ExperimentTests(unittest.TestCase):
                 created_at=datetime(2026, 7, 26, tzinfo=timezone.utc),
             )
             active = load_active_model_weights(tmp)
+            active_policy = load_active_selection_policy(tmp)
 
         self.assertEqual(result["promotion"]["status"], "promoted")
         self.assertIsNotNone(active)
+        self.assertIsNotNone(active_policy)
         self.assertGreater(active["dixon_coles"], active["odds"])
         self.assertTrue(Path(result["artifacts"]["json"]).name.endswith("pure-1x2-v1.json"))
 

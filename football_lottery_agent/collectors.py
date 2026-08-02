@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .json_utils import loads_json
+from .team_identity import TEAM_ALIASES as SHARED_TEAM_ALIASES
 
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
@@ -64,6 +65,7 @@ MEDIA_TEAM_ALIASES = {
     "多特蒙德": ("borussia dortmund", "dortmund"),
     "法兰克福": ("eintracht frankfurt", "frankfurt"),
 }
+MEDIA_TEAM_ALIASES = {**SHARED_TEAM_ALIASES, **MEDIA_TEAM_ALIASES}
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,7 @@ def collect_issue(
     cache_dir: str | Path = "data/cache",
     offline: bool = False,
     foreign_odds: bool = False,
+    foreign_odds_requested: bool = False,
     foreign_odds_api_key: str | None = None,
     foreign_odds_regions: str = "uk,eu",
     foreign_odds_bookmakers: str = "",
@@ -128,6 +131,20 @@ def collect_issue(
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
+    strength_by_seq = {}
+    if strength_model and not offline:
+        from .strength_model import build_strength_for_matches
+
+        # Strength matching also learns conservative provider aliases. Run it
+        # before media, foreign-odds and prediction-market matching so every
+        # downstream source benefits in the same collection pass.
+        strength_by_seq = build_strength_for_matches(
+            raw_matches,
+            cache_dir=cache,
+            team_ids_path=strength_team_ids,
+            lookback=strength_lookback,
+            xg_matches=strength_xg_matches,
+        )
     briefings = {} if skip_context_fetches else _fetch_briefings(raw_matches, cache, offline)
     media_briefings = {} if skip_context_fetches else _fetch_mainstream_media_briefings(raw_matches, cache, offline)
     if skip_sina_details:
@@ -136,6 +153,33 @@ def collect_issue(
         sina_details = _fetch_sina_odds(raw_matches, cache, offline)
     else:
         sina_details = _fetch_sina_details(raw_matches, cache, offline)
+    foreign_requested = foreign_odds_requested or foreign_odds
+    foreign_odds_audit: dict[str, Any] = {
+        "provider": "the_odds_api",
+        "requested": foreign_requested,
+        "configured": bool(foreign_odds_api_key),
+        "status": "not_requested",
+        "message": "简单分析未启用 The Odds API。",
+        "queries_considered": 0,
+        "attempted_queries": 0,
+        "successful_queries": 0,
+        "cache_hits": 0,
+        "events_received": 0,
+        "matched_matches": 0,
+        "total_matches": len(raw_matches),
+        "credits_remaining": None,
+        "credits_used": None,
+        "credits_last": None,
+        "query_errors": [],
+    }
+    if foreign_requested and not foreign_odds_api_key:
+        foreign_odds_audit.update(
+            status="not_configured",
+            message="完整分析未配置 The Odds API Key，本次未调用外盘，赔率自动使用新浪等现有来源。",
+        )
+    elif foreign_requested and offline:
+        foreign_odds_audit.update(status="offline", message="离线模式未调用 The Odds API。")
+
     foreign_odds_by_seq = {}
     if foreign_odds and not offline:
         from .foreign_odds import fetch_foreign_odds_for_matches
@@ -147,17 +191,7 @@ def collect_issue(
             regions=foreign_odds_regions,
             bookmakers=foreign_odds_bookmakers,
             sport_keys=tuple(item.strip() for item in foreign_odds_sports.split(",") if item.strip()),
-        )
-    strength_by_seq = {}
-    if strength_model and not offline:
-        from .strength_model import build_strength_for_matches
-
-        strength_by_seq = build_strength_for_matches(
-            raw_matches,
-            cache_dir=cache,
-            team_ids_path=strength_team_ids,
-            lookback=strength_lookback,
-            xg_matches=strength_xg_matches,
+            audit=foreign_odds_audit,
         )
     polymarket_by_seq = {}
     if not skip_context_fetches and not offline:
@@ -196,8 +230,27 @@ def collect_issue(
         odds_source = "csv"
         if item.seq not in odds_by_seq:
             odds_source = "foreign_bookmakers" if foreign else ("sina_average_euro" if detail.odds else "default_placeholder")
-        signals = infer_signals(item, notes)
+        # Search snippets and media headlines are shown for context only. They
+        # are not reliable enough to change probabilities through keyword hits.
+        signals = infer_signals(item, [])
+        # Strength establishes the statistical baseline first. Structured
+        # pre-match intelligence is applied afterwards so it cannot be silently
+        # overwritten when FotMob/SofaScore matched both teams.
         signals = _apply_strength_to_signals(signals, strength)
+        signals = _apply_sina_detail_to_signals(signals, detail)
+        strength_source = _strength_source(strength)
+        selected_market = _selected_market_source(detail, foreign)
+        collection_audit = _collection_audit(
+            mode="full" if not skip_context_fetches else "simple",
+            odds_source=odds_source,
+            news=news,
+            media_items=media_items,
+            injury_news=injury_news,
+            detail=detail,
+            strength_source=strength_source,
+            polymarket=polymarket,
+            market_source=selected_market,
+        )
 
         matches.append(
             {
@@ -217,8 +270,11 @@ def collect_issue(
                     "history": history,
                     "sina_detail": detail.raw,
                     "foreign_odds": foreign.raw if foreign else {},
+                    "odds_market": selected_market,
                     "polymarket": polymarket.raw if polymarket else {},
-                    "strength_model": _strength_source(strength),
+                    "strength_model": strength_source,
+                    "collection_audit": collection_audit,
+                    "data_usage": _data_usage_summary(collection_audit, foreign is not None),
                     "odds": odds_source,
                 },
             }
@@ -228,6 +284,8 @@ def collect_issue(
     output.parent.mkdir(parents=True, exist_ok=True)
     metadata = {
         **metadata,
+        "analysis_mode": "full" if not skip_context_fetches else "simple",
+        "foreign_odds_audit": foreign_odds_audit,
         "snapshot_collected_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_schema_version": "1",
     }
@@ -411,8 +469,18 @@ def fetch_history_notes(match: RawMatch, cache_dir: Path) -> list[str]:
 
 
 def fetch_match_briefing(match: RawMatch, cache_dir: Path, limit: int = 5) -> list[NewsItem]:
-    query = f"{match.home} {match.away} {match.league} 赛前 伤停 历史交锋 战绩 新闻"
-    return _fetch_bing_news(query, cache_dir, limit)
+    home_term = _primary_media_term(match.home)
+    away_term = _primary_media_term(match.away)
+    query = f'"{home_term}" "{away_term}" football preview injuries lineup'
+    items = search_web_news(query, cache_dir, limit * 2)
+    matched = [item for item in items if _news_item_matches_both_teams(match, item)]
+    if matched or (home_term == match.home and away_term == match.away):
+        return _dedupe_news_items(matched)[:limit]
+
+    chinese_query = f"{match.home} {match.away} {match.league} 赛前 伤停 首发 阵容"
+    chinese_items = search_web_news(chinese_query, cache_dir, limit)
+    matched.extend(item for item in chinese_items if _news_item_matches_both_teams(match, item))
+    return _dedupe_news_items(matched)[:limit]
 
 
 def fetch_mainstream_media_news(
@@ -430,11 +498,12 @@ def fetch_mainstream_media_news(
 
 def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
     if not match.match_id:
-        return SinaDetail(None, (), (), (), {})
-    raw_odds = _sina_gateway("footballMatchOddsEuro", {"matchId": match.match_id}, cache_dir)
-    raw_injury = _sina_gateway("footballMatchTeamInjury", {"matchId": match.match_id}, cache_dir)
-    raw_intelligence = _sina_gateway("FootballMatchIntelligence", {"matchId": match.match_id}, cache_dir)
-    raw_history = _sina_gateway(
+        return SinaDetail(None, (), (), (), {"fetch_status": "missing_match_id"})
+    raw_odds, odds_status = _sina_gateway_result("footballMatchOddsEuro", {"matchId": match.match_id}, cache_dir)
+    raw_asian, asian_status = _sina_gateway_result("footballMatchOddsAsia", {"matchId": match.match_id}, cache_dir)
+    raw_injury, injury_status = _sina_gateway_result("footballMatchTeamInjury", {"matchId": match.match_id}, cache_dir)
+    raw_intelligence, intelligence_status = _sina_gateway_result("FootballMatchIntelligence", {"matchId": match.match_id}, cache_dir)
+    raw_history, history_status = _sina_gateway_result(
         "footballMatchTeamBattleHistory",
         {"matchId": match.match_id, "limit": "10", "isSameHostAway": "0", "isSameLeague": "0"},
         cache_dir,
@@ -445,10 +514,21 @@ def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
     intelligence_notes = tuple(_format_intelligence_notes(raw_intelligence, match))
     raw = {
         "odds_rows": _safe_len(raw_odds),
+        "odds_fetch_status": odds_status,
+        **_odds_market_summary(raw_odds),
+        "asian_rows": _safe_len(raw_asian),
+        "asian_fetch_status": asian_status,
+        **_asian_market_summary(raw_asian),
         "injury_team1": _safe_len(_data(raw_injury).get("team1", []) if isinstance(_data(raw_injury), dict) else []),
         "injury_team2": _safe_len(_data(raw_injury).get("team2", []) if isinstance(_data(raw_injury), dict) else []),
+        "injury_fetch_status": injury_status,
+        **_injury_signal_summary(raw_injury),
         "intelligence_rows": _safe_len(intelligence_notes),
+        "intelligence_fetch_status": intelligence_status,
+        **_intelligence_signal_summary(raw_intelligence),
         "history_rows": _safe_len(raw_history),
+        "history_fetch_status": history_status,
+        **_history_signal_summary(raw_history),
     }
     return SinaDetail(
         odds=odds,
@@ -461,31 +541,41 @@ def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
 
 def fetch_sina_odds_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
     if not match.match_id:
-        return SinaDetail(None, (), (), (), {})
-    raw_odds = _sina_gateway("footballMatchOddsEuro", {"matchId": match.match_id}, cache_dir)
+        return SinaDetail(None, (), (), (), {"fetch_status": "missing_match_id", "mode": "odds_only"})
+    raw_odds, odds_status = _sina_gateway_result("footballMatchOddsEuro", {"matchId": match.match_id}, cache_dir)
     odds = _average_sina_euro_odds(match.seq, raw_odds)
     return SinaDetail(
         odds=odds,
         injury_notes=(),
         history_notes=(),
         intelligence_notes=(),
-        raw={"odds_rows": _safe_len(raw_odds), "mode": "odds_only"},
+        raw={
+            "odds_rows": _safe_len(raw_odds),
+            "odds_fetch_status": odds_status,
+            **_odds_market_summary(raw_odds),
+            "mode": "odds_only",
+        },
     )
 
 
 def _sina_gateway(cat1: str, params: dict[str, str], cache_dir: Path) -> Any:
+    return _sina_gateway_result(cat1, params, cache_dir)[0]
+
+
+def _sina_gateway_result(cat1: str, params: dict[str, str], cache_dir: Path) -> tuple[Any, str]:
     query = {**SINA_COMMON_PARAMS, "cat1": cat1, **params}
     url = f"{SINA_GATEWAY_URL}?{urllib.parse.urlencode(query)}"
     try:
         text = _fetch_text(url, cache_dir, max_age_seconds=900)
         payload = loads_json(text)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
-        return []
+        return [], "request_failed"
     result = payload.get("result", {})
     status = result.get("status", {})
     if status.get("code") != 0:
-        return []
-    return result.get("data", [])
+        return [], "provider_error"
+    data = result.get("data", [])
+    return data, "available" if _safe_len(data) else "confirmed_empty"
 
 
 def infer_signals(match: RawMatch, notes: list[str]) -> dict[str, float]:
@@ -499,12 +589,114 @@ def infer_signals(match: RawMatch, notes: list[str]) -> dict[str, float]:
     return {
         "home_form": home_form,
         "away_form": away_form,
-        "home_motivation": min(0.78, 0.52 + motivation * 0.18),
-        "away_motivation": min(0.78, 0.52 + motivation * 0.18),
+        "home_motivation": min(0.78, 0.50 + motivation * 0.18),
+        "away_motivation": min(0.78, 0.50 + motivation * 0.18),
         "home_injury_impact": max(_keyword_score(text, [f"{match.home} 伤", f"{match.home} 缺阵"]), injury * 0.35),
         "away_injury_impact": max(_keyword_score(text, [f"{match.away} 伤", f"{match.away} 缺阵"]), injury * 0.35),
         "schedule_pressure_home": pressure * 0.5,
         "schedule_pressure_away": pressure * 0.5,
+    }
+
+
+def _apply_sina_detail_to_signals(signals: dict[str, float], detail: SinaDetail) -> dict[str, float]:
+    """Apply side-aware structured Sina evidence in full analysis.
+
+    The old keyword pass combined both teams' notes and often assigned the same
+    injury or motivation value to both sides. Structured counts and good/bad
+    importance retain which team the evidence belongs to.
+    """
+    raw = detail.raw if isinstance(detail.raw, dict) else {}
+    if raw.get("mode") == "odds_only":
+        return signals
+    updated = dict(signals)
+    home_injuries = float(raw.get("injury_team1_weight") or raw.get("injury_team1") or 0)
+    away_injuries = float(raw.get("injury_team2_weight") or raw.get("injury_team2") or 0)
+    if home_injuries or away_injuries or raw.get("injury_fetch_status") == "confirmed_empty":
+        updated["home_injury_impact"] = min(0.45, home_injuries * 0.05)
+        updated["away_injury_impact"] = min(0.45, away_injuries * 0.05)
+    for side, prefix in (("home", "team1"), ("away", "team2")):
+        good = float(raw.get(f"intelligence_{prefix}_good") or 0.0)
+        bad = float(raw.get(f"intelligence_{prefix}_bad") or 0.0)
+        total = good + bad
+        if total <= 0:
+            continue
+        evidence_edge = (good - bad) / total
+        updated[f"{side}_form"] = _clamp_signal(updated[f"{side}_form"] + evidence_edge * 0.08)
+        updated[f"{side}_motivation"] = _clamp_signal(updated[f"{side}_motivation"] + evidence_edge * 0.04)
+    return updated
+
+
+def _injury_signal_summary(raw: Any) -> dict[str, float]:
+    data = _data(raw)
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, float] = {}
+    for prefix in ("team1", "team2"):
+        players = data.get(prefix) or []
+        result[f"injury_{prefix}_weight"] = round(
+            sum(_injury_player_weight(player) for player in players if isinstance(player, dict)),
+            3,
+        )
+    return result
+
+
+def _injury_player_weight(player: dict[str, Any]) -> float:
+    position = str(player.get("positionCn") or player.get("position") or "").lower()
+    reason = str(player.get("reason") or "").lower()
+    weight = 1.0
+    if any(term in position for term in ("门将", "goalkeeper", "keeper")):
+        weight = 1.30
+    elif any(term in position for term in ("前锋", "中锋", "forward", "striker")):
+        weight = 1.18
+    elif any(term in position for term in ("中场", "midfield")):
+        weight = 1.12
+    elif any(term in position for term in ("后卫", "defender", "back")):
+        weight = 1.08
+    if any(term in reason for term in ("停赛", "suspension", "赛季报销", "长期")):
+        weight *= 1.12
+    return min(1.6, weight)
+
+
+def _intelligence_signal_summary(raw: Any) -> dict[str, float]:
+    data = _data(raw)
+    if not isinstance(data, dict):
+        return {}
+    result: dict[str, float] = {}
+    for prefix in ("team1", "team2"):
+        section = data.get(prefix) or {}
+        if not isinstance(section, dict):
+            continue
+        for tone in ("good", "bad"):
+            result[f"intelligence_{prefix}_{tone}"] = round(
+                sum(_importance(item) for item in section.get(tone) or []),
+                3,
+            )
+    return result
+
+
+def _importance(value: Any) -> float:
+    if not isinstance(value, dict):
+        return 1.0
+    try:
+        return min(5.0, max(1.0, float(value.get("importance") or 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _history_signal_summary(raw: Any) -> dict[str, float | int]:
+    if not isinstance(raw, list):
+        return {}
+    outcomes = []
+    for row in raw[:10]:
+        try:
+            outcomes.append(float(row.get("score1")) == float(row.get("score2")))
+        except (AttributeError, TypeError, ValueError):
+            continue
+    if not outcomes:
+        return {}
+    return {
+        "history_matches": len(outcomes),
+        "history_draw_rate": round(sum(outcomes) / len(outcomes), 3),
     }
 
 
@@ -523,6 +715,92 @@ def _average_sina_euro_odds(seq: int, rows: Any) -> OddsRow | None:
     draw = sum(item[1] for item in values) / len(values)
     away = sum(item[2] for item in values) / len(values)
     return OddsRow(seq=seq, home=round(home, 3), draw=round(draw, 3), away=round(away, 3))
+
+
+def _odds_market_summary(rows: Any) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        return {}
+    current: list[dict[str, float]] = []
+    opening: list[dict[str, float]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        current_probability = _normalized_odds_row(row, ("o1New", "o2New", "o3New"))
+        opening_probability = _normalized_odds_row(row, ("o1Ini", "o2Ini", "o3Ini"))
+        if current_probability:
+            current.append(current_probability)
+        if opening_probability:
+            opening.append(opening_probability)
+    if not current:
+        return {}
+    consensus = _average_probability_rows(current)
+    result: dict[str, Any] = {
+        "market_consensus": consensus,
+        "market_bookmakers": len(current),
+        "market_dispersion": {
+            outcome: round(max(row[outcome] for row in current) - min(row[outcome] for row in current), 4)
+            for outcome in ("3", "1", "0")
+        },
+    }
+    if opening:
+        opening_consensus = _average_probability_rows(opening)
+        result["market_opening_consensus"] = opening_consensus
+        result["market_movement"] = {
+            outcome: round(consensus[outcome] - opening_consensus[outcome], 4)
+            for outcome in ("3", "1", "0")
+        }
+    return result
+
+
+def _asian_market_summary(rows: Any) -> dict[str, Any]:
+    if not isinstance(rows, list):
+        return {}
+    opening_lines: list[float] = []
+    current_lines: list[float] = []
+    price_edges: list[float] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            opening_lines.append(float(row["o3Ini"]))
+            current_lines.append(float(row["o3New"]))
+            home_price = float(row["o1New"])
+            away_price = float(row["o2New"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        price_edges.append(max(-0.25, min(0.25, (away_price - home_price) / 2.0)))
+    if not current_lines:
+        return {}
+    current = sum(current_lines) / len(current_lines)
+    opening = sum(opening_lines) / len(opening_lines) if opening_lines else current
+    return {
+        "asian_current_line": round(current, 3),
+        "asian_opening_line": round(opening, 3),
+        "asian_line_movement": round(current - opening, 3),
+        "asian_home_price_edge": round(sum(price_edges) / len(price_edges), 4) if price_edges else 0.0,
+    }
+
+
+def _normalized_odds_row(row: dict[str, Any], keys: tuple[str, str, str]) -> dict[str, float] | None:
+    try:
+        values = [float(row[key]) for key in keys]
+    except (KeyError, TypeError, ValueError):
+        return None
+    if any(value <= 1.0 for value in values):
+        return None
+    implied = [1.0 / value for value in values]
+    total = sum(implied)
+    return {
+        outcome: implied[index] / total
+        for index, outcome in enumerate(("3", "1", "0"))
+    }
+
+
+def _average_probability_rows(rows: list[dict[str, float]]) -> dict[str, float]:
+    return {
+        outcome: round(sum(row[outcome] for row in rows) / len(rows), 6)
+        for outcome in ("3", "1", "0")
+    }
 
 
 def _format_injury_notes(raw: Any, match: RawMatch) -> list[str]:
@@ -613,8 +891,16 @@ def _media_item_matches_match(match: RawMatch, item: NewsItem) -> bool:
     return (home_hit and away_hit) or ((home_hit or away_hit) and league_hit)
 
 
+def _news_item_matches_both_teams(match: RawMatch, item: NewsItem) -> bool:
+    text = _normalize_media_text(f"{item.title} {item.link}")
+    return (
+        any(term in text for term in _media_terms(match.home))
+        and any(term in text for term in _media_terms(match.away))
+    )
+
+
 def _media_terms(team: str) -> tuple[str, ...]:
-    terms = [team, *MEDIA_TEAM_ALIASES.get(team, ())]
+    terms = [team, *SHARED_TEAM_ALIASES.get(team, ()), *MEDIA_TEAM_ALIASES.get(team, ())]
     normalized = []
     for term in terms:
         value = _normalize_media_text(term)
@@ -624,7 +910,7 @@ def _media_terms(team: str) -> tuple[str, ...]:
 
 
 def _primary_media_term(team: str) -> str:
-    aliases = MEDIA_TEAM_ALIASES.get(team)
+    aliases = SHARED_TEAM_ALIASES.get(team) or MEDIA_TEAM_ALIASES.get(team)
     return aliases[0] if aliases else team
 
 
@@ -895,8 +1181,10 @@ def _strength_source(strength: Any) -> dict[str, Any]:
     away = getattr(strength, "away", None)
     home_squad = getattr(strength, "home_squad", None)
     away_squad = getattr(strength, "away_squad", None)
+    status = "complete" if home is not None and away is not None else "partial" if home is not None or away is not None else "unmatched"
     return {
         **getattr(strength, "source", {}),
+        "status": status,
         "home_rating": getattr(home, "rating", None),
         "away_rating": getattr(away, "rating", None),
         "home_draw_rate": getattr(home, "draw_rate", None),
@@ -929,6 +1217,116 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "away_squad_defence": getattr(away_squad, "defence_rating", None),
         "home_squad_availability_penalty": getattr(home_squad, "availability_penalty", None),
         "away_squad_availability_penalty": getattr(away_squad, "availability_penalty", None),
+    }
+
+
+def _selected_market_source(detail: SinaDetail, foreign: Any) -> dict[str, Any]:
+    if foreign:
+        raw = dict(getattr(foreign, "raw", {}) or {})
+        return {**raw, "provider": "foreign_bookmakers"}
+    raw = detail.raw if isinstance(detail.raw, dict) else {}
+    return {
+        key: raw[key]
+        for key in (
+            "market_consensus",
+            "market_opening_consensus",
+            "market_movement",
+            "market_bookmakers",
+            "market_dispersion",
+            "asian_current_line",
+            "asian_opening_line",
+            "asian_line_movement",
+            "asian_home_price_edge",
+        )
+        if key in raw
+    } | {"provider": "sina_average_euro"}
+
+
+def _data_usage_summary(audit: dict[str, Any], foreign_selected: bool) -> dict[str, list[str]]:
+    numerical = ["1X2赔率", "近期状态"]
+    if (audit.get("injuries") or {}).get("status") in {"available", "confirmed_empty"}:
+        numerical.append("结构化伤停")
+    if (audit.get("intelligence") or {}).get("status") == "available":
+        numerical.append("结构化情报")
+    if (audit.get("history") or {}).get("status") == "available":
+        numerical.append("交锋平局率")
+    if (audit.get("strength") or {}).get("status") in {"complete", "partial"}:
+        numerical.append("球队实力")
+    if (audit.get("xg") or {}).get("status") in {"complete", "partial"}:
+        numerical.append("xG")
+    if (audit.get("asian_handicap") or {}).get("status") == "available":
+        numerical.append("亚洲让球")
+    if (audit.get("totals") or {}).get("status") == "available":
+        numerical.append("大小球")
+    display_only = ["新闻标题", "主流媒体标题", "Polymarket"]
+    if foreign_selected:
+        numerical.append("国外公司赔率")
+    return {"numerical": numerical, "display_only": display_only}
+
+
+def _collection_audit(
+    *,
+    mode: str,
+    odds_source: str,
+    news: list[NewsItem],
+    media_items: list[NewsItem],
+    injury_news: list[NewsItem],
+    detail: SinaDetail,
+    strength_source: dict[str, Any],
+    polymarket: Any,
+    market_source: dict[str, Any],
+) -> dict[str, Any]:
+    detail_raw = detail.raw if isinstance(detail.raw, dict) else {}
+    home_xg = int(strength_source.get("home_xg_matches") or 0)
+    away_xg = int(strength_source.get("away_xg_matches") or 0)
+    xg_status = "complete" if home_xg and away_xg else "partial" if home_xg or away_xg else "missing"
+    injury_rows = int(detail_raw.get("injury_team1") or 0) + int(detail_raw.get("injury_team2") or 0)
+    def provider_status(key: str, count: int) -> str:
+        status = str(detail_raw.get(f"{key}_fetch_status") or "")
+        if count:
+            return "available"
+        if status == "confirmed_empty":
+            return "confirmed_empty"
+        if status in {"request_failed", "provider_error", "missing_match_id"}:
+            return status
+        return "empty"
+
+    return {
+        "mode": mode,
+        "odds": {"status": "missing" if odds_source == "default_placeholder" else "available", "provider": odds_source},
+        "news": {"status": "available" if news else "empty_after_fallbacks", "count": len(news)},
+        "mainstream_media": {"status": "available" if media_items else "empty", "count": len(media_items)},
+        "injuries": {
+            "status": "available" if injury_rows or injury_news else provider_status("injury", 0),
+            "count": injury_rows + len(injury_news),
+        },
+        "history": {
+            "status": provider_status("history", int(detail_raw.get("history_rows") or 0)),
+            "count": int(detail_raw.get("history_rows") or 0),
+        },
+        "intelligence": {
+            "status": provider_status("intelligence", int(detail_raw.get("intelligence_rows") or 0)),
+            "count": int(detail_raw.get("intelligence_rows") or 0),
+        },
+        "odds_movement": {
+            "status": "available" if detail_raw.get("market_movement") else provider_status("odds", int(detail_raw.get("odds_rows") or 0)),
+            "bookmakers": int(detail_raw.get("market_bookmakers") or 0),
+        },
+        "asian_handicap": {
+            "status": "available" if detail_raw.get("asian_rows") or market_source.get("spread_bookmakers") else provider_status("asian", 0),
+            "count": int(detail_raw.get("asian_rows") or market_source.get("spread_bookmakers") or 0),
+        },
+        "totals": {
+            "status": "available" if market_source.get("totals_bookmakers") else "not_available_from_provider",
+            "count": int(market_source.get("totals_bookmakers") or 0),
+        },
+        "strength": {
+            "status": strength_source.get("status") or ("not_requested" if mode == "simple" else "unmatched"),
+            "provider": strength_source.get("provider") or "",
+            "sofascore_status": ((strength_source.get("sofascore") or {}).get("status") if isinstance(strength_source.get("sofascore"), dict) else ""),
+        },
+        "xg": {"status": xg_status, "home_samples": home_xg, "away_samples": away_xg},
+        "polymarket": {"status": "available" if polymarket else "unmatched"},
     }
 
 

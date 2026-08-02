@@ -111,6 +111,7 @@ class Prediction:
     confidence: float
     risk: str
     reasons: tuple[str, ...]
+    selection_scores: dict[Outcome, float] = field(default_factory=dict)
 
     @property
     def pick_text(self) -> str:

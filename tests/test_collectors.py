@@ -6,7 +6,12 @@ from unittest.mock import patch
 from football_lottery_agent.collectors import (
     NewsItem,
     RawMatch,
+    SinaDetail,
+    _apply_sina_detail_to_signals,
+    _injury_signal_summary,
     _media_item_matches_match,
+    _news_item_matches_both_teams,
+    _odds_market_summary,
     _parse_rss,
     fetch_sina_sfc,
     fetch_sporttery_issue_metadata,
@@ -67,6 +72,68 @@ class CollectorTests(unittest.TestCase):
         item = NewsItem(title="ESPN Soccer：Portugal face Uzbekistan in World Cup preview", link="")
 
         self.assertTrue(_media_item_matches_match(match, item))
+
+    def test_match_news_uses_shared_club_aliases_for_both_teams(self) -> None:
+        match = RawMatch(seq=1, kickoff="", league="美职", home="迈阿密国际", away="哥伦布机员")
+        correct = NewsItem(title="Inter Miami CF vs Columbus Crew preview and lineups", link="")
+        wrong_opponent = NewsItem(title="CF Montreal vs Inter Miami CF preview", link="")
+
+        self.assertTrue(_news_item_matches_both_teams(match, correct))
+        self.assertFalse(_news_item_matches_both_teams(match, wrong_opponent))
+
+    def test_structured_sina_evidence_keeps_home_and_away_effects_separate(self) -> None:
+        detail = SinaDetail(
+            odds=None,
+            injury_notes=(),
+            history_notes=(),
+            intelligence_notes=(),
+            raw={
+                "injury_team1": 4,
+                "injury_team2": 1,
+                "intelligence_team1_good": 2.0,
+                "intelligence_team1_bad": 8.0,
+                "intelligence_team2_good": 8.0,
+                "intelligence_team2_bad": 2.0,
+            },
+        )
+        signals = {
+            "home_form": 0.5,
+            "away_form": 0.5,
+            "home_motivation": 0.52,
+            "away_motivation": 0.52,
+            "home_injury_impact": 0.0,
+            "away_injury_impact": 0.0,
+            "schedule_pressure_home": 0.0,
+            "schedule_pressure_away": 0.0,
+        }
+
+        adjusted = _apply_sina_detail_to_signals(signals, detail)
+
+        self.assertGreater(adjusted["home_injury_impact"], adjusted["away_injury_impact"])
+        self.assertLess(adjusted["home_form"], adjusted["away_form"])
+
+    def test_sina_odds_summary_uses_probability_consensus_and_movement(self) -> None:
+        summary = _odds_market_summary(
+            [
+                {"o1Ini": "2.00", "o2Ini": "3.20", "o3Ini": "4.00", "o1New": "1.80", "o2New": "3.40", "o3New": "4.40"},
+                {"o1Ini": "2.10", "o2Ini": "3.10", "o3Ini": "3.80", "o1New": "1.90", "o2New": "3.30", "o3New": "4.20"},
+            ]
+        )
+
+        self.assertEqual(summary["market_bookmakers"], 2)
+        self.assertAlmostEqual(sum(summary["market_consensus"].values()), 1.0, places=5)
+        self.assertGreater(summary["market_movement"]["3"], 0)
+        self.assertIn("1", summary["market_dispersion"])
+
+    def test_injury_summary_weights_positions_instead_of_only_counting_heads(self) -> None:
+        summary = _injury_signal_summary(
+            {
+                "team1": [{"positionCn": "门将", "reason": "停赛"}],
+                "team2": [{"positionCn": "未知", "reason": "轻伤"}],
+            }
+        )
+
+        self.assertGreater(summary["injury_team1_weight"], summary["injury_team2_weight"])
 
     @patch("football_lottery_agent.collectors.fetch_sina_sfc", return_value=("26087", []))
     def test_load_matches_passes_requested_issue_to_sina(self, fetch_sina_sfc_mock) -> None:

@@ -15,7 +15,7 @@ from .dixon_coles import forecast as dixon_coles_forecast
 from .history import load_history_entries
 from .loader import load_issue
 from .models import Match
-from .predictor import _odds_to_probabilities, _signal_scores
+from .predictor import DEFAULT_SELECTION_POLICY, _odds_to_probabilities, _select_picks, _signal_scores
 
 
 OUTCOMES = ("3", "1", "0")
@@ -79,6 +79,17 @@ def run_experiment(
         min_test_issues=min_test_issues,
         min_brier_gain=min_brier_gain,
     )
+    ticket_strategy = evaluate_ticket_strategy(strict)
+    if ticket_strategy["status"] == "evaluated":
+        gate = {
+            "name": "选项策略样本外效率",
+            "passed": bool(ticket_strategy["gate_passed"]),
+            "detail": ticket_strategy["gate_detail"],
+        }
+        promotion["gates"].append(gate)
+        if not gate["passed"] and promotion["status"] == "eligible":
+            promotion["status"] = "hold"
+            promotion["message"] = "概率模型达标，但单/双/全包策略未通过样本外效率门槛，保持当前生产策略。"
     result: dict[str, Any] = {
         "experiment_id": experiment_id,
         "model_version": MODEL_VERSION,
@@ -100,6 +111,7 @@ def run_experiment(
         "strict": strict_track,
         "exploratory": exploratory_track,
         "promotion": promotion,
+        "ticket_strategy": ticket_strategy,
     }
 
     target = Path(output_dir) if output_dir else root / "reports" / "experiments"
@@ -119,6 +131,7 @@ def run_experiment(
             "model_version": MODEL_VERSION,
             "activated_at": timestamp.isoformat(),
             "weights": strict_track["walk_forward"]["final_weights"],
+            "selection_policy": ticket_strategy.get("final_policy", DEFAULT_SELECTION_POLICY),
             "gates": promotion["gates"],
             "strict_test_metrics": strict_track["walk_forward"]["models"]["walk_forward_blend"]["metrics"],
         }
@@ -149,7 +162,7 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
     status_counts: dict[str, int] = {}
     skipped: dict[str, int] = {}
     for issue, entry in latest_reviews.items():
-        issue_path = work_dir / "data" / f"{_slug(issue)}_issue.json"
+        issue_path = _history_snapshot_path(history_dir, entry) or work_dir / "data" / f"{_slug(issue)}_issue.json"
         markdown_path = history_dir / str(entry.get("markdown") or "")
         if not issue_path.exists() or not markdown_path.exists():
             skipped["missing_issue_or_review"] = skipped.get("missing_issue_or_review", 0) + 1
@@ -414,6 +427,17 @@ def render_experiment_markdown(result: dict[str, Any]) -> str:
     )
     for gate in promotion.get("gates", []):
         lines.append(f"- {'通过' if gate['passed'] else '未通过'}：{gate['name']}（{gate['detail']}）")
+    strategy = result.get("ticket_strategy") or {}
+    lines.extend(["", "## 单/双/全包策略", ""])
+    if strategy.get("status") == "evaluated":
+        lines.append(f"- 样本外门禁：{'通过' if strategy.get('gate_passed') else '未通过'}")
+        lines.append(f"- 对比：{strategy.get('gate_detail', '')}")
+        lines.append(f"- 候选阈值：`{json.dumps(strategy.get('tested_policy', {}), ensure_ascii=False)}`")
+    else:
+        lines.append(
+            f"- 状态：继续收集（训练 {strategy.get('train_matches', 0)} / "
+            f"测试 {strategy.get('test_matches', 0)} 场）"
+        )
     lines.extend(["", "## 快照审计", ""])
     for item in result["dataset"]["audit"]["issues"]:
         lines.append(f"- {item['issue']}：{item['status']}；{item['reason']}")
@@ -432,6 +456,129 @@ def load_active_model_weights(work_dir: str | Path) -> dict[str, float] | None:
     if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
         return None
     return _valid_weights(payload.get("weights"))
+
+
+def load_active_selection_policy(work_dir: str | Path) -> dict[str, float] | None:
+    path = Path(work_dir) / "reports" / "experiments" / "active_model.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
+        return None
+    policy = payload.get("selection_policy")
+    if not isinstance(policy, dict):
+        return None
+    result = dict(DEFAULT_SELECTION_POLICY)
+    for key in result:
+        try:
+            result[key] = float(policy.get(key, result[key]))
+        except (TypeError, ValueError):
+            return None
+    return result
+
+
+def evaluate_ticket_strategy(samples: Iterable[ExperimentSample]) -> dict[str, Any]:
+    train, test = _strategy_train_test(list(samples))
+    if len(train) < DEFAULT_MIN_TRAIN_MATCHES or len(test) < DEFAULT_MIN_TEST_MATCHES:
+        return {
+            "status": "collecting",
+            "train_matches": len(train),
+            "test_matches": len(test),
+            "minimum_train_matches": DEFAULT_MIN_TRAIN_MATCHES,
+            "minimum_test_matches": DEFAULT_MIN_TEST_MATCHES,
+            "final_policy": dict(DEFAULT_SELECTION_POLICY),
+        }
+    learned = fit_selection_policy(train)
+    baseline = _selection_policy_metrics(test, DEFAULT_SELECTION_POLICY)
+    candidate = _selection_policy_metrics(test, learned)
+    passed = candidate["loss"] <= baseline["loss"] and candidate["coverage"] + 0.01 >= baseline["coverage"]
+    return {
+        "status": "evaluated",
+        "train_matches": len(train),
+        "test_matches": len(test),
+        "baseline": baseline,
+        "candidate": candidate,
+        "gate_passed": passed,
+        "gate_detail": (
+            f"损失 {candidate['loss']:.4f}/{baseline['loss']:.4f}，"
+            f"覆盖 {candidate['coverage']:.1%}/{baseline['coverage']:.1%}，"
+            f"场均选项 {candidate['average_choices']:.2f}/{baseline['average_choices']:.2f}"
+        ),
+        "tested_policy": learned,
+        "final_policy": fit_selection_policy(list(samples)) if passed else dict(DEFAULT_SELECTION_POLICY),
+    }
+
+
+def fit_selection_policy(samples: Iterable[ExperimentSample]) -> dict[str, float]:
+    items = list(samples)
+    best = dict(DEFAULT_SELECTION_POLICY)
+    best_loss = _selection_policy_metrics(items, best)["loss"]
+    for single_top in (0.50, 0.52, 0.54):
+        for single_spread in (0.12, 0.14, 0.16):
+            for double_top in (0.42, 0.44, 0.46):
+                for double_spread in (0.04, 0.06, 0.08):
+                    for triple_gap in (0.015, 0.02, 0.03):
+                        candidate = {
+                            **DEFAULT_SELECTION_POLICY,
+                            "single_top": single_top,
+                            "single_spread": single_spread,
+                            "double_top": double_top,
+                            "double_spread": double_spread,
+                            "triple_gap": triple_gap,
+                        }
+                        loss = _selection_policy_metrics(items, candidate)["loss"]
+                        if loss < best_loss:
+                            best, best_loss = candidate, loss
+    return {key: round(value, 3) for key, value in best.items()}
+
+
+def _selection_policy_metrics(samples: list[ExperimentSample], policy: dict[str, float]) -> dict[str, float]:
+    if not samples:
+        return {"loss": 1.0, "coverage": 0.0, "average_choices": 0.0}
+    covered = 0
+    choices = 0
+    for sample in samples:
+        probabilities = _blend(sample.components, DEFAULT_WEIGHTS)
+        ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+        picks = _select_picks(ranked, selection_policy=policy)
+        covered += int(sample.outcome in picks)
+        choices += len(picks)
+    coverage = covered / len(samples)
+    average_choices = choices / len(samples)
+    loss = (1.0 - coverage) + 0.055 * max(0.0, average_choices - 1.0)
+    return {
+        "loss": round(loss, 6),
+        "coverage": round(coverage, 6),
+        "average_choices": round(average_choices, 4),
+    }
+
+
+def _strategy_train_test(samples: list[ExperimentSample]) -> tuple[list[ExperimentSample], list[ExperimentSample]]:
+    ordered = sorted(samples, key=lambda sample: (sample.kickoff, sample.issue, sample.seq))
+    grouped: dict[str, list[ExperimentSample]] = {}
+    for sample in ordered:
+        grouped.setdefault(sample.issue, []).append(sample)
+    train: list[ExperimentSample] = []
+    test: list[ExperimentSample] = []
+    training_complete = False
+    for issue_samples in grouped.values():
+        if not training_complete:
+            train.extend(issue_samples)
+            training_complete = len(train) >= DEFAULT_MIN_TRAIN_MATCHES
+        else:
+            test.extend(issue_samples)
+    return train, test
+
+
+def _history_snapshot_path(history_dir: Path, entry: dict[str, str]) -> Path | None:
+    relative = str(entry.get("snapshot") or "").strip()
+    if not relative:
+        return None
+    path = history_dir / relative
+    return path if path.exists() else None
 
 
 def _promotion_decision(

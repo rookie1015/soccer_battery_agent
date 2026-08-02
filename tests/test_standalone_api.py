@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from football_lottery_agent import standalone_api
-from football_lottery_agent.history import archive_report
+from football_lottery_agent.history import archive_report, load_history_entries
 
 
 class StandaloneApiTests(unittest.TestCase):
@@ -15,6 +15,15 @@ class StandaloneApiTests(unittest.TestCase):
             standalone_api.run_health(),
             {"ok": True, "service": "football-lottery-agent-local"},
         )
+
+    def test_foreign_odds_usage_returns_provider_status(self) -> None:
+        usage = {"status": "valid", "credits_remaining": 488, "credits_used": 12}
+        with patch("football_lottery_agent.foreign_odds.check_the_odds_api_usage", return_value=usage) as check:
+            result = standalone_api.run_foreign_odds_usage({"foreign_odds_api_key": "saved-key"})
+
+        check.assert_called_once_with("saved-key")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["usage"], usage)
 
     def test_single_prediction_accepts_manual_odds_without_backend(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -35,7 +44,7 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(len(result["scorelines"]), 3)
         self.assertIn("手工填写", result["data_source"])
 
-    def test_analysis_uses_sina_odds_only_fast_mode(self) -> None:
+    def test_analysis_defaults_to_full_mode_with_fixed_twenty_match_sample(self) -> None:
         fake_plan = Mock()
         fake_plan.issue.issue = "26090"
         fake_plan.issue.metadata = {}
@@ -53,9 +62,10 @@ class StandaloneApiTests(unittest.TestCase):
             ):
                 standalone_api.run_analysis({"issue": "26090"}, Path(tmp))
 
-        self.assertTrue(collect_issue.call_args.kwargs["skip_context_fetches"])
-        self.assertTrue(collect_issue.call_args.kwargs["sina_odds_only"])
-        self.assertFalse(collect_issue.call_args.kwargs["strength_model"])
+        self.assertFalse(collect_issue.call_args.kwargs["skip_context_fetches"])
+        self.assertFalse(collect_issue.call_args.kwargs["sina_odds_only"])
+        self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
+        self.assertEqual(collect_issue.call_args.kwargs["strength_xg_matches"], 20)
 
     def test_analysis_can_use_full_mobile_mode(self) -> None:
         fake_plan = Mock()
@@ -68,7 +78,7 @@ class StandaloneApiTests(unittest.TestCase):
             with (
                 patch.object(standalone_api, "collect_issue", return_value=Path(tmp) / "issue.json") as collect_issue,
                 patch.object(standalone_api, "load_issue", return_value=Mock()),
-                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan) as build_ticket_plan,
                 patch.object(standalone_api, "write_report"),
                 patch.object(standalone_api, "write_analysis_html"),
                 patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
@@ -79,6 +89,61 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertFalse(collect_issue.call_args.kwargs["sina_odds_only"])
         self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
         self.assertFalse(collect_issue.call_args.kwargs["foreign_odds"])
+        self.assertTrue(build_ticket_plan.call_args.kwargs["evidence_aware_secondary"])
+
+    def test_analysis_auto_falls_back_when_full_sources_have_broad_network_failures(self) -> None:
+        fake_plan = Mock()
+        fake_plan.issue.issue = "26090"
+        fake_plan.issue.metadata = {"analysis_mode": "simple_fallback"}
+        fake_plan.predictions = []
+        fake_plan.choose9_keep = []
+        fake_plan.choose9_drop = []
+
+        def fake_collect(**kwargs: object) -> Path:
+            output_path = Path(str(kwargs["output_path"]))
+            if not kwargs["skip_context_fetches"]:
+                failed_source = {"status": "request_failed"}
+                matches = [
+                    {
+                        "sources": {
+                            "collection_audit": {
+                                "injuries": failed_source,
+                                "history": failed_source,
+                                "intelligence": failed_source,
+                                "odds_movement": failed_source,
+                                "asian_handicap": failed_source,
+                            }
+                        }
+                    }
+                    for _ in range(14)
+                ]
+            else:
+                matches = []
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(
+                json.dumps({"issue": "26090", "metadata": {}, "matches": matches}),
+                encoding="utf-8",
+            )
+            return output_path
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", side_effect=fake_collect) as collect_issue,
+                patch.object(standalone_api, "load_issue", return_value=Mock()),
+                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
+                patch.object(standalone_api, "write_report"),
+                patch.object(standalone_api, "write_analysis_html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+            ):
+                standalone_api.run_analysis({"issue": "26090"}, Path(tmp))
+
+            collected = json.loads((Path(tmp) / "data" / "collected_issue.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(collect_issue.call_count, 2)
+        self.assertFalse(collect_issue.call_args_list[0].kwargs["skip_context_fetches"])
+        self.assertTrue(collect_issue.call_args_list[1].kwargs["skip_context_fetches"])
+        self.assertEqual(collected["metadata"]["analysis_mode"], "simple_fallback")
+        self.assertIn("自动降级", collected["metadata"]["analysis_mode_message"])
 
     def test_analysis_passes_ticket_budget_to_strategy(self) -> None:
         fake_plan = Mock()
@@ -98,7 +163,11 @@ class StandaloneApiTests(unittest.TestCase):
             ):
                 standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 288}, Path(tmp))
 
-        build_ticket_plan.assert_called_once_with(load_issue.return_value, max_ticket_cost_yuan=288)
+        build_ticket_plan.assert_called_once_with(
+            load_issue.return_value,
+            max_ticket_cost_yuan=288,
+            evidence_aware_secondary=True,
+        )
 
     def test_analysis_uses_only_gate_approved_active_weights(self) -> None:
         fake_plan = Mock()
@@ -133,6 +202,7 @@ class StandaloneApiTests(unittest.TestCase):
             load_issue.return_value,
             max_ticket_cost_yuan=288,
             model_weights=active_weights,
+            evidence_aware_secondary=True,
         )
         self.assertEqual(result["report"]["model_calibration"]["status"], "experiment_active")
 
@@ -164,7 +234,11 @@ class StandaloneApiTests(unittest.TestCase):
                     Path(tmp),
                 )
 
-        build_ticket_plan.assert_called_once_with(load_issue.return_value, max_ticket_cost_yuan=288)
+        build_ticket_plan.assert_called_once_with(
+            load_issue.return_value,
+            max_ticket_cost_yuan=288,
+            evidence_aware_secondary=True,
+        )
         self.assertEqual(result["report"]["model_calibration"]["status"], "experiment_pending_gate")
 
     def test_analysis_rejects_too_small_ticket_budget(self) -> None:
@@ -228,7 +302,7 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args.kwargs["foreign_odds"])
         self.assertEqual(collect_issue.call_args.kwargs["foreign_odds_api_key"], "odds-key")
 
-    def test_review_uses_latest_analysis_report_recommendations(self) -> None:
+    def test_review_uses_selected_analysis_report_recommendations(self) -> None:
         issue = "sample-001"
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -256,16 +330,55 @@ class StandaloneApiTests(unittest.TestCase):
                 created_at=created + timedelta(seconds=1),
             )
 
-            results_csv = "seq,score\n" + "\n".join(f"{seq},0-1" for seq in range(1, 15))
+            results_csv = "seq,score\n" + "\n".join(f"{seq},1-0" for seq in range(1, 15))
+            older_analysis_id = load_history_entries(history_dir)[-1]["id"]
             result = standalone_api.run_review(
-                {"issue": issue, "auto_results": False, "results_csv": results_csv},
+                {
+                    "issue": issue,
+                    "analysis_id": older_analysis_id,
+                    "auto_results": False,
+                    "results_csv": results_csv,
+                },
                 root,
             )
 
         predictions = result["report"]["predictions"]
-        self.assertTrue(all(item["pick_text"] == "0" for item in predictions))
-        self.assertEqual(result["report"]["choose9_keep"], list(range(6, 15)))
+        self.assertTrue(all(item["pick_text"] == "3" for item in predictions))
+        self.assertEqual(result["report"]["choose9_keep"], list(range(1, 10)))
         self.assertEqual(result["report"]["metrics"]["low_risk_count"], 14)
+
+    def test_review_requires_selection_when_issue_has_multiple_analyses(self) -> None:
+        issue = "sample-001"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            (data_dir / f"{issue}_issue.json").write_text(
+                Path("data/sample_issue.json").read_text(encoding="utf-8"),
+                encoding="utf-8",
+            )
+            history_dir = root / "reports" / "history"
+            html = root / "analysis.html"
+            markdown = root / "analysis.md"
+            html.write_text("<h1>analysis</h1>", encoding="utf-8")
+            markdown.write_text(_analysis_markdown(issue, "3", tuple(range(1, 10))), encoding="utf-8")
+            created = datetime(2026, 7, 13, 10, 0, 0)
+            archive_report("analysis", issue, html, markdown, history_dir=history_dir, created_at=created)
+            archive_report(
+                "analysis",
+                issue,
+                html,
+                markdown,
+                history_dir=history_dir,
+                created_at=created + timedelta(seconds=1),
+            )
+
+            results_csv = "seq,score\n" + "\n".join(f"{seq},1-0" for seq in range(1, 15))
+            with self.assertRaisesRegex(ValueError, "发现 2 次分析结果"):
+                standalone_api.run_review(
+                    {"issue": issue, "auto_results": False, "results_csv": results_csv},
+                    root,
+                )
 
     def test_history_returns_markdown_text_for_android_detail(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
