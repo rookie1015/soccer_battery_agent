@@ -26,7 +26,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
     singles = sum(1 for pred in plan.predictions if len(pred.picks) == 1)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
-    outcome_rows = "\n".join(_analysis_row(pred, plan) for pred in plan.predictions)
+    match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
     cards = "\n".join(
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
@@ -61,27 +61,16 @@ def render_analysis_html(plan: TicketPlan) -> str:
               <p class="seq drop">{escape(drop)}</p>
             </div>
           </section>
-          <details class="panel prediction-fold" open>
-            <summary>
-              <span class="fold-title">展开本期 {len(plan.predictions)} 场胜平负预测</span>
-              <span class="fold-hint">点击展开 · 3=主胜，1=平，0=客胜</span>
-            </summary>
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>#</th>
-                    <th>对阵</th>
-                    <th>推荐</th>
-                    <th>概率</th>
-                    <th>置信度</th>
-                    <th>任九</th>
-                  </tr>
-                </thead>
-                <tbody>{outcome_rows}</tbody>
-              </table>
+          <section class="panel match-tabs-panel">
+            <div class="section-title match-tabs-title">
+              <div>
+                <h2>逐场胜平负分析</h2>
+                <span>点击任意比赛查看结论、概率、置信度和判断依据，再点一次收起</span>
+              </div>
+              <span>3=主胜，1=平，0=客胜</span>
             </div>
-          </details>
+            <div class="match-tabs">{match_tabs}</div>
+          </section>
         </div>
         """,
     )
@@ -158,6 +147,48 @@ def _analysis_row(prediction: Prediction, plan: TicketPlan) -> str:
       <td><strong>{prediction.confidence:.1f}%</strong></td>
       <td>{_bucket_badge("保留" if keep else "剔除", keep)}</td>
     </tr>
+    """
+
+
+def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
+    match = prediction.match
+    keep = match.seq in set(plan.choose9_keep)
+    pick_labels = " / ".join(OUTCOME_LABELS[pick] for pick in prediction.picks)
+    reasons = "".join(f"<li>{escape(reason)}</li>" for reason in prediction.reasons)
+    if not reasons:
+        reasons = "<li>当前没有可展示的结论依据。</li>"
+    return f"""
+    <details class="match-tab">
+      <summary>
+        <span class="match-seq">{match.seq}</span>
+        <span class="match-name">
+          <strong>{escape(match.home)} vs {escape(match.away)}</strong>
+          <small>{escape(match.league)} · {escape(match.kickoff.strftime("%m-%d %H:%M"))}</small>
+        </span>
+        <span class="match-tab-action"><i>查看分析</i><b>收起分析</b></span>
+      </summary>
+      <div class="match-tab-content">
+        <div class="analysis-result">
+          <span>分析结论</span>
+          <strong>{escape(pick_labels)}（{escape(prediction.pick_text)}）</strong>
+          <small>风险：{escape(prediction.risk)} · 任九：{"保留" if keep else "剔除"}</small>
+        </div>
+        <div class="analysis-probabilities">
+          <span class="detail-label">胜平负概率</span>
+          {_probability_bars(prediction)}
+        </div>
+        <div class="analysis-confidence">
+          <span class="detail-label">置信度</span>
+          <strong>{prediction.confidence:.1f}%</strong>
+          <div class="confidence-meter"><i style="width:{prediction.confidence:.1f}%"></i></div>
+          <small>置信度代表模型对最高概率结果的判断强度，不等于命中保证。</small>
+        </div>
+        <div class="analysis-reasons">
+          <span class="detail-label">得出结论的理由</span>
+          <ol>{reasons}</ol>
+        </div>
+      </div>
+    </details>
     """
 
 
@@ -430,6 +461,62 @@ def _page(title: str, body: str) -> str:
     .prediction-fold .fold-title {{ margin-right: auto; font-size: 17px; font-weight: 700; }}
     .prediction-fold .fold-hint {{ color: var(--muted); font-size: 12px; }}
     .prediction-fold .table-wrap {{ padding: 0 10px 10px; }}
+    .match-tabs-panel {{ padding: 0; overflow: hidden; }}
+    .match-tabs-title {{ padding: 14px 16px; margin: 0; background: #f8fafc; border-bottom: 1px solid var(--line); }}
+    .match-tabs-title > div > span {{ display: block; margin-top: 3px; }}
+    .match-tabs {{ display: grid; gap: 8px; padding: 10px; }}
+    .match-tab {{ border: 1px solid var(--line); border-radius: 8px; background: #fff; overflow: hidden; }}
+    .match-tab[open] {{ border-color: #a9c5e8; box-shadow: 0 3px 12px rgba(35, 100, 170, 0.08); }}
+    .match-tab summary {{
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      min-height: 64px;
+      padding: 10px 12px;
+      cursor: pointer;
+      list-style: none;
+      user-select: none;
+    }}
+    .match-tab summary::-webkit-details-marker {{ display: none; }}
+    .match-tab summary:focus-visible {{ outline: 2px solid var(--blue); outline-offset: -2px; }}
+    .match-tab[open] summary {{ background: #f7faff; border-bottom: 1px solid var(--line); }}
+    .match-seq {{
+      display: grid;
+      place-items: center;
+      flex: 0 0 34px;
+      width: 34px;
+      height: 34px;
+      border-radius: 7px;
+      color: var(--blue);
+      background: #e8f0fb;
+      font-weight: 800;
+    }}
+    .match-name {{ min-width: 0; flex: 1; }}
+    .match-name strong, .match-name small {{ display: block; }}
+    .match-name strong {{ overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .match-name small {{ margin-top: 2px; color: var(--muted); }}
+    .match-tab-action {{ color: var(--blue); font-size: 12px; font-weight: 700; white-space: nowrap; }}
+    .match-tab-action::after {{ content: "＋"; display: inline-block; margin-left: 7px; font-size: 18px; vertical-align: -1px; }}
+    .match-tab-action b {{ display: none; }}
+    .match-tab-action i {{ font-style: normal; }}
+    .match-tab[open] .match-tab-action::after {{ content: "－"; }}
+    .match-tab[open] .match-tab-action i {{ display: none; }}
+    .match-tab[open] .match-tab-action b {{ display: inline; }}
+    .match-tab-content {{
+      display: grid;
+      grid-template-columns: minmax(180px, .8fr) minmax(250px, 1fr) minmax(180px, .8fr) minmax(300px, 1.6fr);
+      gap: 10px;
+      padding: 12px;
+    }}
+    .match-tab-content > div {{ padding: 12px; border-radius: 7px; background: #f8fafc; }}
+    .detail-label {{ display: block; margin-bottom: 8px; color: #475467; font-size: 12px; font-weight: 700; }}
+    .analysis-result strong {{ display: block; margin: 6px 0; color: var(--blue); font-size: 18px; }}
+    .analysis-result > span, .analysis-result small {{ display: block; color: var(--muted); }}
+    .analysis-confidence > strong {{ display: block; color: var(--blue); font-size: 24px; line-height: 1.2; }}
+    .confidence-meter {{ height: 7px; margin: 9px 0; border-radius: 999px; background: #e4eaf2; overflow: hidden; }}
+    .confidence-meter i {{ display: block; height: 100%; border-radius: inherit; background: var(--blue); }}
+    .analysis-reasons ol {{ margin: 0; padding-left: 20px; color: #344054; }}
+    .analysis-reasons li + li {{ margin-top: 6px; }}
     .tabs {{
       display: flex;
       gap: 8px;
@@ -561,12 +648,19 @@ def _page(title: str, body: str) -> str:
       .metrics, .rates, .split {{ grid-template-columns: 1fr 1fr; }}
       .upset-grid {{ grid-template-columns: 1fr; }}
       .hero, .panel, .metric {{ border-radius: 6px; }}
+      .match-tab-content {{ grid-template-columns: 1fr 1fr; }}
     }}
     @media (max-width: 560px) {{
       .metrics, .rates, .split {{ grid-template-columns: 1fr; }}
       .hero-title {{ display: block; }}
       .deadline {{ display: block; margin: -2px 0 6px; white-space: normal; }}
       .section-title {{ display: block; }}
+      .match-tabs-title > span {{ display: block; margin-top: 6px; }}
+      .match-tab-content {{ grid-template-columns: 1fr; }}
+      .match-tab summary {{ gap: 9px; }}
+      .match-tab-action i, .match-tab-action b {{ font-size: 0; }}
+      .match-tab-action i::before {{ content: "查看"; font-size: 12px; }}
+      .match-tab-action b::before {{ content: "收起"; font-size: 12px; }}
     }}
   </style>
 </head>

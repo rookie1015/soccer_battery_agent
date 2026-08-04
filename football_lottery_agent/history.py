@@ -25,6 +25,7 @@ class HistoryEntry:
     html: str
     markdown: str
     snapshot: str = ""
+    condition_key: str = ""
 
     def as_dict(self) -> dict[str, str]:
         return {
@@ -36,6 +37,7 @@ class HistoryEntry:
             "html": self.html,
             "markdown": self.markdown,
             "snapshot": self.snapshot,
+            "condition_key": self.condition_key,
         }
 
 
@@ -48,6 +50,7 @@ def archive_report(
     max_entries: int = MAX_HISTORY_ENTRIES,
     created_at: datetime | None = None,
     snapshot_path: str | Path | None = None,
+    condition_key: str = "",
 ) -> Path:
     root = Path(history_dir)
     items_dir = root / "items"
@@ -55,7 +58,14 @@ def archive_report(
     timestamp = (created_at or datetime.now()).strftime("%Y%m%d%H%M%S")
     safe_issue = _slug(issue)
     safe_kind = _slug(kind)
-    entry_id = f"{timestamp}-{safe_issue}-{safe_kind}"
+    base_entry_id = f"{timestamp}-{safe_issue}-{safe_kind}"
+    entries = _load_entries(root)
+    known_ids = {str(item.get("id") or "") for item in entries}
+    entry_id = base_entry_id
+    suffix = 2
+    while entry_id in known_ids:
+        entry_id = f"{base_entry_id}-{suffix}"
+        suffix += 1
 
     html_source = Path(html_path)
     html_target = items_dir / f"{entry_id}.html"
@@ -86,14 +96,38 @@ def archive_report(
         html=_relative_link(root, html_target),
         markdown=markdown_target,
         snapshot=snapshot_target,
+        condition_key=condition_key,
     )
-    entries = _load_entries(root)
-    entries = [item for item in entries if item.get("id") != entry.id]
+    duplicates = [
+        item
+        for item in entries
+        if condition_key
+        and item.get("kind") == kind
+        and item.get("condition_key") == condition_key
+    ]
+    for item in duplicates:
+        _delete_entry_files(root, item)
+    duplicate_ids = {str(item.get("id") or "") for item in duplicates}
+    entries = [item for item in entries if str(item.get("id") or "") not in duplicate_ids]
     entries.insert(0, entry.as_dict())
     entries = entries[:max_entries]
     _write_index_json(root, entries)
     write_history_indexes(root, entries)
     return root / f"{safe_kind}.html"
+
+
+def _delete_entry_files(root: Path, entry: dict[str, str]) -> None:
+    resolved_root = root.resolve()
+    for key in ("html", "markdown", "snapshot"):
+        relative = str(entry.get(key) or "").strip()
+        if not relative:
+            continue
+        target = (root / relative).resolve()
+        try:
+            target.relative_to(resolved_root)
+        except ValueError:
+            continue
+        target.unlink(missing_ok=True)
 
 
 def write_history_indexes(history_dir: str | Path = DEFAULT_HISTORY_DIR, entries: list[dict[str, str]] | None = None) -> Path:

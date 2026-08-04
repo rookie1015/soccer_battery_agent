@@ -159,7 +159,7 @@ class StandaloneApiTests(unittest.TestCase):
                 patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan) as build_ticket_plan,
                 patch.object(standalone_api, "write_report"),
                 patch.object(standalone_api, "write_analysis_html"),
-                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html") as archive_report,
             ):
                 standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 288}, Path(tmp))
 
@@ -167,6 +167,10 @@ class StandaloneApiTests(unittest.TestCase):
             load_issue.return_value,
             max_ticket_cost_yuan=288,
             evidence_aware_secondary=True,
+        )
+        self.assertEqual(
+            archive_report.call_args.kwargs["condition_key"],
+            "analysis|issue=26090|max_ticket_cost_yuan=288",
         )
 
     def test_analysis_uses_only_gate_approved_active_weights(self) -> None:
@@ -407,13 +411,17 @@ class StandaloneApiTests(unittest.TestCase):
 
 | 序号 | 联赛 | 对阵 | 推荐 | 比分倾向 | 置信度 | 风险 | 概率(3/1/0) |
 | --- | --- | --- | --- | --- | ---: | --- | --- |
-| 1 | 世界杯 | 甲队 vs 乙队 | 3/1 | 1-0 13%，1-1 12%，2-0 10% | 53.0% | 中 | 53%/25%/22% |
+| 1 | 世界杯 | 甲队 vs 乙队 | 3/1/0 | 1-0 13%，1-1 12%，2-0 10% | 39.0% | 高 | 39%/31%/30% |
 
 ## 详细理由
 
 ### 1. 甲队 vs 乙队
 
 - 比赛：世界杯，2026-07-06T20:00:00+08:00
+- 推荐：`3/1/0`（主胜 / 平 / 客胜）
+- 风险：高
+- 综合赔率和基本面，主胜最高，约 39%；次选平约 31%。
+- 情报：双方近期状态接近，任一结果都不能轻易排除。
 """
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -429,8 +437,14 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(parsed["issue"], "26090")
         self.assertEqual(parsed["metrics"]["match_count"], 1)
         self.assertEqual(parsed["choose9_drop"], [10, 11, 12, 13, 14])
-        self.assertEqual(parsed["predictions"][0]["pick_labels"], ["主胜", "平"])
+        self.assertEqual(parsed["predictions"][0]["pick_labels"], ["主胜", "平", "客胜"])
         self.assertEqual(parsed["predictions"][0]["kickoff_display"], "07-06 20:00")
+        reasons = parsed["predictions"][0]["reasons"]
+        self.assertIn("3/1/0 全包", reasons[0])
+        self.assertIn("没有足够把握排除任何一项", reasons[0])
+        self.assertIn("综合赔率和基本面", reasons[1])
+        self.assertIn("双方近期状态接近", reasons[2])
+        self.assertTrue(all(not reason.startswith("比赛：") for reason in reasons))
 
     def test_history_parses_purchase_deadline_from_new_markdown(self) -> None:
         markdown_text = _analysis_markdown("26095", "3", tuple(range(1, 10))).replace(

@@ -16,7 +16,7 @@ from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
 from .models import Match, Odds, Signals, TicketPlan
-from .predictor import OUTCOME_LABELS, predict_match
+from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
 from .review_diagnostics import record_review_diagnostics
@@ -130,6 +130,7 @@ def run_analysis(
         markdown_path,
         history_dir=history_dir,
         snapshot_path=issue_path,
+        condition_key=_analysis_condition_key(issue, max_ticket_cost_yuan),
     )
 
     return {
@@ -140,6 +141,10 @@ def run_analysis(
         "markdown_path": str(markdown_path),
         "history_path": str(history_path),
     }
+
+
+def _analysis_condition_key(issue: str, max_ticket_cost_yuan: int) -> str:
+    return f"analysis|issue={issue.strip()}|max_ticket_cost_yuan={max_ticket_cost_yuan}"
 
 
 def _collect_mobile_analysis(
@@ -251,6 +256,7 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
     keep = _parse_sequence(markdown_text, "建议保留")
     drop = _parse_sequence(markdown_text, "建议剔除")
     kickoff_by_seq = _parse_kickoffs(markdown_text)
+    reasons_by_seq = _parse_analysis_reasons(markdown_text)
     predictions = []
 
     for line in markdown_text.splitlines():
@@ -267,6 +273,17 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         legacy_layout = len(cells) >= 8
         confidence_cell = cells[5] if legacy_layout else cells[4]
         probability_cell = cells[7] if legacy_layout else cells[5]
+        pick_text = cells[3]
+        picks = tuple(pick for pick in pick_text.split("/") if pick in OUTCOME_LABELS)
+        probabilities = _parse_probabilities(probability_cell)
+        reasons = list(reasons_by_seq.get(seq, []))
+        if picks and not any(reason.startswith(SELECTION_REASON_PREFIX) for reason in reasons):
+            outcome_probabilities = {
+                "3": float(probabilities["home"]) / 100.0,
+                "1": float(probabilities["draw"]) / 100.0,
+                "0": float(probabilities["away"]) / 100.0,
+            }
+            reasons.insert(0, selection_reason_from_values(picks, outcome_probabilities))
         predictions.append(
             {
                 "seq": seq,
@@ -274,13 +291,13 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
                 "kickoff_display": kickoff_by_seq.get(seq, ""),
                 "home": home,
                 "away": away,
-                "pick_text": cells[3],
-                "pick_labels": [OUTCOME_LABELS.get(pick, pick) for pick in cells[3].split("/") if pick],
+                "pick_text": pick_text,
+                "pick_labels": [OUTCOME_LABELS.get(pick, pick) for pick in pick_text.split("/") if pick],
                 "confidence": _parse_percent(confidence_cell),
                 "risk": cells[6] if legacy_layout else "",
-                "probabilities": _parse_probabilities(probability_cell),
+                "probabilities": probabilities,
                 "scorelines": _parse_scorelines(cells[4]) if legacy_layout else [],
-                "reasons": [],
+                "reasons": reasons,
                 "final_score": "",
                 "final_result": "",
                 "final_result_label": "",
@@ -313,6 +330,33 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         "choose9_drop": drop,
         "predictions": predictions,
     }
+
+
+def _parse_analysis_reasons(markdown_text: str) -> dict[int, list[str]]:
+    result: dict[int, list[str]] = {}
+    in_details = False
+    current_seq: int | None = None
+    metadata_prefixes = ("比赛：", "推荐：", "比分倾向：", "置信度：", "风险：")
+    for line in markdown_text.splitlines():
+        if line.strip() == "## 详细理由":
+            in_details = True
+            current_seq = None
+            continue
+        if not in_details:
+            continue
+        if line.startswith("## "):
+            break
+        header = re.match(r"^###\s+(\d+)\.", line)
+        if header:
+            current_seq = int(header.group(1))
+            result.setdefault(current_seq, [])
+            continue
+        if current_seq is None or not line.startswith("- "):
+            continue
+        reason = line[2:].strip()
+        if reason and not reason.startswith(metadata_prefixes):
+            result[current_seq].append(reason)
+    return result
 
 
 def _parse_analysis_metadata(markdown_text: str) -> dict[str, str]:

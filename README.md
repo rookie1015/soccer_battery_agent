@@ -6,7 +6,7 @@
 
 ## 当前版本
 
-- Android：`0.2.0`（versionCode `2`）
+- Android：`0.2.1`（versionCode `3`）
 - 更新日期：`2026-08-02`
 - Python：`3.10+`
 - 自动测试：`142` 项
@@ -50,7 +50,7 @@ android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-App 版本 0.2.0（2） · 已包含 API 用量显示
+App 版本 0.2.1（3） · 已包含逐场依据、输入记忆和重复分析替换
 ```
 
 ## 数据来源

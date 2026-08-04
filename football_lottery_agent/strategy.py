@@ -4,7 +4,7 @@ from dataclasses import replace
 from math import log
 
 from .models import Issue, Prediction, TicketPlan
-from .predictor import _draw_context, predict_issue
+from .predictor import SELECTION_OUTCOME_LABELS, SELECTION_REASON_PREFIX, _draw_context, predict_issue, selection_reason
 
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
@@ -149,11 +149,20 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
         )
     )
     downgraded = ranked_selected[:-1]
-    reasons = prediction.reasons
-    budget_note = "预算约束：为控制整张票成本，压缩低价值防守项。"
-    if budget_note not in reasons:
-        reasons = (*reasons, budget_note)
-    return replace(prediction, picks=downgraded, reasons=reasons)
+    removed = ranked_selected[-1]
+    remaining_text = "/".join(downgraded)
+    budget_note = (
+        f"预算调整：为控制整张票总成本，本场移除{SELECTION_OUTCOME_LABELS[removed]}({removed}) "
+        f"{prediction.probabilities.get(removed, 0.0):.1%}，最终保留 {remaining_text}；"
+        "这是成本取舍，不代表被移除赛果不可能发生。"
+    )
+    reasons = tuple(
+        reason
+        for reason in prediction.reasons
+        if not reason.startswith(SELECTION_REASON_PREFIX)
+    )
+    adjusted = replace(prediction, picks=downgraded, reasons=(*reasons, budget_note))
+    return replace(adjusted, reasons=(selection_reason(adjusted), *adjusted.reasons))
 
 
 def _coverage_value(prediction: Prediction, outcome: str) -> float:

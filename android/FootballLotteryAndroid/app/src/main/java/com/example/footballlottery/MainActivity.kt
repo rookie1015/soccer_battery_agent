@@ -90,6 +90,8 @@ private enum class AppTab(val label: String) {
 
 private const val SETTINGS_PREFS = "football_lottery_settings"
 private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
+private const val PREF_ANALYSIS_ISSUE = "analysis_issue"
+private const val PREF_ANALYSIS_MAX_TICKET_COST = "analysis_max_ticket_cost"
 private const val STRENGTH_XG_MATCHES = 20
 
 data class AnalysisReport(
@@ -307,6 +309,8 @@ class AppViewModel : ViewModel() {
 }
 
 class AnalysisViewModel : ViewModel() {
+    private var savedInputsLoaded = false
+
     var issue by mutableStateOf("26090")
         private set
     var maxTicketCostYuan by mutableStateOf("500")
@@ -320,12 +324,34 @@ class AnalysisViewModel : ViewModel() {
     var report by mutableStateOf<AnalysisReport?>(null)
         private set
 
-    fun updateIssue(value: String) {
-        issue = value
+    fun loadSavedInputs(context: Context) {
+        if (savedInputsLoaded) {
+            return
+        }
+        val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        if (prefs.contains(PREF_ANALYSIS_ISSUE)) {
+            issue = prefs.getString(PREF_ANALYSIS_ISSUE, issue).orEmpty()
+        }
+        if (prefs.contains(PREF_ANALYSIS_MAX_TICKET_COST)) {
+            maxTicketCostYuan = prefs.getString(PREF_ANALYSIS_MAX_TICKET_COST, maxTicketCostYuan).orEmpty()
+        }
+        savedInputsLoaded = true
     }
 
-    fun updateMaxTicketCostYuan(value: String) {
+    fun updateIssue(value: String, context: Context) {
+        issue = value
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_ANALYSIS_ISSUE, value)
+            .apply()
+    }
+
+    fun updateMaxTicketCostYuan(value: String, context: Context) {
         maxTicketCostYuan = value
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_ANALYSIS_MAX_TICKET_COST, value)
+            .apply()
     }
 
     fun generateAnalysis(engine: FootballLotteryLocalEngine, foreignOddsApiKey: String) {
@@ -1062,6 +1088,10 @@ fun AnalysisScreen(
     historyViewModel: HistoryViewModel,
     appViewModel: AppViewModel,
 ) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        viewModel.loadSavedInputs(context.applicationContext)
+    }
     LaunchedEffect(viewModel.report?.issue) {
         if (viewModel.report != null) {
             historyViewModel.refresh(localEngine)
@@ -1204,7 +1234,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.2.0（2） · 已包含 API 用量显示",
+                        "App 版本 0.2.1（3） · 已包含逐场依据、输入记忆和重复分析替换",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1311,13 +1341,14 @@ private fun RequestCard(
     viewModel: AnalysisViewModel,
     appViewModel: AppViewModel,
 ) {
+    val context = LocalContext.current.applicationContext
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("生成分析", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = viewModel.issue,
-                    onValueChange = viewModel::updateIssue,
+                    onValueChange = { viewModel.updateIssue(it, context) },
                     label = { Text("期号") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
@@ -1325,7 +1356,7 @@ private fun RequestCard(
                 )
                 OutlinedTextField(
                     value = viewModel.maxTicketCostYuan,
-                    onValueChange = viewModel::updateMaxTicketCostYuan,
+                    onValueChange = { viewModel.updateMaxTicketCostYuan(it, context) },
                     label = { Text("最高购彩金额") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
@@ -1696,7 +1727,21 @@ private fun PredictionCard(
     isReview: Boolean = false,
     choose9Keep: Set<Int> = emptySet(),
 ) {
-    Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
+    var expanded by remember(prediction.seq, prediction.home, prediction.away) { mutableStateOf(false) }
+    val cardModifier = if (isReview) {
+        Modifier.fillMaxWidth()
+    } else {
+        Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+    }
+    Card(
+        shape = RoundedCornerShape(8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (expanded && !isReview) Color(0xFFF7FAFF) else Color.White,
+        ),
+        modifier = cardModifier,
+    ) {
         Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
@@ -1728,15 +1773,22 @@ private fun PredictionCard(
                         color = if (prediction.outcomeHit) Color(0xFF16845B) else Color(0xFFB42318),
                         fontWeight = FontWeight.Bold,
                     )
+                } else if (!isReview) {
+                    Text(
+                        text = if (expanded) "收起" else "查看",
+                        color = Color(0xFF2364AA),
+                        fontWeight = FontWeight.Bold,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
-            Text(
-                text = recommendationText(prediction),
-                color = Color(0xFFB42318),
-                fontWeight = FontWeight.Bold,
-                style = MaterialTheme.typography.titleSmall,
-            )
             if (isReview) {
+                Text(
+                    text = recommendationText(prediction),
+                    color = Color(0xFFB42318),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
                 Text(
                     text = "任选九选择：" + if (prediction.seq in choose9Keep) "保留" else "未选",
                     style = MaterialTheme.typography.bodySmall,
@@ -1759,29 +1811,73 @@ private fun PredictionCard(
                     style = MaterialTheme.typography.bodySmall,
                     color = if (prediction.outcomeHit) Color(0xFF16845B) else Color(0xFFB54708),
                 )
-            } else {
-                ProbabilityLine("主胜", prediction.probabilities.home, Color(0xFFB42318))
-                ProbabilityLine("平", prediction.probabilities.draw, Color(0xFF2364AA))
-                ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
+            } else if (expanded) {
+                HorizontalDivider()
                 Text(
-                    text = "置信度 ${"%.1f".format(prediction.confidence)}%",
+                    text = "分析结论",
+                    color = Color(0xFF667085),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Text(
+                    text = recommendationText(prediction),
+                    color = Color(0xFFB42318),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = "风险 ${prediction.risk} · 任九${if (prediction.seq in choose9Keep) "保留" else "剔除"}",
                     color = Color(0xFF667085),
                     style = MaterialTheme.typography.bodySmall,
                 )
-                prediction.reasons.firstOrNull { it.startsWith("Dixon-Coles") }?.let { modelReason ->
+                Text(
+                    text = "胜平负概率",
+                    color = Color(0xFF667085),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                ProbabilityLine("主胜", prediction.probabilities.home, Color(0xFFB42318))
+                ProbabilityLine("平局", prediction.probabilities.draw, Color(0xFF2364AA))
+                ProbabilityLine("客胜", prediction.probabilities.away, Color(0xFF16845B))
+                Text(
+                    text = "置信度 ${"%.1f".format(prediction.confidence)}%",
+                    color = Color(0xFF2364AA),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.titleSmall,
+                )
+                Text(
+                    text = "得出结论的理由",
+                    color = Color(0xFF667085),
+                    fontWeight = FontWeight.Bold,
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (prediction.reasons.isEmpty()) {
                     Text(
-                        text = modelReason,
+                        text = "当前没有可展示的结论依据。",
                         style = MaterialTheme.typography.bodySmall,
                         color = Color(0xFF475467),
                     )
+                } else {
+                    prediction.reasons.forEachIndexed { index, reason ->
+                        Text(
+                            text = "${index + 1}. $reason",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (
+                                reason.startsWith("完整分析资料审计") &&
+                                "缺失或未匹配 无" !in reason
+                            ) {
+                                Color(0xFFB54708)
+                            } else {
+                                Color(0xFF475467)
+                            },
+                        )
+                    }
                 }
-                prediction.reasons.firstOrNull { it.startsWith("完整分析资料审计") }?.let { auditReason ->
-                    Text(
-                        text = auditReason,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if ("缺失或未匹配 无" in auditReason) Color(0xFF16845B) else Color(0xFFB54708),
-                    )
-                }
+                Text(
+                    text = "再次点击本场比赛即可收起",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF2364AA),
+                )
             }
         }
     }

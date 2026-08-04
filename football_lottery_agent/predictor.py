@@ -7,6 +7,7 @@ from .models import Match, Prediction, Scoreline
 
 
 OUTCOME_LABELS = {"3": "主胜", "1": "平", "0": "客胜"}
+SELECTION_OUTCOME_LABELS = {"3": "主胜", "1": "平局", "0": "客胜"}
 SECONDARY_RAW_GAP_LIMIT = 0.04
 SECONDARY_EVIDENCE_MARGIN = 0.015
 MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
@@ -67,6 +68,14 @@ def predict_match(
     reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
     if selection_scores:
         reasons.append(_selection_score_reason(selection_scores))
+    reasons.insert(
+        0,
+        _selection_reason(
+            picks,
+            probabilities,
+            selection_scores=selection_scores,
+        ),
+    )
 
     return Prediction(
         match=match,
@@ -77,6 +86,96 @@ def predict_match(
         risk=risk,
         reasons=tuple(reasons),
         selection_scores=selection_scores,
+    )
+
+
+SELECTION_REASON_PREFIX = "选择依据："
+
+
+def selection_reason(prediction: Prediction) -> str:
+    budget_adjusted = any(
+        reason.startswith(("预算调整：", "预算约束："))
+        for reason in prediction.reasons
+    )
+    return _selection_reason(
+        prediction.picks,
+        prediction.probabilities,
+        selection_scores=prediction.selection_scores,
+        budget_adjusted=budget_adjusted,
+    )
+
+
+def selection_reason_from_values(
+    picks: tuple[str, ...],
+    probabilities: dict[str, float],
+) -> str:
+    return _selection_reason(picks, probabilities)
+
+
+def _selection_reason(
+    picks: tuple[str, ...],
+    probabilities: dict[str, float],
+    *,
+    selection_scores: dict[str, float] | None = None,
+    budget_adjusted: bool = False,
+) -> str:
+    ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
+    selected = set(picks)
+    coverage = sum(probabilities.get(outcome, 0.0) for outcome in picks)
+    probability_text = "、".join(
+        f"{SELECTION_OUTCOME_LABELS[outcome]}({outcome}) {probabilities.get(outcome, 0.0):.1%}"
+        for outcome in ("3", "1", "0")
+    )
+    budget_text = "本场最终选择经过整张票预算压缩；被排除项仍有发生可能。" if budget_adjusted else ""
+
+    if len(picks) == 3:
+        spread = ranked[0][1] - ranked[-1][1]
+        return (
+            f"{SELECTION_REASON_PREFIX}3/1/0 全包。{probability_text}；"
+            f"最高与最低仅差 {spread:.1%}，没有足够把握排除任何一项，"
+            "因此三种赛果全部保留，覆盖模型概率 100.0%。"
+        )
+
+    selected_text = "、".join(
+        f"{SELECTION_OUTCOME_LABELS[outcome]}({outcome}) {probabilities.get(outcome, 0.0):.1%}"
+        for outcome in picks
+    )
+    excluded = [outcome for outcome in ("3", "1", "0") if outcome not in selected]
+    excluded_text = "、".join(
+        f"{SELECTION_OUTCOME_LABELS[outcome]}({outcome}) {probabilities.get(outcome, 0.0):.1%}"
+        for outcome in excluded
+    )
+    evidence_text = ""
+    if selection_scores and len(picks) == 2:
+        evidence_text = "第二选项还结合赔率、基本面和数学模型的证据排序复核。"
+
+    if len(picks) == 2:
+        weakest_selected = min(probabilities.get(outcome, 0.0) for outcome in picks)
+        best_excluded = max((probabilities.get(outcome, 0.0) for outcome in excluded), default=0.0)
+        gap = weakest_selected - best_excluded
+        comparison = (
+            f"入选边缘项比被排除项高 {gap:.1%}。"
+            if gap >= 0
+            else f"入选边缘项原始概率比被排除项低 {-gap:.1%}，最终保留由证据排序决定。"
+        )
+        return (
+            f"{SELECTION_REASON_PREFIX}双选 {picks[0]}/{picks[1]}，保留 {selected_text}，"
+            f"合计覆盖模型概率 {coverage:.1%}；排除 {excluded_text}。"
+            f"{comparison}{evidence_text}{budget_text}"
+        )
+
+    selected_probability = probabilities.get(picks[0], 0.0)
+    best_excluded = max((probabilities.get(outcome, 0.0) for outcome in excluded), default=0.0)
+    lead = selected_probability - best_excluded
+    comparison = (
+        f"入选项领先被排除项中的最高值 {lead:.1%}。"
+        if lead >= 0
+        else f"入选项原始概率低于被排除项中的最高值 {-lead:.1%}，最终取舍由证据排序或预算决定。"
+    )
+    return (
+        f"{SELECTION_REASON_PREFIX}单选 {picks[0]}，保留 {selected_text}，"
+        f"覆盖模型概率 {coverage:.1%}；排除 {excluded_text}。"
+        f"{comparison}{budget_text}"
     )
 
 

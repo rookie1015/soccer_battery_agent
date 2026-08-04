@@ -55,6 +55,76 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(entries[0]["issue"], "issue-59")
         self.assertEqual(entries[-1]["issue"], "issue-8")
 
+    def test_archive_report_replaces_same_analysis_condition_and_deletes_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html = root / "report.html"
+            markdown = root / "report.md"
+            snapshot = root / "issue.json"
+            html.write_text("<html>first</html>", encoding="utf-8")
+            markdown.write_text("# first", encoding="utf-8")
+            snapshot.write_text('{"version":1}', encoding="utf-8")
+            history_dir = root / "history"
+            condition_key = "analysis|issue=26099|max_ticket_cost_yuan=500"
+
+            archive_report(
+                "analysis",
+                "26099",
+                html,
+                markdown,
+                history_dir=history_dir,
+                snapshot_path=snapshot,
+                condition_key=condition_key,
+                created_at=datetime(2026, 8, 4, 20, 0, 0),
+            )
+            previous = load_history_entries(history_dir)[0]
+            previous_files = [history_dir / previous[key] for key in ("html", "markdown", "snapshot")]
+
+            html.write_text("<html>second</html>", encoding="utf-8")
+            archive_report(
+                "analysis",
+                "26099",
+                html,
+                markdown,
+                history_dir=history_dir,
+                snapshot_path=snapshot,
+                condition_key=condition_key,
+                created_at=datetime(2026, 8, 4, 20, 1, 0),
+            )
+
+            entries = load_history_entries(history_dir)
+
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["condition_key"], condition_key)
+            self.assertEqual((history_dir / entries[0]["html"]).read_text(encoding="utf-8"), "<html>second</html>")
+            self.assertTrue(all(not path.exists() for path in previous_files))
+
+    def test_archive_report_keeps_different_analysis_conditions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html = root / "report.html"
+            html.write_text("<html>report</html>", encoding="utf-8")
+            history_dir = root / "history"
+
+            archive_report(
+                "analysis",
+                "26099",
+                html,
+                history_dir=history_dir,
+                condition_key="analysis|issue=26099|max_ticket_cost_yuan=500",
+                created_at=datetime(2026, 8, 4, 20, 0, 0),
+            )
+            archive_report(
+                "analysis",
+                "26099",
+                html,
+                history_dir=history_dir,
+                condition_key="analysis|issue=26099|max_ticket_cost_yuan=800",
+                created_at=datetime(2026, 8, 4, 20, 1, 0),
+            )
+
+            self.assertEqual(len(load_history_entries(history_dir)), 2)
+
     def test_render_history_index_contains_selector_and_iframe(self) -> None:
         html = render_history_index(
             [

@@ -25,6 +25,19 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(len(plan.choose9_drop), 5)
         self.assertTrue(set(plan.choose9_keep).isdisjoint(plan.choose9_drop))
         self.assertLessEqual(ticket_cost_yuan(plan.predictions), 2000)
+        self.assertTrue(all(prediction.reasons[0].startswith("选择依据：") for prediction in plan.predictions))
+
+    def test_three_way_pick_explains_why_no_outcome_is_excluded(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        prediction = next(item for item in plan.predictions if item.picks == ("3", "1", "0"))
+
+        reason = prediction.reasons[0]
+
+        self.assertIn("3/1/0 全包", reason)
+        self.assertIn("主胜(3)", reason)
+        self.assertIn("平局(1)", reason)
+        self.assertIn("客胜(0)", reason)
+        self.assertIn("没有足够把握排除任何一项", reason)
 
     def test_predictions_include_scorelines(self) -> None:
         issue = load_issue("data/sample_issue.json")
@@ -101,6 +114,8 @@ class StrategyTests(unittest.TestCase):
         adjusted = _downgrade_prediction(uncertain)
 
         self.assertEqual(adjusted.picks, ("3", "1"))
+        self.assertIn("双选 3/1", adjusted.reasons[0])
+        self.assertTrue(any("移除客胜(0)" in reason for reason in adjusted.reasons))
 
     def test_simple_analysis_keeps_existing_near_tie_behavior(self) -> None:
         ranked = [("3", 0.46), ("0", 0.275), ("1", 0.265)]

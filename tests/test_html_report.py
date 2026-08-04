@@ -14,15 +14,18 @@ class HtmlReportTests(unittest.TestCase):
         html = render_analysis_html(plan)
 
         self.assertIn("Analysis Dashboard", html)
-        self.assertIn("胜平负预测", html)
+        self.assertIn("逐场胜平负分析", html)
         self.assertIn('id="outcome-panel"', html)
         self.assertIn("class=\"prob\"", html)
         self.assertIn("置信度", html)
         self.assertNotIn("<th>风险</th>", html)
         self.assertNotIn("单场比分预测", html)
-        self.assertIn("class=\"panel prediction-fold\"", html)
+        self.assertEqual(html.count('class="match-tab"'), 14)
+        self.assertIn("得出结论的理由", html)
+        self.assertIn("点击任意比赛查看结论、概率、置信度和判断依据，再点一次收起", html)
+        self.assertIn(plan.predictions[0].reasons[0], html)
         self.assertIn("购彩截止时间：官方截止时间暂未获取", html)
-        self.assertIn("展开本期 14 场胜平负预测", html)
+        self.assertIn("逐场胜平负分析", html)
 
     def test_render_analysis_html_uses_official_purchase_deadline(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))
