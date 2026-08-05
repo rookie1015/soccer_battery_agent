@@ -1,4 +1,6 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from football_lottery_agent.strength_model import (
     _estimate_starting_eleven,
@@ -7,10 +9,12 @@ from football_lottery_agent.strength_model import (
     _player_value,
     _rating,
     _learn_one_sided_provider_aliases,
+    _learn_unique_context_provider_aliases,
+    _match_fotmob_event,
     _team_score,
 )
 from football_lottery_agent.collectors import RawMatch
-from football_lottery_agent.team_identity import TEAM_ALIASES, normalize_team_name
+from football_lottery_agent.team_identity import TEAM_ALIASES, configure_team_identity, normalize_team_name
 
 
 class StrengthModelTests(unittest.TestCase):
@@ -40,6 +44,87 @@ class StrengthModelTests(unittest.TestCase):
             self.assertEqual(_team_score(local, "Novel City FC"), 1.0)
         finally:
             TEAM_ALIASES.pop(local, None)
+
+    def test_reversed_provider_fixture_is_reported_for_safe_side_mapping(self) -> None:
+        match = RawMatch(
+            seq=1,
+            kickoff="2026-08-02T18:00:00+08:00",
+            league="测试联赛",
+            home="赫根",
+            away="卡尔马",
+        )
+        events = {
+            "20260802": [
+                {
+                    "id": 99,
+                    "home": {"id": 2, "name": "Kalmar FF"},
+                    "away": {"id": 1, "name": "Häcken"},
+                }
+            ]
+        }
+
+        event, reversed_sides, diagnostic = _match_fotmob_event(match, events)
+
+        self.assertEqual(event["id"], 99)
+        self.assertTrue(reversed_sides)
+        self.assertEqual(diagnostic["match_status"], "matched")
+
+    def test_unique_competition_and_kickoff_bootstraps_two_unknown_names(self) -> None:
+        match = RawMatch(
+            seq=1,
+            kickoff="2026-08-07T01:45:00+08:00",
+            league="欧罗巴",
+            home="测试甲队",
+            away="测试乙队",
+        )
+        events = {
+            "20260806": [
+                {
+                    "id": 101,
+                    "_provider_league_name": "Europa League Qualification",
+                    "status": {"utcTime": "2026-08-06T17:45:00Z"},
+                    "home": {"id": 11, "name": "Alpha Town"},
+                    "away": {"id": 12, "name": "Beta City"},
+                },
+                {
+                    "id": 102,
+                    "_provider_league_name": "Conference League Qualification",
+                    "status": {"utcTime": "2026-08-06T17:45:00Z"},
+                    "home": {"id": 21, "name": "Wrong Home"},
+                    "away": {"id": 22, "name": "Wrong Away"},
+                },
+            ]
+        }
+        with TemporaryDirectory() as temp_dir:
+            configure_team_identity(Path(temp_dir) / "team_identity.json")
+            _learn_unique_context_provider_aliases([match], events)
+            self.assertEqual(_team_score("测试甲队", "Alpha Town"), 1.0)
+            self.assertEqual(_team_score("测试乙队", "Beta City"), 1.0)
+        configure_team_identity(None)
+
+    def test_same_time_competition_group_is_not_guessed(self) -> None:
+        matches = [
+            RawMatch(1, "2026-08-05T00:00:00+08:00", "欧冠", "未知甲", "未知乙"),
+            RawMatch(2, "2026-08-05T00:00:00+08:00", "欧冠", "未知丙", "未知丁"),
+        ]
+        events = {
+            "20260804": [
+                {
+                    "id": event_id,
+                    "_provider_league_name": "Champions League Qualification",
+                    "status": {"utcTime": "2026-08-04T16:00:00Z"},
+                    "home": {"id": event_id * 10, "name": f"Home {event_id}"},
+                    "away": {"id": event_id * 10 + 1, "name": f"Away {event_id}"},
+                }
+                for event_id in (1, 2)
+            ]
+        }
+        with TemporaryDirectory() as temp_dir:
+            configure_team_identity(Path(temp_dir) / "team_identity.json")
+            _learn_unique_context_provider_aliases(matches, events)
+            self.assertEqual(_team_score("未知甲", "Home 1"), 0.0)
+            self.assertEqual(_team_score("未知丙", "Home 2"), 0.0)
+        configure_team_identity(None)
 
     def test_rating_is_bounded(self) -> None:
         self.assertGreater(_rating(0.7, 0.2, 2.0, 0.8, 1.9, 0.9), 0.5)

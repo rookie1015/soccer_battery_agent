@@ -16,6 +16,8 @@ The Settings screen has a local engine test button for checking that the embedde
 
 - Generate an issue analysis report.
 - Read report history generated on the phone.
+- Long-press an analysis history group or entry to delete it after confirmation.
+- When network failures force simple-analysis fallback, list the unavailable information sources in each match's conclusion reasons.
 - Run a single-match prediction with optional 3-way odds.
 - Test the embedded local analysis engine from Settings.
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .json_utils import loads_json
+from .team_identity import provider_team_match_score, register_team_alias
 
 
 SOFASCORE_BASE = "https://www.sofascore.com/api/v1"
@@ -132,12 +133,16 @@ def build_sofascore_for_matches(
     profile_cache: dict[int, SofaScoreTeamProfile | None] = {}
 
     for match in matches:
-        event, reversed_sides = _match_event(match, events_by_date, team_score)
+        event, reversed_sides, match_diagnostic = _match_event(match, events_by_date, team_score)
         if not event:
             result[match.seq] = SofaScoreFixtureStrength(
                 home=None,
                 away=None,
-                source={"provider": "sofascore", "status": "blocked" if client.blocked else "unmatched"},
+                source={
+                    "provider": "sofascore",
+                    "status": "blocked" if client.blocked else "unmatched",
+                    **match_diagnostic,
+                },
             )
             continue
 
@@ -147,6 +152,8 @@ def build_sofascore_for_matches(
         local_away = event_home if reversed_sides else event_away
         home_id = _integer(local_home.get("id"))
         away_id = _integer(local_away.get("id"))
+        _remember_sofascore_side(match.home, local_home, match_diagnostic)
+        _remember_sofascore_side(match.away, local_away, match_diagnostic)
         home = _profile_for_team(home_id, local_home, client, lookback, xg_matches, profile_cache)
         away = _profile_for_team(away_id, local_away, client, lookback, xg_matches, profile_cache)
         result[match.seq] = SofaScoreFixtureStrength(
@@ -160,6 +167,7 @@ def build_sofascore_for_matches(
                 "away_team_id": away_id,
                 "lookback": lookback,
                 "xg_matches": xg_matches,
+                **match_diagnostic,
             },
         )
     return result
@@ -177,7 +185,7 @@ def _match_event(
     match: Any,
     events_by_date: dict[str, list[dict[str, Any]]],
     team_score: Callable[[str, str], float],
-) -> tuple[dict[str, Any] | None, bool]:
+) -> tuple[dict[str, Any] | None, bool, dict[str, Any]]:
     best: dict[str, Any] | None = None
     best_score = 0.0
     best_reversed = False
@@ -188,14 +196,47 @@ def _match_event(
     for event in events:
         home_name = str((event.get("homeTeam") or {}).get("name") or "")
         away_name = str((event.get("awayTeam") or {}).get("name") or "")
-        direct = team_score(match.home, home_name) + team_score(match.away, away_name)
-        reverse = team_score(match.home, away_name) + team_score(match.away, home_name) - 0.3
+        home_side = event.get("homeTeam") or {}
+        away_side = event.get("awayTeam") or {}
+        direct = _sofascore_side_score(match.home, home_side, team_score) + _sofascore_side_score(match.away, away_side, team_score)
+        reverse = _sofascore_side_score(match.home, away_side, team_score) + _sofascore_side_score(match.away, home_side, team_score) - 0.3
         score = max(direct, reverse)
         if score > best_score:
             best = event
             best_score = score
             best_reversed = reverse > direct
-    return (best, best_reversed) if best_score >= 1.6 else (None, False)
+    matched = best is not None and best_score >= 1.6
+    diagnostic = {
+        "match_status": "matched" if matched else "unmatched",
+        "match_confidence": round(max(0.0, min(1.0, best_score / 2.0)), 3),
+        "match_reason": "provider_id_or_alias_pair" if matched else ("low_confidence" if best else "no_candidates"),
+        "candidate_event_id": (best or {}).get("id", ""),
+        "candidate_home": str(((best or {}).get("homeTeam") or {}).get("name") or ""),
+        "candidate_away": str(((best or {}).get("awayTeam") or {}).get("name") or ""),
+    }
+    return (best, best_reversed, diagnostic) if matched else (None, False, diagnostic)
+
+
+def _sofascore_side_score(
+    local_name: str,
+    side: dict[str, Any],
+    fallback_score: Callable[[str, str], float],
+) -> float:
+    name = str(side.get("name") or "")
+    if side.get("id") is not None:
+        return provider_team_match_score(local_name, name, "sofascore", side.get("id"))
+    return fallback_score(local_name, name)
+
+
+def _remember_sofascore_side(local_name: str, side: dict[str, Any], diagnostic: dict[str, Any]) -> None:
+    register_team_alias(
+        local_name,
+        str(side.get("name") or ""),
+        provider="sofascore",
+        provider_id=side.get("id"),
+        confidence=float(diagnostic.get("match_confidence") or 0.8),
+        source="matched_fixture_pair",
+    )
 
 
 def _profile_for_team(

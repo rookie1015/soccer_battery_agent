@@ -4,6 +4,7 @@ import json
 
 from football_lottery_agent.standalone_api import (
     run_analysis,
+    run_delete_history,
     run_foreign_odds_usage,
     run_health,
     run_history,
@@ -26,6 +27,10 @@ def foreign_odds_usage(payload_json: str) -> str:
 
 def history(work_dir: str) -> str:
     return _json(run_history(work_dir))
+
+
+def delete_history(payload_json: str, work_dir: str) -> str:
+    return _json(run_delete_history(json.loads(payload_json), work_dir))
 
 
 def review(payload_json: str, work_dir: str) -> str:

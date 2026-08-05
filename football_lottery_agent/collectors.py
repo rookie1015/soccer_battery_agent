@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from .json_utils import loads_json
-from .team_identity import TEAM_ALIASES as SHARED_TEAM_ALIASES
+from .team_identity import (
+    TEAM_ALIASES as SHARED_TEAM_ALIASES,
+    configure_team_identity,
+    identity_path_for_cache,
+)
 
 
 SINA_SFC_URL = "https://view.lottery.sina.com.cn/lottery_index/sfc/index?num="
@@ -127,6 +131,9 @@ def collect_issue(
     sina_odds_only: bool = False,
 ) -> Path:
     cache = Path(cache_dir)
+    # Learned mappings live beside the cache so Android app upgrades do not
+    # overwrite them and every downstream provider shares the same identities.
+    configure_team_identity(identity_path_for_cache(cache))
     source_issue, raw_matches = load_matches(source=source, seed_path=seed_path, cache_dir=cache, issue=issue)
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)

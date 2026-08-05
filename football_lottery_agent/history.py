@@ -143,6 +143,35 @@ def load_history_entries(history_dir: str | Path = DEFAULT_HISTORY_DIR) -> list[
     return _load_entries(Path(history_dir))
 
 
+def delete_history_entries(
+    history_dir: str | Path,
+    entry_ids: list[str] | tuple[str, ...] | set[str],
+    *,
+    kind: str | None = None,
+) -> list[str]:
+    """Delete selected archived entries and rebuild every history index."""
+    root = Path(history_dir)
+    requested = {str(entry_id).strip() for entry_id in entry_ids if str(entry_id).strip()}
+    if not requested:
+        return []
+    entries = _load_entries(root)
+    deleted = [
+        item
+        for item in entries
+        if str(item.get("id") or "") in requested
+        and (kind is None or str(item.get("kind") or "") == kind)
+    ]
+    if not deleted:
+        return []
+    for item in deleted:
+        _delete_entry_files(root, item)
+    deleted_ids = {str(item.get("id") or "") for item in deleted}
+    remaining = [item for item in entries if str(item.get("id") or "") not in deleted_ids]
+    _write_index_json(root, remaining)
+    write_history_indexes(root, remaining)
+    return [str(item.get("id") or "") for item in deleted]
+
+
 def write_history_index(
     history_dir: str | Path = DEFAULT_HISTORY_DIR,
     entries: list[dict[str, str]] | None = None,

@@ -15,10 +15,32 @@ from typing import Any
 
 from .collectors import RawMatch
 from .json_utils import loads_json
-from .team_identity import TEAM_ALIASES, register_team_alias, team_match_score
+from .team_identity import (
+    TEAM_ALIASES,
+    configure_team_identity,
+    identity_path_for_cache,
+    normalize_team_name,
+    provider_team_match_score,
+    register_team_alias,
+    team_match_score,
+)
 
 
 FOTMOB_BASE = "https://www.fotmob.com/api/data"
+FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
+    "英超": ("premier league",),
+    "西甲": ("laliga", "la liga"),
+    "德甲": ("bundesliga",),
+    "意甲": ("serie a",),
+    "法甲": ("ligue 1",),
+    "欧冠": ("champions league", "champions league qualification"),
+    "欧联": ("europa league", "europa league qualification"),
+    "欧罗巴": ("europa league", "europa league qualification"),
+    "世界杯": ("world cup",),
+    "日职": ("j league", "j. league"),
+    "韩职": ("k league 1",),
+    "美职": ("major league soccer", "mls"),
+}
 
 @dataclass(frozen=True)
 class TeamRef:
@@ -92,9 +114,11 @@ def build_strength_for_matches(
     lookback: int = 20,
     xg_matches: int = 8,
 ) -> dict[int, FixtureStrength]:
+    configure_team_identity(identity_path_for_cache(cache_dir))
     cache = Path(cache_dir) / "fotmob"
     id_overrides = load_team_ids(team_ids_path) if team_ids_path else {}
     fotmob_events = _fetch_events_for_dates(matches, cache)
+    _learn_unique_context_provider_aliases(matches, fotmob_events)
     _learn_one_sided_provider_aliases(matches, fotmob_events)
 
     result: dict[int, FixtureStrength] = {}
@@ -138,9 +162,14 @@ def _build_fixture_strength(
     lookback: int,
     xg_matches: int,
 ) -> FixtureStrength:
-    event = _match_fotmob_event(match, fotmob_events)
-    home_ref = _team_ref(match.home, "home", event, id_overrides)
-    away_ref = _team_ref(match.away, "away", event, id_overrides)
+    event, reversed_sides, match_diagnostic = _match_fotmob_event(match, fotmob_events)
+    home_side = "away" if reversed_sides else "home"
+    away_side = "home" if reversed_sides else "away"
+    if event:
+        _remember_fotmob_side(match.home, event.get(home_side) or {}, match_diagnostic)
+        _remember_fotmob_side(match.away, event.get(away_side) or {}, match_diagnostic)
+    home_ref = _team_ref(match.home, home_side, event, id_overrides)
+    away_ref = _team_ref(match.away, away_side, event, id_overrides)
 
     home = _build_team_profile(home_ref, cache, lookback, xg_matches) if home_ref else None
     away = _build_team_profile(away_ref, cache, lookback, xg_matches) if away_ref else None
@@ -161,6 +190,7 @@ def _build_fixture_strength(
             "away_team_id": away_ref.id if away_ref else "",
             "lookback": lookback,
             "xg_matches": xg_matches,
+            **match_diagnostic,
         },
     )
 
@@ -481,25 +511,88 @@ def _fetch_events_for_dates(matches: list[RawMatch], cache: Path) -> dict[str, l
         payload = _fetch_json(f"{FOTMOB_BASE}/matches?{urllib.parse.urlencode({'date': date})}", cache, 3600)
         events = []
         for league in (payload or {}).get("leagues", []):
-            events.extend(league.get("matches", []))
+            for item in league.get("matches", []):
+                event = dict(item)
+                event["_provider_league_name"] = str(league.get("name") or "")
+                event["_provider_league_id"] = league.get("id") or ""
+                events.append(event)
         result[date] = events
     return result
 
 
-def _match_fotmob_event(match: RawMatch, events_by_date: dict[str, list[dict[str, Any]]]) -> dict[str, Any] | None:
-    best = None
+def _match_fotmob_event(
+    match: RawMatch,
+    events_by_date: dict[str, list[dict[str, Any]]],
+) -> tuple[dict[str, Any] | None, bool, dict[str, Any]]:
+    best: dict[str, Any] | None = None
     best_score = 0.0
-    events = []
-    for date in _candidate_date_keys(match.kickoff):
-        events.extend(events_by_date.get(date, []))
+    best_rank = 0.0
+    best_reversed = False
+    events = _fotmob_events_for_match(match, events_by_date)
     for event in events:
-        score = _team_score(match.home, event.get("home", {}).get("name", "")) + _team_score(match.away, event.get("away", {}).get("name", ""))
-        reverse = _team_score(match.home, event.get("away", {}).get("name", "")) + _team_score(match.away, event.get("home", {}).get("name", "")) - 0.3
-        score = max(score, reverse)
-        if score > best_score:
+        home = event.get("home") or {}
+        away = event.get("away") or {}
+        direct = _fotmob_side_score(match.home, home) + _fotmob_side_score(match.away, away)
+        reverse = _fotmob_side_score(match.home, away) + _fotmob_side_score(match.away, home) - 0.3
+        score = max(direct, reverse)
+        distance = _fotmob_kickoff_distance_hours(match, event)
+        context_bonus = 0.1 if distance is not None and distance <= 2.0 else 0.0
+        rank = score + context_bonus
+        if rank > best_rank:
+            best_rank = rank
             best_score = score
             best = event
-    return best if best_score >= 1.6 else None
+            best_reversed = reverse > direct
+
+    candidate_home = str(((best or {}).get("home") or {}).get("name") or "")
+    candidate_away = str(((best or {}).get("away") or {}).get("name") or "")
+    matched = best is not None and best_score >= 1.6
+    diagnostic = {
+        "match_status": "matched" if matched else "unmatched",
+        "match_confidence": round(max(0.0, min(1.0, best_score / 2.0)), 3),
+        "match_reason": "provider_id_or_alias_pair" if matched else ("low_confidence" if best else "no_candidates"),
+        "candidate_count": len(events),
+        "candidate_event_id": (best or {}).get("id", ""),
+        "candidate_home": candidate_home,
+        "candidate_away": candidate_away,
+        "candidate_league": str((best or {}).get("_provider_league_name") or ""),
+    }
+    return (best, best_reversed, diagnostic) if matched else (None, False, diagnostic)
+
+
+def _learn_unique_context_provider_aliases(
+    matches: list[RawMatch],
+    events_by_date: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Bootstrap two unknown names from a unique competition and kickoff.
+
+    A provider fixture is accepted only when it is the sole event in the
+    mapped competition within 15 minutes and belongs to only one local match.
+    This deliberately leaves same-time groups unresolved instead of guessing.
+    """
+    candidates_by_seq: dict[int, list[dict[str, Any]]] = {}
+    owners: dict[str, set[int]] = {}
+    for match in matches:
+        candidates = [
+            event
+            for event in _fotmob_events_for_match(match, events_by_date)
+            if (distance := _fotmob_kickoff_distance_hours(match, event)) is not None and distance <= 0.25
+        ]
+        candidates_by_seq[match.seq] = candidates
+        for event in candidates:
+            owners.setdefault(_fotmob_event_key(event), set()).add(match.seq)
+
+    for match in matches:
+        candidates = candidates_by_seq.get(match.seq, ())
+        if len(candidates) != 1:
+            continue
+        event = candidates[0]
+        if len(owners.get(_fotmob_event_key(event), ())) != 1:
+            continue
+        home = event.get("home") or {}
+        away = event.get("away") or {}
+        _register_fotmob_side(match.home, home, 0.99, "unique_competition_kickoff")
+        _register_fotmob_side(match.away, away, 0.99, "unique_competition_kickoff")
 
 
 def _learn_one_sided_provider_aliases(
@@ -516,31 +609,39 @@ def _learn_one_sided_provider_aliases(
     for _ in range(2):
         changed = False
         for match in matches:
-            events = [
-                event
-                for date in _candidate_date_keys(match.kickoff)
-                for event in events_by_date.get(date, ())
-            ]
-            candidates: list[tuple[str, str]] = []
+            events = _fotmob_events_for_match(match, events_by_date)
+            candidates: list[tuple[str, str, str]] = []
             for event in events:
-                home = str((event.get("home") or {}).get("name") or "")
-                away = str((event.get("away") or {}).get("name") or "")
-                local_home = _team_score(match.home, home)
-                local_away = _team_score(match.away, away)
+                distance = _fotmob_kickoff_distance_hours(match, event)
+                if distance is not None and distance > 6.0:
+                    continue
+                home_side = event.get("home") or {}
+                away_side = event.get("away") or {}
+                home = str(home_side.get("name") or "")
+                away = str(away_side.get("name") or "")
+                local_home = _fotmob_side_score(match.home, home_side)
+                local_away = _fotmob_side_score(match.away, away_side)
                 if local_home >= 0.8 and local_away == 0.0:
-                    candidates.append((match.away, away))
+                    candidates.append((match.away, away, str(away_side.get("id") or "")))
                 elif local_away >= 0.8 and local_home == 0.0:
-                    candidates.append((match.home, home))
-                reverse_home = _team_score(match.home, away)
-                reverse_away = _team_score(match.away, home)
+                    candidates.append((match.home, home, str(home_side.get("id") or "")))
+                reverse_home = _fotmob_side_score(match.home, away_side)
+                reverse_away = _fotmob_side_score(match.away, home_side)
                 if reverse_home >= 0.8 and reverse_away == 0.0:
-                    candidates.append((match.away, home))
+                    candidates.append((match.away, home, str(home_side.get("id") or "")))
                 elif reverse_away >= 0.8 and reverse_home == 0.0:
-                    candidates.append((match.home, away))
-            unique = {(local, provider) for local, provider in candidates if provider}
+                    candidates.append((match.home, away, str(away_side.get("id") or "")))
+            unique = {(local, provider, provider_id) for local, provider, provider_id in candidates if provider}
             if len(unique) == 1:
-                local, provider = next(iter(unique))
-                changed = register_team_alias(local, provider) or changed
+                local, provider_name, provider_id = next(iter(unique))
+                changed = register_team_alias(
+                    local,
+                    provider_name,
+                    provider="fotmob",
+                    provider_id=provider_id,
+                    confidence=0.95,
+                    source="one_sided_unique_fixture",
+                ) or changed
         if not changed:
             break
 
@@ -554,6 +655,72 @@ def _team_ref(local_name: str, side: str, event: dict[str, Any] | None, override
     team_id = raw.get("id")
     name = raw.get("longName") or raw.get("name") or local_name
     return TeamRef(int(team_id), str(name)) if team_id else None
+
+
+def _fotmob_side_score(local_name: str, side: dict[str, Any]) -> float:
+    names = {str(side.get("name") or ""), str(side.get("longName") or "")}
+    return max(provider_team_match_score(local_name, name, "fotmob", side.get("id")) for name in names)
+
+
+def _remember_fotmob_side(local_name: str, side: dict[str, Any], diagnostic: dict[str, Any]) -> None:
+    _register_fotmob_side(
+        local_name,
+        side,
+        float(diagnostic.get("match_confidence") or 0.8),
+        "matched_fixture_pair",
+    )
+
+
+def _register_fotmob_side(local_name: str, side: dict[str, Any], confidence: float, source: str) -> None:
+    names = dict.fromkeys((str(side.get("name") or "").strip(), str(side.get("longName") or "").strip()))
+    for name in names:
+        if name:
+            register_team_alias(
+                local_name,
+                name,
+                provider="fotmob",
+                provider_id=side.get("id"),
+                confidence=confidence,
+                source=source,
+            )
+
+
+def _fotmob_kickoff_distance_hours(match: RawMatch, event: dict[str, Any]) -> float | None:
+    provider_value = str(((event.get("status") or {}).get("utcTime") or event.get("startTime") or ""))
+    return _kickoff_distance_hours(match.kickoff, provider_value)
+
+
+def _fotmob_events_for_match(
+    match: RawMatch,
+    events_by_date: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for date in _candidate_date_keys(match.kickoff):
+        for event in events_by_date.get(date, ()):
+            key = _fotmob_event_key(event)
+            if key not in seen:
+                seen.add(key)
+                events.append(event)
+    allowed = {normalize_team_name(name) for name in FOTMOB_LEAGUE_ALIASES.get(match.league, ())}
+    tagged = [event for event in events if str(event.get("_provider_league_name") or "").strip()]
+    if not allowed or not tagged:
+        return events
+    return [
+        event
+        for event in tagged
+        if normalize_team_name(str(event.get("_provider_league_name") or "")) in allowed
+    ]
+
+
+def _fotmob_event_key(event: dict[str, Any]) -> str:
+    event_id = str(event.get("id") or "").strip()
+    if event_id:
+        return event_id
+    home = str((event.get("home") or {}).get("name") or "")
+    away = str((event.get("away") or {}).get("name") or "")
+    kickoff = str((event.get("status") or {}).get("utcTime") or "")
+    return f"{kickoff}|{home}|{away}"
 
 
 def _fixture_to_match_stat(item: dict[str, Any], team_id: int) -> MatchStat | None:
@@ -683,6 +850,17 @@ def _candidate_date_keys(iso_value: str) -> tuple[str, ...]:
         return (_date_key(iso_value),)
     dates = [base + timedelta(days=offset) for offset in (-1, 0, 1)]
     return tuple(item.strftime("%Y%m%d") for item in dates)
+
+
+def _kickoff_distance_hours(first: str, second: str) -> float | None:
+    try:
+        first_time = datetime.fromisoformat(first.replace("Z", "+00:00"))
+        second_time = datetime.fromisoformat(second.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if (first_time.tzinfo is None) != (second_time.tzinfo is None):
+        return None
+    return abs((first_time - second_time).total_seconds()) / 3600.0
 
 
 def _normalize(value: str) -> str:

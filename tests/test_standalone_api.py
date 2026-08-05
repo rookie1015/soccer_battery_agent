@@ -105,6 +105,7 @@ class StandaloneApiTests(unittest.TestCase):
                 failed_source = {"status": "request_failed"}
                 matches = [
                     {
+                        "seq": seq,
                         "sources": {
                             "collection_audit": {
                                 "injuries": failed_source,
@@ -115,10 +116,10 @@ class StandaloneApiTests(unittest.TestCase):
                             }
                         }
                     }
-                    for _ in range(14)
+                    for seq in range(1, 15)
                 ]
             else:
-                matches = []
+                matches = [{"seq": seq, "sources": {}} for seq in range(1, 15)]
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
                 json.dumps({"issue": "26090", "metadata": {}, "matches": matches}),
@@ -144,6 +145,13 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args_list[1].kwargs["skip_context_fetches"])
         self.assertEqual(collected["metadata"]["analysis_mode"], "simple_fallback")
         self.assertIn("自动降级", collected["metadata"]["analysis_mode_message"])
+        self.assertEqual(
+            collected["metadata"]["analysis_unavailable_sources"],
+            ["伤停信息", "历史交锋", "赛前情报", "赔率变化", "亚洲让球"],
+        )
+        fallback = collected["matches"][0]["sources"]["analysis_network_fallback"]
+        self.assertEqual(fallback["scope"], "match")
+        self.assertEqual(fallback["unavailable_sources"], collected["metadata"]["analysis_unavailable_sources"])
 
     def test_analysis_passes_ticket_budget_to_strategy(self) -> None:
         fake_plan = Mock()
@@ -398,6 +406,29 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["entries"][0]["issue"], "26090")
         self.assertIn("pick: home", result["entries"][0]["markdown_text"])
+
+    def test_delete_history_only_removes_analysis_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_dir = root / "reports" / "history"
+            report = root / "report.html"
+            markdown = root / "report.md"
+            report.write_text("<h1>report</h1>", encoding="utf-8")
+            markdown.write_text("# report", encoding="utf-8")
+            archive_report("analysis", "26100", report, markdown, history_dir=history_dir)
+            archive_report("review", "26100", report, markdown, history_dir=history_dir)
+            entries = load_history_entries(history_dir)
+            analysis = next(item for item in entries if item["kind"] == "analysis")
+            review = next(item for item in entries if item["kind"] == "review")
+
+            result = standalone_api.run_delete_history(
+                {"entry_ids": [analysis["id"], review["id"]]},
+                root,
+            )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["deleted_count"], 1)
+            self.assertEqual([item["kind"] for item in load_history_entries(history_dir)], ["review"])
 
     def test_history_parses_markdown_report_for_android_cards(self) -> None:
         markdown_text = """# 足球彩票分析报告：26090

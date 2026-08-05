@@ -113,6 +113,26 @@ class DixonColesTests(unittest.TestCase):
 
         self.assertTrue(any("Dixon-Coles" in reason for reason in prediction.reasons))
 
+    def test_predictor_explains_network_sources_missing_from_full_analysis(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        fallback_match = replace(
+            match,
+            sources={
+                **match.sources,
+                "analysis_network_fallback": {
+                    "scope": "match",
+                    "unavailable_sources": ["伤停信息", "历史交锋", "赔率变化"],
+                },
+            },
+        )
+
+        prediction = predict_match(fallback_match)
+        reason = next(item for item in prediction.reasons if item.startswith("完整分析资料审计（网络降级）"))
+
+        self.assertIn("完整分析未执行", reason)
+        self.assertIn("本场因网络未获得的信息来源：伤停信息、历史交锋、赔率变化", reason)
+        self.assertIn("这些资料未参与判断", reason)
+
     def test_squad_strength_and_absence_adjust_the_xg_prior(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         base_sources = {

@@ -8,6 +8,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -22,6 +24,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
@@ -39,6 +42,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -399,6 +403,10 @@ class HistoryViewModel : ViewModel() {
         private set
     var error by mutableStateOf("")
         private set
+    var message by mutableStateOf("")
+        private set
+    var isDeleting by mutableStateOf(false)
+        private set
     var entries by mutableStateOf<List<HistoryEntry>>(emptyList())
         private set
     var selectedEntry by mutableStateOf<HistoryEntry?>(null)
@@ -423,6 +431,32 @@ class HistoryViewModel : ViewModel() {
                 error = throwable.message ?: "读取历史记录失败。"
             }
             isLoading = false
+        }
+    }
+
+    fun deleteAnalysisEntries(engine: FootballLotteryLocalEngine, targets: List<HistoryEntry>) {
+        val entryIds = targets.filter { it.kind == "analysis" }.map { it.id }.filter { it.isNotBlank() }.distinct()
+        if (entryIds.isEmpty() || isDeleting) {
+            return
+        }
+        viewModelScope.launch {
+            isDeleting = true
+            error = ""
+            message = ""
+            runCatching {
+                val deletedCount = engine.deleteHistory(entryIds)
+                deletedCount to engine.fetchHistory()
+            }.onSuccess { (deletedCount, response) ->
+                entries = response
+                selectedEntry = selectedEntry?.takeIf { selected -> response.any { it.id == selected.id } }
+                val availableGroups = response.map { historyGroupKey(it) }.toSet()
+                expandedGroups = expandedGroups.intersect(availableGroups)
+                message = "已删除 $deletedCount 条分析记录。"
+                hasLoaded = true
+            }.onFailure { throwable ->
+                error = throwable.message ?: "删除分析记录失败。"
+            }
+            isDeleting = false
         }
     }
 
@@ -660,6 +694,15 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 report = it.optJSONObject("report")?.let { reportJson -> parseReport(reportJson) },
             )
         }
+    }
+
+    suspend fun deleteHistory(entryIds: List<String>): Int = withContext(Dispatchers.IO) {
+        val body = JSONObject().put("entry_ids", JSONArray(entryIds))
+        val json = JSONObject(bridge.callAttr("delete_history", body.toString(), workDir).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "删除分析记录失败。"))
+        }
+        json.optInt("deleted_count", 0)
     }
 
     suspend fun generateReview(
@@ -1129,6 +1172,7 @@ private fun HistorySection(
     kind: String,
     title: String,
 ) {
+    var pendingDeletion by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     LaunchedEffect(Unit) {
         if (!viewModel.hasLoaded && !viewModel.isLoading) {
             viewModel.refresh(localEngine)
@@ -1149,6 +1193,9 @@ private fun HistorySection(
         if (viewModel.error.isNotBlank()) {
             StatusCard(text = viewModel.error, color = Color(0xFFB42318))
         }
+        if (viewModel.message.isNotBlank()) {
+            StatusCard(text = viewModel.message, color = Color(0xFF16845B))
+        }
         historyGroups(entries).forEach { group ->
             HistoryGroupCard(
                 group = group,
@@ -1156,8 +1203,46 @@ private fun HistorySection(
                 expanded = group.key in viewModel.expandedGroups,
                 onToggle = { viewModel.toggleGroup(group.key) },
                 onSelect = { viewModel.select(it) },
+                onRequestDelete = if (kind == "analysis") {
+                    { targets -> pendingDeletion = targets }
+                } else {
+                    null
+                },
             )
         }
+    }
+    if (pendingDeletion.isNotEmpty()) {
+        val issue = pendingDeletion.first().issue.ifBlank { "未记录" }
+        val targetText = if (pendingDeletion.size == 1) {
+            "第 $issue 期的这条分析记录"
+        } else {
+            "第 $issue 期的 ${pendingDeletion.size} 条分析记录"
+        }
+        AlertDialog(
+            onDismissRequest = { if (!viewModel.isDeleting) pendingDeletion = emptyList() },
+            title = { Text("删除分析结果？") },
+            text = { Text("将删除${targetText}及其归档文件。此操作无法撤销。") },
+            confirmButton = {
+                TextButton(
+                    enabled = !viewModel.isDeleting,
+                    onClick = {
+                        val targets = pendingDeletion
+                        pendingDeletion = emptyList()
+                        viewModel.deleteAnalysisEntries(localEngine, targets)
+                    },
+                ) {
+                    Text("删除", color = Color(0xFFB42318))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    enabled = !viewModel.isDeleting,
+                    onClick = { pendingDeletion = emptyList() },
+                ) {
+                    Text("取消")
+                }
+            },
+        )
     }
 }
 
@@ -1234,7 +1319,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.2.1（3） · 已包含逐场依据、输入记忆和重复分析替换",
+                        "App 版本 0.2.1（3） · 已包含球队身份记忆、历史长按删除和网络缺口说明",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1364,7 +1449,7 @@ private fun RequestCard(
                 )
             }
             Text(
-                "默认执行完整分析，增强样本固定为最近 20 场；检测到关键资料源网络故障时自动降级为简单分析。",
+                "默认执行完整分析，增强样本固定为最近 20 场；检测到关键资料源网络故障时自动降级为简单分析，并在结论理由中列出未获得的信息来源。",
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1883,6 +1968,7 @@ private fun PredictionCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun HistoryGroupCard(
     group: HistoryGroup,
@@ -1890,13 +1976,23 @@ private fun HistoryGroupCard(
     expanded: Boolean,
     onToggle: () -> Unit,
     onSelect: (HistoryEntry) -> Unit,
+    onRequestDelete: ((List<HistoryEntry>) -> Unit)?,
 ) {
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onToggle),
+                    .then(
+                        if (onRequestDelete != null) {
+                            Modifier.combinedClickable(
+                                onClick = onToggle,
+                                onLongClick = { onRequestDelete(group.entries) },
+                            )
+                        } else {
+                            Modifier.clickable(onClick = onToggle)
+                        },
+                    ),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
@@ -1907,7 +2003,8 @@ private fun HistoryGroupCard(
                         style = MaterialTheme.typography.titleMedium,
                     )
                     Text(
-                        text = "${group.entries.size} 条记录，最新 ${group.entries.firstOrNull()?.createdAt.orEmpty()}",
+                        text = "${group.entries.size} 条记录，最新 ${group.entries.firstOrNull()?.createdAt.orEmpty()}" +
+                            if (onRequestDelete != null) " · 长按删除" else "",
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodySmall,
                     )
@@ -1920,6 +2017,7 @@ private fun HistoryGroupCard(
                         entry = entry,
                         selected = selectedEntry?.id == entry.id,
                         onClick = { onSelect(entry) },
+                        onLongClick = onRequestDelete?.let { request -> { request(listOf(entry)) } },
                     )
                     if (selectedEntry?.id == entry.id) {
                         entry.report?.let { report ->
@@ -1944,8 +2042,14 @@ private fun HistoryGroupCard(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun HistoryEntryCard(entry: HistoryEntry, selected: Boolean, onClick: () -> Unit) {
+private fun HistoryEntryCard(
+    entry: HistoryEntry,
+    selected: Boolean,
+    onClick: () -> Unit,
+    onLongClick: (() -> Unit)?,
+) {
     val context = LocalContext.current
     fun openUrl(url: String) {
         context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
@@ -1954,7 +2058,11 @@ private fun HistoryEntryCard(entry: HistoryEntry, selected: Boolean, onClick: ()
     Card(
         shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = if (selected) Color(0xFFE8F0FB) else Color(0xFFF7F9FC)),
-        modifier = Modifier.clickable(onClick = onClick),
+        modifier = if (onLongClick != null) {
+            Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
+        } else {
+            Modifier.clickable(onClick = onClick)
+        },
     ) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1962,7 +2070,11 @@ private fun HistoryEntryCard(entry: HistoryEntry, selected: Boolean, onClick: ()
                 Text(kindLabel(entry.kind), color = Color(0xFF2364AA), style = MaterialTheme.typography.bodySmall)
             }
             Text(entry.createdAt.ifBlank { "未记录时间" }, color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
-            Text(if (selected) "再次点击收起" else "点击展开", color = Color(0xFF667085), style = MaterialTheme.typography.bodySmall)
+            Text(
+                (if (selected) "再次点击收起" else "点击展开") + if (onLongClick != null) " · 长按删除" else "",
+                color = Color(0xFF667085),
+                style = MaterialTheme.typography.bodySmall,
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (isWebUrl(entry.htmlUrl)) {
                     Button(onClick = { openUrl(entry.htmlUrl) }) {

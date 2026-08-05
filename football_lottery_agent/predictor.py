@@ -650,6 +650,10 @@ def _build_reasons(
     if audit_reason:
         reasons.append(audit_reason)
 
+    fallback_reason = _network_fallback_reason(match)
+    if fallback_reason:
+        reasons.append(fallback_reason)
+
     if spread < 0.06:
         reasons.append("前两项概率接近，建议提高防守或在任9中谨慎处理。")
     elif top == "3" and probabilities["3"] >= 0.5:
@@ -702,6 +706,21 @@ def _collection_audit_reason(match: Match) -> str:
     display_only = "、".join(usage.get("display_only") or []) if isinstance(usage, dict) else ""
     suffix = f"；数值判断 {numerical or '无'}；仅展示 {display_only or '无'}"
     return f"完整分析资料审计：有效 {available_text}；缺失或未匹配 {missing_text}{suffix}。"
+
+
+def _network_fallback_reason(match: Match) -> str:
+    fallback = match.sources.get("analysis_network_fallback") if isinstance(match.sources, dict) else {}
+    if not isinstance(fallback, dict):
+        return ""
+    unavailable = [str(item).strip() for item in fallback.get("unavailable_sources") or [] if str(item).strip()]
+    if not unavailable:
+        return ""
+    scope = "本场" if fallback.get("scope") == "match" else "本期"
+    return (
+        "完整分析资料审计（网络降级）：完整分析未执行；"
+        f"{scope}因网络未获得的信息来源：{'、'.join(unavailable)}；"
+        "当前结论已改用简单分析，这些资料未参与判断。"
+    )
 
 
 def _select_notes(notes: tuple[str, ...]) -> list[str]:

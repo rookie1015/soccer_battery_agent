@@ -12,6 +12,7 @@ venv/
 
 # Runtime caches and collected/probe data
 data/cache*/
+data/team_identity.json
 data/collected_issue.json
 data/*_probe.json
 data/*_offline.json

@@ -4,7 +4,13 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from football_lottery_agent.history import archive_report, load_history_entries, render_history_index, write_history_indexes
+from football_lottery_agent.history import (
+    archive_report,
+    delete_history_entries,
+    load_history_entries,
+    render_history_index,
+    write_history_indexes,
+)
 
 
 class HistoryTests(unittest.TestCase):
@@ -124,6 +130,46 @@ class HistoryTests(unittest.TestCase):
             )
 
             self.assertEqual(len(load_history_entries(history_dir)), 2)
+
+    def test_delete_history_entries_removes_files_and_rebuilds_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            history_dir = root / "history"
+            html = root / "report.html"
+            markdown = root / "report.md"
+            snapshot = root / "issue.json"
+            html.write_text("<html>analysis</html>", encoding="utf-8")
+            markdown.write_text("# analysis", encoding="utf-8")
+            snapshot.write_text('{"issue":"26100"}', encoding="utf-8")
+            archive_report(
+                "analysis",
+                "26100",
+                html,
+                markdown,
+                history_dir=history_dir,
+                snapshot_path=snapshot,
+                created_at=datetime(2026, 8, 5, 20, 0, 0),
+            )
+            html.write_text("<html>review</html>", encoding="utf-8")
+            archive_report(
+                "review",
+                "26100",
+                html,
+                markdown,
+                history_dir=history_dir,
+                created_at=datetime(2026, 8, 5, 20, 1, 0),
+            )
+            entries = load_history_entries(history_dir)
+            analysis = next(item for item in entries if item["kind"] == "analysis")
+            analysis_files = [history_dir / analysis[key] for key in ("html", "markdown", "snapshot")]
+
+            deleted = delete_history_entries(history_dir, [analysis["id"]], kind="analysis")
+
+            remaining = load_history_entries(history_dir)
+            self.assertEqual(deleted, [analysis["id"]])
+            self.assertEqual([item["kind"] for item in remaining], ["review"])
+            self.assertTrue(all(not path.exists() for path in analysis_files))
+            self.assertNotIn(analysis["id"], (history_dir / "index.html").read_text(encoding="utf-8"))
 
     def test_render_history_index_contains_selector_and_iframe(self) -> None:
         html = render_history_index(

@@ -11,7 +11,7 @@ import urllib.error
 from .collectors import collect_issue
 from .calibration import build_calibration
 from .experiments import load_active_model_weights, load_active_selection_policy, run_experiment
-from .history import archive_report, load_history_entries
+from .history import archive_report, delete_history_entries, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
@@ -26,6 +26,13 @@ import tempfile
 
 
 STRENGTH_XG_MATCHES = 20
+NETWORK_SENSITIVE_SOURCE_LABELS = {
+    "injuries": "伤停信息",
+    "history": "历史交锋",
+    "intelligence": "赛前情报",
+    "odds_movement": "赔率变化",
+    "asian_handicap": "亚洲让球",
+}
 
 
 def run_health() -> dict[str, object]:
@@ -69,6 +76,7 @@ def run_analysis(
     html_path = report_dir / f"{_slug(issue)}_report.html"
 
     fallback_reason = ""
+    unavailable_sources: dict[str, object] = {"all": [], "matches": {}}
     try:
         _collect_mobile_analysis(
             issue_path=issue_path,
@@ -80,9 +88,14 @@ def run_analysis(
         )
     except (OSError, TimeoutError, urllib.error.URLError) as exc:
         fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
+        unavailable_sources = {
+            "all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
+            "matches": {},
+        }
     else:
         if _full_collection_has_broad_network_failure(issue_path):
             fallback_reason = "完整分析的关键资料源出现大范围网络请求失败，已自动降级为简单分析。"
+            unavailable_sources = _full_collection_network_gaps(issue_path)
 
     if fallback_reason:
         _collect_mobile_analysis(
@@ -93,7 +106,7 @@ def run_analysis(
             use_foreign_odds=False,
             foreign_odds_api_key=None,
         )
-    _record_analysis_mode(issue_path, fallback_reason)
+    _record_analysis_mode(issue_path, fallback_reason, unavailable_sources)
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
     calibration = build_calibration(root)
@@ -183,12 +196,11 @@ def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
             audits.append(audit)
     if not audits:
         return False
-    network_sensitive = ("injuries", "history", "intelligence", "odds_movement", "asian_handicap")
     broad_failures = 0
     for audit in audits:
         failed = sum(
             1
-            for key in network_sensitive
+            for key in NETWORK_SENSITIVE_SOURCE_LABELS
             if isinstance(audit.get(key), dict) and audit[key].get("status") == "request_failed"
         )
         if failed >= 3:
@@ -197,7 +209,45 @@ def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
     return broad_failures >= threshold
 
 
-def _record_analysis_mode(issue_path: Path, fallback_reason: str) -> None:
+def _full_collection_network_gaps(issue_path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(issue_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()), "matches": {}}
+
+    all_missing: list[str] = []
+    matches: dict[str, list[str]] = {}
+    for match in payload.get("matches", []):
+        if not isinstance(match, dict):
+            continue
+        sources = match.get("sources") if isinstance(match.get("sources"), dict) else {}
+        audit = sources.get("collection_audit") if isinstance(sources, dict) else {}
+        if not isinstance(audit, dict):
+            continue
+        missing = [
+            label
+            for key, label in NETWORK_SENSITIVE_SOURCE_LABELS.items()
+            if isinstance(audit.get(key), dict) and audit[key].get("status") == "request_failed"
+        ]
+        if not missing:
+            continue
+        seq = str(match.get("seq") or "").strip()
+        if seq:
+            matches[seq] = missing
+        for label in missing:
+            if label not in all_missing:
+                all_missing.append(label)
+    return {
+        "all": all_missing or list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
+        "matches": matches,
+    }
+
+
+def _record_analysis_mode(
+    issue_path: Path,
+    fallback_reason: str,
+    unavailable_sources: dict[str, object] | None = None,
+) -> None:
     try:
         payload = json.loads(issue_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -205,7 +255,32 @@ def _record_analysis_mode(issue_path: Path, fallback_reason: str) -> None:
     metadata = payload.setdefault("metadata", {})
     metadata["analysis_mode_requested"] = "full"
     metadata["analysis_mode"] = "simple_fallback" if fallback_reason else "full"
-    metadata["analysis_mode_message"] = fallback_reason or "已完成完整分析，增强样本固定为最近 20 场。"
+    all_missing = [
+        str(item)
+        for item in ((unavailable_sources or {}).get("all") or [])
+        if str(item).strip()
+    ]
+    if fallback_reason and all_missing:
+        metadata["analysis_mode_message"] = (
+            f"{fallback_reason} 未获得的信息来源：{'、'.join(all_missing)}；这些资料未参与本次结论。"
+        )
+        metadata["analysis_unavailable_sources"] = all_missing
+        missing_by_match = (unavailable_sources or {}).get("matches") or {}
+        for match in payload.get("matches", []):
+            if not isinstance(match, dict):
+                continue
+            seq = str(match.get("seq") or "").strip()
+            match_missing = missing_by_match.get(seq) if isinstance(missing_by_match, dict) else None
+            sources = match.setdefault("sources", {})
+            if not isinstance(sources, dict):
+                sources = {}
+                match["sources"] = sources
+            sources["analysis_network_fallback"] = {
+                "scope": "match" if match_missing else "issue",
+                "unavailable_sources": list(match_missing or all_missing),
+            }
+    else:
+        metadata["analysis_mode_message"] = fallback_reason or "已完成完整分析，增强样本固定为最近 20 场。"
     issue_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -230,6 +305,24 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
         entry["report"] = report
         entries.append(entry)
     return {"ok": True, "entries": entries}
+
+
+def run_delete_history(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
+    raw_ids = payload.get("entry_ids")
+    entry_ids = [str(item).strip() for item in raw_ids] if isinstance(raw_ids, list) else []
+    entry_ids = [item for item in entry_ids if item]
+    if not entry_ids:
+        raise ValueError("没有选择要删除的分析记录。")
+    history_dir = Path(work_dir) / "reports" / "history"
+    deleted_ids = delete_history_entries(history_dir, entry_ids, kind="analysis")
+    if not deleted_ids:
+        raise ValueError("所选分析记录不存在或已经删除。")
+    return {
+        "ok": True,
+        "deleted_count": len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "message": f"已删除 {len(deleted_ids)} 条分析记录。",
+    }
 
 
 def _read_history_text(history_dir: Path, relative_path: str) -> str:
@@ -395,6 +488,7 @@ def _restore_history_metadata(report: dict[str, object], work_dir: Path, issue: 
             "sale_begin_time",
             "analysis_mode",
             "analysis_mode_message",
+            "analysis_unavailable_sources",
         ):
             value = metadata.get(key)
             if value:
