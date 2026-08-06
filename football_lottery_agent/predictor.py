@@ -698,7 +698,8 @@ def _collection_audit_reason(match: Match) -> str:
         if status in {"available", "complete", "partial", "confirmed_empty"}:
             available.append(label)
         else:
-            missing.append(label)
+            explanation = _collection_gap_explanation(key, item)
+            missing.append(f"{label}（{explanation}）" if explanation else label)
     available_text = "、".join(available) or "无"
     missing_text = "、".join(missing) or "无"
     usage = match.sources.get("data_usage") if isinstance(match.sources, dict) else {}
@@ -706,6 +707,49 @@ def _collection_audit_reason(match: Match) -> str:
     display_only = "、".join(usage.get("display_only") or []) if isinstance(usage, dict) else ""
     suffix = f"；数值判断 {numerical or '无'}；仅展示 {display_only or '无'}"
     return f"完整分析资料审计：有效 {available_text}；缺失或未匹配 {missing_text}{suffix}。"
+
+
+def _collection_gap_explanation(key: str, item: dict[str, object]) -> str:
+    status = str(item.get("status") or "")
+    if key == "news" and status == "empty_after_fallbacks":
+        return "多源检索后没有同时匹配主客队的标题"
+    if key == "mainstream_media" and status == "empty":
+        return "主流媒体标题未匹配到本场球队"
+    if key == "strength":
+        reason = str(item.get("reason") or "")
+        count = int(item.get("candidate_count") or 0)
+        sofa = str(item.get("sofascore_status") or "")
+        if status == "matched_no_samples":
+            detail = "FotMob球队身份已匹配，但双方近期赛果或可比较实力样本不足"
+        elif reason == "ambiguous_context_missing_aliases":
+            detail = f"FotMob同联赛同时间存在{count}场候选，双语球队身份未唯一确认"
+        elif reason == "no_fixture_at_kickoff":
+            detail = "FotMob没有同联赛同开球时间的赛事"
+        elif reason == "no_candidates":
+            detail = "FotMob没有赛事候选"
+        else:
+            detail = "FotMob球队身份未匹配"
+        return f"{detail}，SofaScore访问受限" if sofa == "blocked" else detail
+    if key == "xg":
+        reason = str(item.get("reason") or "")
+        if reason == "team_identity_unmatched":
+            return "球队身份未匹配，无法取得球队ID和xG样本"
+        if reason == "provider_has_no_xg_samples":
+            return "球队已匹配，但供应商近期比赛没有xG样本"
+    if key == "totals" and status == "not_available_from_provider":
+        return "当前赔率源没有提供大小球盘口"
+    if key == "polymarket" and status == "unmatched":
+        return "活跃市场中没有匹配到本场比赛"
+    return {
+        "request_failed": "数据源请求失败",
+        "provider_error": "供应商返回错误",
+        "missing_match_id": "赛程缺少供应商比赛ID",
+        "not_requested": "本次未请求",
+        "not_available_from_provider": "当前供应商不提供",
+        "empty": "接口返回空或没有匹配记录",
+        "unmatched": "没有匹配到对应记录",
+        "missing": "没有有效样本",
+    }.get(status, "")
 
 
 def _network_fallback_reason(match: Match) -> str:

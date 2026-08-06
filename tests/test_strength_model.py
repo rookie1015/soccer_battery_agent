@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from football_lottery_agent.strength_model import (
     _estimate_starting_eleven,
@@ -9,6 +10,7 @@ from football_lottery_agent.strength_model import (
     _player_value,
     _rating,
     _learn_one_sided_provider_aliases,
+    _learn_bilingual_provider_aliases,
     _learn_unique_context_provider_aliases,
     _match_fotmob_event,
     _team_score,
@@ -100,6 +102,96 @@ class StrengthModelTests(unittest.TestCase):
             _learn_unique_context_provider_aliases([match], events)
             self.assertEqual(_team_score("测试甲队", "Alpha Town"), 1.0)
             self.assertEqual(_team_score("测试乙队", "Beta City"), 1.0)
+        configure_team_identity(None)
+
+    def test_domestic_league_context_bootstraps_unknown_clubs_without_seed_aliases(self) -> None:
+        match = RawMatch(
+            seq=1,
+            kickoff="2026-08-09T00:45:00+08:00",
+            league="荷甲",
+            home="全新主队",
+            away="全新客队",
+        )
+        events = {
+            "20260808": [
+                {
+                    "id": 201,
+                    "_provider_league_name": "Eredivisie",
+                    "status": {"utcTime": "2026-08-08T16:45:00Z"},
+                    "home": {"id": 31, "name": "Brand New Eagles"},
+                    "away": {"id": 32, "name": "Novel United"},
+                },
+                {
+                    "id": 202,
+                    "_provider_league_name": "EFL Cup",
+                    "status": {"utcTime": "2026-08-08T16:45:00Z"},
+                    "home": {"id": 41, "name": "Wrong Home"},
+                    "away": {"id": 42, "name": "Wrong Away"},
+                },
+            ]
+        }
+        with TemporaryDirectory() as temp_dir:
+            configure_team_identity(Path(temp_dir) / "team_identity.json")
+            _learn_unique_context_provider_aliases([match], events)
+            self.assertEqual(_team_score("全新主队", "Brand New Eagles"), 1.0)
+            self.assertEqual(_team_score("全新客队", "Novel United"), 1.0)
+        configure_team_identity(None)
+
+    def test_unmatched_diagnostic_lists_ambiguous_same_time_candidates(self) -> None:
+        match = RawMatch(1, "2026-08-08T22:00:00+08:00", "英联赛杯", "未知甲", "未知乙")
+        events = {
+            "20260808": [
+                {
+                    "id": event_id,
+                    "_provider_league_name": "EFL Cup",
+                    "status": {"utcTime": "2026-08-08T14:00:00Z"},
+                    "home": {"id": event_id * 10, "name": f"Home {event_id}"},
+                    "away": {"id": event_id * 10 + 1, "name": f"Away {event_id}"},
+                }
+                for event_id in (1, 2)
+            ]
+        }
+
+        event, _, diagnostic = _match_fotmob_event(match, events)
+
+        self.assertIsNone(event)
+        self.assertEqual(diagnostic["match_reason"], "ambiguous_context_missing_aliases")
+        self.assertEqual(diagnostic["candidate_count"], 2)
+        self.assertEqual(diagnostic["candidate_matches"][0]["league"], "EFL Cup")
+
+    def test_bilingual_labels_resolve_ambiguous_same_time_group_only_as_a_pair(self) -> None:
+        match = RawMatch(1, "2026-08-08T22:00:00+08:00", "英联赛杯", "斯旺西", "伯明翰")
+        events = {
+            "20260808": [
+                {
+                    "id": 1,
+                    "_provider_league_name": "EFL Cup",
+                    "status": {"utcTime": "2026-08-08T14:00:00Z"},
+                    "home": {"id": 101, "name": "Swansea", "longName": "Swansea City"},
+                    "away": {"id": 102, "name": "Birmingham", "longName": "Birmingham City"},
+                },
+                {
+                    "id": 2,
+                    "_provider_league_name": "EFL Cup",
+                    "status": {"utcTime": "2026-08-08T14:00:00Z"},
+                    "home": {"id": 201, "name": "Wrong Home"},
+                    "away": {"id": 202, "name": "Wrong Away"},
+                },
+            ]
+        }
+        aliases = {
+            "斯旺西": ("Swansea City A.F.C.", "Swansea City"),
+            "伯明翰": ("Birmingham City F.C.", "Birmingham City"),
+        }
+        with TemporaryDirectory() as temp_dir:
+            configure_team_identity(Path(temp_dir) / "team_identity.json")
+            with patch(
+                "football_lottery_agent.strength_model.fetch_dbpedia_club_aliases",
+                side_effect=lambda name, _cache: aliases.get(name, ()),
+            ):
+                _learn_bilingual_provider_aliases([match], events, Path(temp_dir))
+            self.assertEqual(_team_score("斯旺西", "Swansea City"), 1.0)
+            self.assertEqual(_team_score("伯明翰", "Birmingham City"), 1.0)
         configure_team_identity(None)
 
     def test_same_time_competition_group_is_not_guessed(self) -> None:

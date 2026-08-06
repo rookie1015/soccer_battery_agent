@@ -133,6 +133,33 @@ class DixonColesTests(unittest.TestCase):
         self.assertIn("本场因网络未获得的信息来源：伤停信息、历史交锋、赔率变化", reason)
         self.assertIn("这些资料未参与判断", reason)
 
+    def test_collection_audit_explains_identity_xg_and_totals_gaps(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        audit_match = replace(
+            match,
+            sources={
+                **match.sources,
+                "collection_audit": {
+                    "mode": "full",
+                    "strength": {
+                        "status": "unmatched",
+                        "reason": "ambiguous_context_missing_aliases",
+                        "candidate_count": 24,
+                        "sofascore_status": "blocked",
+                    },
+                    "xg": {"status": "missing", "reason": "team_identity_unmatched"},
+                    "totals": {"status": "not_available_from_provider"},
+                },
+            },
+        )
+
+        reason = next(item for item in predict_match(audit_match).reasons if item.startswith("完整分析资料审计："))
+
+        self.assertIn("同联赛同时间存在24场候选", reason)
+        self.assertIn("SofaScore访问受限", reason)
+        self.assertIn("无法取得球队ID和xG样本", reason)
+        self.assertIn("当前赔率源没有提供大小球盘口", reason)
+
     def test_squad_strength_and_absence_adjust_the_xg_prior(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         base_sources = {

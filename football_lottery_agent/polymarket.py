@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .collectors import RawMatch
+from .http_utils import read_url_text
 from .json_utils import loads_json
 from .team_identity import TEAM_ALIASES
 
@@ -198,7 +199,11 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         if age <= max_age_seconds:
             return cache_path.read_text(encoding="utf-8", errors="replace")
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
-    with urllib.request.urlopen(request, timeout=12) as response:
-        text = response.read().decode("utf-8", errors="replace")
+    try:
+        text = read_url_text(request, timeout=12)
+    except (OSError, urllib.error.URLError):
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8", errors="replace")
+        raise
     cache_path.write_text(text, encoding="utf-8")
     return text

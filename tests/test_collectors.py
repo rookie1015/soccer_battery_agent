@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
@@ -13,6 +14,8 @@ from football_lottery_agent.collectors import (
     _news_item_matches_both_teams,
     _odds_market_summary,
     _parse_rss,
+    _collection_audit,
+    _strength_source,
     fetch_sina_sfc,
     fetch_sporttery_issue_metadata,
     infer_signals,
@@ -23,6 +26,61 @@ from football_lottery_agent.collectors import (
 
 
 class CollectorTests(unittest.TestCase):
+    def test_strength_source_keeps_matched_identity_when_recent_profiles_are_empty(self) -> None:
+        squad = SimpleNamespace(
+            paper_rating=10.0,
+            current_rating=9.5,
+            recent_form_rating=None,
+            recent_form_samples=0,
+            attack_rating=5.0,
+            defence_rating=6.0,
+            availability_penalty=0.0,
+        )
+        strength = SimpleNamespace(
+            home=None,
+            away=None,
+            home_squad=squad,
+            away_squad=squad,
+            source={
+                "provider": "fotmob",
+                "matched_event_id": 123,
+                "home_team_id": 10,
+                "away_team_id": 20,
+                "match_reason": "provider_id_or_alias_pair",
+            },
+        )
+
+        source = _strength_source(strength)
+        audit = _collection_audit(
+            mode="full",
+            odds_source="default_placeholder",
+            news=[],
+            media_items=[],
+            injury_news=[],
+            detail=SinaDetail(odds=None, injury_notes=(), history_notes=(), intelligence_notes=(), raw={}),
+            strength_source=source,
+            polymarket=None,
+            market_source={},
+        )
+
+        self.assertEqual(source["status"], "partial")
+        self.assertEqual(source["identity_status"], "matched")
+        self.assertEqual(audit["xg"]["reason"], "provider_has_no_xg_samples")
+
+    def test_strength_source_reports_matched_no_samples_without_comparable_squads(self) -> None:
+        strength = SimpleNamespace(
+            home=None,
+            away=None,
+            home_squad=SimpleNamespace(),
+            away_squad=None,
+            source={"matched_event_id": 123, "home_team_id": 10, "away_team_id": 20},
+        )
+
+        source = _strength_source(strength)
+
+        self.assertEqual(source["status"], "matched_no_samples")
+        self.assertEqual(source["identity_status"], "matched")
+
     def test_fetch_sina_sfc_rejects_table_from_another_issue(self) -> None:
         html = """
         <input type="hidden" name="num" value="26087">

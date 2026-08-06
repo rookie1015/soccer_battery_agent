@@ -13,7 +13,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .bilingual_identity import fetch_dbpedia_club_aliases
 from .collectors import RawMatch
+from .http_utils import read_url_text
 from .json_utils import loads_json
 from .team_identity import (
     TEAM_ALIASES,
@@ -29,10 +31,28 @@ from .team_identity import (
 FOTMOB_BASE = "https://www.fotmob.com/api/data"
 FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
     "英超": ("premier league",),
+    "英冠": ("championship",),
+    "英甲": ("league one",),
+    "英乙": ("league two",),
+    "英联赛杯": ("efl cup", "league cup"),
+    "英足总杯": ("fa cup",),
     "西甲": ("laliga", "la liga"),
+    "西乙": ("laliga 2", "la liga 2", "segunda division"),
     "德甲": ("bundesliga",),
+    "德乙": ("2. bundesliga",),
     "意甲": ("serie a",),
+    "意乙": ("serie b",),
     "法甲": ("ligue 1",),
+    "法乙": ("ligue 2",),
+    "荷甲": ("eredivisie",),
+    "荷乙": ("eerste divisie",),
+    "葡超": ("liga portugal", "primeira liga"),
+    "苏超": ("premiership", "scottish premiership"),
+    "比甲": ("pro league", "first division a"),
+    "瑞超": ("allsvenskan",),
+    "挪超": ("eliteserien",),
+    "芬超": ("veikkausliiga",),
+    "丹超": ("superliga",),
     "欧冠": ("champions league", "champions league qualification"),
     "欧联": ("europa league", "europa league qualification"),
     "欧罗巴": ("europa league", "europa league qualification"),
@@ -120,6 +140,7 @@ def build_strength_for_matches(
     fotmob_events = _fetch_events_for_dates(matches, cache)
     _learn_unique_context_provider_aliases(matches, fotmob_events)
     _learn_one_sided_provider_aliases(matches, fotmob_events)
+    _learn_bilingual_provider_aliases(matches, fotmob_events, Path(cache_dir))
 
     result: dict[int, FixtureStrength] = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -544,14 +565,40 @@ def _match_fotmob_event(
             best = event
             best_reversed = reverse > direct
 
+    context_candidates = []
+    for event in events:
+        distance = _fotmob_kickoff_distance_hours(match, event)
+        if distance is None or distance > 0.25:
+            continue
+        context_candidates.append(
+            {
+                "event_id": event.get("id", ""),
+                "home": str((event.get("home") or {}).get("name") or ""),
+                "away": str((event.get("away") or {}).get("name") or ""),
+                "league": str(event.get("_provider_league_name") or ""),
+                "kickoff": str((event.get("status") or {}).get("utcTime") or ""),
+            }
+        )
+
     candidate_home = str(((best or {}).get("home") or {}).get("name") or "")
     candidate_away = str(((best or {}).get("away") or {}).get("name") or "")
     matched = best is not None and best_score >= 1.6
+    if matched:
+        match_reason = "provider_id_or_alias_pair"
+    elif len(context_candidates) > 1:
+        match_reason = "ambiguous_context_missing_aliases"
+    elif len(context_candidates) == 1:
+        match_reason = "unique_context_not_learned"
+    elif best:
+        match_reason = "no_fixture_at_kickoff"
+    else:
+        match_reason = "no_candidates"
     diagnostic = {
         "match_status": "matched" if matched else "unmatched",
         "match_confidence": round(max(0.0, min(1.0, best_score / 2.0)), 3),
-        "match_reason": "provider_id_or_alias_pair" if matched else ("low_confidence" if best else "no_candidates"),
-        "candidate_count": len(events),
+        "match_reason": match_reason,
+        "candidate_count": len(context_candidates),
+        "candidate_matches": context_candidates[:8],
         "candidate_event_id": (best or {}).get("id", ""),
         "candidate_home": candidate_home,
         "candidate_away": candidate_away,
@@ -644,6 +691,85 @@ def _learn_one_sided_provider_aliases(
                 ) or changed
         if not changed:
             break
+
+
+def _learn_bilingual_provider_aliases(
+    matches: list[RawMatch],
+    events_by_date: dict[str, list[dict[str, Any]]],
+    cache_dir: Path,
+) -> None:
+    """Resolve only ambiguous fixture groups through a bilingual entity source.
+
+    A label is never persisted on its own. Both translated team labels must
+    identify the same provider fixture and orientation inside the already
+    constrained competition/kickoff candidate group.
+    """
+    unresolved: list[tuple[RawMatch, list[dict[str, Any]]]] = []
+    names: set[str] = set()
+    for match in matches:
+        event, _, _ = _match_fotmob_event(match, events_by_date)
+        if event:
+            continue
+        candidates = [
+            item
+            for item in _fotmob_events_for_match(match, events_by_date)
+            if (distance := _fotmob_kickoff_distance_hours(match, item)) is not None and distance <= 0.25
+        ]
+        if len(candidates) <= 1 or len(candidates) > 40:
+            continue
+        unresolved.append((match, candidates))
+        names.update((match.home, match.away))
+    if not unresolved:
+        return
+
+    aliases_by_name: dict[str, tuple[str, ...]] = {}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = {
+            name: executor.submit(fetch_dbpedia_club_aliases, name, cache_dir)
+            for name in sorted(names)
+        }
+        for name, future in futures.items():
+            try:
+                aliases_by_name[name] = future.result()
+            except (OSError, TimeoutError, urllib.error.URLError):
+                aliases_by_name[name] = ()
+
+    claimed_events: set[str] = set()
+    for match, candidates in unresolved:
+        home_aliases = aliases_by_name.get(match.home, ())
+        away_aliases = aliases_by_name.get(match.away, ())
+        if not home_aliases or not away_aliases:
+            continue
+        matches_found: list[tuple[dict[str, Any], bool]] = []
+        for event in candidates:
+            home_side = event.get("home") or {}
+            away_side = event.get("away") or {}
+            direct = _aliases_match_side(home_aliases, home_side) and _aliases_match_side(away_aliases, away_side)
+            reverse = _aliases_match_side(home_aliases, away_side) and _aliases_match_side(away_aliases, home_side)
+            if direct:
+                matches_found.append((event, False))
+            if reverse:
+                matches_found.append((event, True))
+        unique = {
+            (str(event.get("id") or _fotmob_event_key(event)), reversed_sides)
+            for event, reversed_sides in matches_found
+        }
+        if len(unique) != 1:
+            continue
+        event, reversed_sides = matches_found[0]
+        event_key = _fotmob_event_key(event)
+        if event_key in claimed_events:
+            continue
+        claimed_events.add(event_key)
+        home_side = event.get("away" if reversed_sides else "home") or {}
+        away_side = event.get("home" if reversed_sides else "away") or {}
+        _register_fotmob_side(match.home, home_side, 0.98, "dbpedia_bilingual_fixture")
+        _register_fotmob_side(match.away, away_side, 0.98, "dbpedia_bilingual_fixture")
+
+
+def _aliases_match_side(aliases: tuple[str, ...], side: dict[str, Any]) -> bool:
+    provider_names = (str(side.get("name") or ""), str(side.get("longName") or ""))
+    return any(team_match_score(alias, provider_name) >= 0.8 for alias in aliases for provider_name in provider_names)
 
 
 def _team_ref(local_name: str, side: str, event: dict[str, Any] | None, overrides: dict[str, int]) -> TeamRef | None:
@@ -795,8 +921,7 @@ def _fetch_json(url: str, cache: Path, max_age_seconds: int) -> Any:
             return loads_json(path.read_text(encoding="utf-8", errors="replace"))
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
     try:
-        with urllib.request.urlopen(req, timeout=12) as response:
-            text = response.read().decode("utf-8", errors="replace")
+        text = read_url_text(req, timeout=12)
     except (OSError, urllib.error.URLError):
         if path.exists():
             return loads_json(path.read_text(encoding="utf-8", errors="replace"))

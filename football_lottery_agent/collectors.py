@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .json_utils import loads_json
+from .http_utils import read_url_text
 from .team_identity import (
     TEAM_ALIASES as SHARED_TEAM_ALIASES,
     configure_team_identity,
@@ -1028,12 +1029,15 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         }
     request = urllib.request.Request(url, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            text = response.read().decode("utf-8", errors="replace")
+        text = read_url_text(request, timeout=8)
     except urllib.error.HTTPError as exc:
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
         raise exc
+    except (OSError, urllib.error.URLError):
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8", errors="replace")
+        raise
     cache_path.write_text(text, encoding="utf-8")
     return text
 
@@ -1188,10 +1192,24 @@ def _strength_source(strength: Any) -> dict[str, Any]:
     away = getattr(strength, "away", None)
     home_squad = getattr(strength, "home_squad", None)
     away_squad = getattr(strength, "away_squad", None)
-    status = "complete" if home is not None and away is not None else "partial" if home is not None or away is not None else "unmatched"
+    source = dict(getattr(strength, "source", {}) or {})
+    identity_matched = bool(
+        source.get("matched_event_id")
+        and source.get("home_team_id")
+        and source.get("away_team_id")
+    )
+    if home is not None and away is not None:
+        status = "complete"
+    elif home is not None or away is not None or (home_squad is not None and away_squad is not None):
+        status = "partial"
+    elif identity_matched:
+        status = "matched_no_samples"
+    else:
+        status = "unmatched"
     return {
-        **getattr(strength, "source", {}),
+        **source,
         "status": status,
+        "identity_status": "matched" if identity_matched else "unmatched",
         "home_rating": getattr(home, "rating", None),
         "away_rating": getattr(away, "rating", None),
         "home_draw_rate": getattr(home, "draw_rate", None),
@@ -1286,6 +1304,11 @@ def _collection_audit(
     detail_raw = detail.raw if isinstance(detail.raw, dict) else {}
     home_xg = int(strength_source.get("home_xg_matches") or 0)
     away_xg = int(strength_source.get("away_xg_matches") or 0)
+    identity_matched = strength_source.get("identity_status") == "matched" or bool(
+        strength_source.get("matched_event_id")
+        and strength_source.get("home_team_id")
+        and strength_source.get("away_team_id")
+    )
     xg_status = "complete" if home_xg and away_xg else "partial" if home_xg or away_xg else "missing"
     injury_rows = int(detail_raw.get("injury_team1") or 0) + int(detail_raw.get("injury_team2") or 0)
     def provider_status(key: str, count: int) -> str:
@@ -1330,9 +1353,23 @@ def _collection_audit(
         "strength": {
             "status": strength_source.get("status") or ("not_requested" if mode == "simple" else "unmatched"),
             "provider": strength_source.get("provider") or "",
+            "reason": strength_source.get("match_reason") or "",
+            "candidate_count": int(strength_source.get("candidate_count") or 0),
+            "candidate_matches": list(strength_source.get("candidate_matches") or []),
             "sofascore_status": ((strength_source.get("sofascore") or {}).get("status") if isinstance(strength_source.get("sofascore"), dict) else ""),
         },
-        "xg": {"status": xg_status, "home_samples": home_xg, "away_samples": away_xg},
+        "xg": {
+            "status": xg_status,
+            "home_samples": home_xg,
+            "away_samples": away_xg,
+            "reason": (
+                "team_identity_unmatched"
+                if not home_xg and not away_xg and not identity_matched
+                else "provider_has_no_xg_samples"
+                if not home_xg and not away_xg
+                else ""
+            ),
+        },
         "polymarket": {"status": "available" if polymarket else "unmatched"},
     }
 

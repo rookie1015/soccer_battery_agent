@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .json_utils import loads_json
+from .http_utils import read_url_text
 from .team_identity import provider_team_match_score, register_team_alias
 
 
@@ -86,8 +87,7 @@ class SofaScoreClient:
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                text = response.read().decode("utf-8", errors="replace")
+            text = read_url_text(request, timeout=8)
         except urllib.error.HTTPError as exc:
             if exc.code in {401, 403, 429}:
                 self.blocked = True
