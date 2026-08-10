@@ -19,7 +19,7 @@ struct ReportSummaryView: View {
 
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 MetricTile(title: "比赛", value: "\(report.metrics.matchCount)", tint: .blue)
-                MetricTile(title: "单选", value: "\(report.metrics.singleCount)", tint: .indigo)
+                MetricTile(title: "模型单选", value: "\(report.metrics.singleCount)", tint: .indigo)
                 MetricTile(title: "低风险", value: "\(report.metrics.lowRiskCount)", tint: .green)
                 MetricTile(title: "平均置信", value: "\(report.metrics.averageConfidence, specifier: "%.1f")%", tint: .orange)
             }
@@ -89,7 +89,7 @@ private struct MatchRowView: View {
             Spacer(minLength: 8)
 
             VStack(alignment: .trailing, spacing: 4) {
-                Text(prediction.pickText)
+                Text(prediction.analysisPickText ?? prediction.pickText)
                     .font(.headline)
                     .foregroundStyle(.blue)
                 Text("\(prediction.confidence, specifier: "%.1f")%")
@@ -115,8 +115,16 @@ struct MatchDetailView: View {
                     Text("\(prediction.league) · \(prediction.kickoffDisplay)")
                         .foregroundStyle(.secondary)
                     HStack {
-                        RiskBadge(text: prediction.pickLabels.joined(separator: " / "))
+                        RiskBadge(text: (prediction.analysisPickLabels ?? prediction.pickLabels).joined(separator: " / "))
                         RiskBadge(text: "风险 \(prediction.risk)")
+                    }
+                    if prediction.budgetAdjusted == true {
+                        Text(
+                            "预算票面：\(prediction.pickLabels.joined(separator: " / "))（\(prediction.pickText)）" +
+                            (prediction.budgetForcedSingle == true ? " · 强制单选，不等于模型胆材" : "")
+                        )
+                        .font(.caption)
+                        .foregroundStyle(prediction.budgetForcedSingle == true ? Color.orange : Color.secondary)
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)

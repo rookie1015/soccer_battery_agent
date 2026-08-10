@@ -23,14 +23,16 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 
 
 def render_analysis_html(plan: TicketPlan) -> str:
-    singles = sum(1 for pred in plan.predictions if len(pred.picks) == 1)
+    singles = sum(1 for pred in plan.predictions if len(pred.analysis_picks) == 1)
+    forced_singles = sum(1 for pred in plan.predictions if pred.budget_forced_single)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
     cards = "\n".join(
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
-            _metric_card("单选", str(singles), "模型倾向最明确"),
+            _metric_card("模型单选", str(singles), "预算压缩前"),
+            _metric_card("强制单选", str(forced_singles), "仅由预算压缩产生"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
     )
@@ -153,7 +155,16 @@ def _analysis_row(prediction: Prediction, plan: TicketPlan) -> str:
 def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
     match = prediction.match
     keep = match.seq in set(plan.choose9_keep)
-    pick_labels = " / ".join(OUTCOME_LABELS[pick] for pick in prediction.picks)
+    pick_labels = " / ".join(OUTCOME_LABELS[pick] for pick in prediction.analysis_picks)
+    budget_html = ""
+    if prediction.budget_adjusted:
+        budget_labels = " / ".join(OUTCOME_LABELS[pick] for pick in prediction.picks)
+        warning = " · 预算强制单选，不等于模型胆材" if prediction.budget_forced_single else ""
+        budget_html = (
+            f'<div class="analysis-result"><span>预算票面</span>'
+            f'<strong>{escape(budget_labels)}（{escape(prediction.pick_text)}）</strong>'
+            f'<small>整票成本压缩{escape(warning)}</small></div>'
+        )
     reasons = "".join(f"<li>{escape(reason)}</li>" for reason in prediction.reasons)
     if not reasons:
         reasons = "<li>当前没有可展示的结论依据。</li>"
@@ -169,10 +180,11 @@ def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
       </summary>
       <div class="match-tab-content">
         <div class="analysis-result">
-          <span>分析结论</span>
-          <strong>{escape(pick_labels)}（{escape(prediction.pick_text)}）</strong>
+          <span>模型建议</span>
+          <strong>{escape(pick_labels)}（{escape(prediction.analysis_pick_text)}）</strong>
           <small>风险：{escape(prediction.risk)} · 任九：{"保留" if keep else "剔除"}</small>
         </div>
+        {budget_html}
         <div class="analysis-probabilities">
           <span class="detail-label">胜平负概率</span>
           {_probability_bars(prediction)}

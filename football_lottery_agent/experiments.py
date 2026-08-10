@@ -516,8 +516,8 @@ def fit_selection_policy(samples: Iterable[ExperimentSample]) -> dict[str, float
     items = list(samples)
     best = dict(DEFAULT_SELECTION_POLICY)
     best_loss = _selection_policy_metrics(items, best)["loss"]
-    for single_top in (0.50, 0.52, 0.54):
-        for single_spread in (0.12, 0.14, 0.16):
+    for single_top in (0.56, 0.58, 0.60, 0.62):
+        for single_spread in (0.16, 0.18, 0.20, 0.22):
             for double_top in (0.42, 0.44, 0.46):
                 for double_spread in (0.04, 0.06, 0.08):
                     for triple_gap in (0.015, 0.02, 0.03):

@@ -9,6 +9,7 @@ from .predictor import SELECTION_OUTCOME_LABELS, SELECTION_REASON_PREFIX, _draw_
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
 STAKE_PER_LINE_YUAN = 2
+MIN_SAFE_BUDGET_SINGLE_PROBABILITY = 0.60
 
 
 def build_ticket_plan(
@@ -87,27 +88,43 @@ def _fit_predictions_to_budget(
     # former greedy loop could remove a locally cheap option and still end with
     # a lower global coverage probability. States are keyed by ticket units, so
     # the search remains small even for fourteen fixtures.
-    states: dict[int, tuple[float, tuple[Prediction, ...]]] = {1: (0.0, ())}
+    # State value is (number of unsafe budget-forced singles, log coverage,
+    # selections).  Fewer forced singles wins before raw coverage, preventing
+    # a 43%-50% uncertain fixture from being presented as a normal banker when
+    # an equally affordable safer compression exists elsewhere.
+    states: dict[int, tuple[int, float, tuple[Prediction, ...]]] = {1: (0, 0.0, ())}
     for prediction in predictions:
         options = _prediction_budget_options(prediction)
-        next_states: dict[int, tuple[float, tuple[Prediction, ...]]] = {}
-        for units, (score, selected) in states.items():
+        next_states: dict[int, tuple[int, float, tuple[Prediction, ...]]] = {}
+        for units, (forced_singles, score, selected) in states.items():
             for option in options:
                 new_units = units * max(1, len(option.picks))
                 if new_units > max_units:
                     continue
                 coverage = sum(_coverage_value(option, outcome) for outcome in option.picks)
                 option_score = log(max(coverage, 1e-12))
-                candidate = (score + option_score, (*selected, option))
+                candidate = (
+                    forced_singles + int(option.budget_forced_single),
+                    score + option_score,
+                    (*selected, option),
+                )
                 existing = next_states.get(new_units)
-                if existing is None or candidate[0] > existing[0]:
+                if existing is None or _budget_state_key(candidate) > _budget_state_key(existing):
                     next_states[new_units] = candidate
         states = next_states
         if not states:
             return tuple(_single_only(prediction) for prediction in predictions)
 
-    _, best = max(states.items(), key=lambda item: (item[1][0], item[0]))
-    return best[1]
+    _, best = max(
+        states.items(),
+        key=lambda item: (*_budget_state_key(item[1]), item[0]),
+    )
+    return best[2]
+
+
+def _budget_state_key(state: tuple[int, float, tuple[Prediction, ...]]) -> tuple[int, float]:
+    forced_singles, score, _ = state
+    return -forced_singles, score
 
 
 def _prediction_budget_options(prediction: Prediction) -> tuple[Prediction, ...]:
@@ -150,6 +167,11 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
     )
     downgraded = ranked_selected[:-1]
     removed = ranked_selected[-1]
+    original_picks = prediction.analysis_picks
+    forced_single = (
+        prediction.budget_forced_single
+        or (len(downgraded) == 1 and not _safe_budget_single(prediction, downgraded[0]))
+    )
     remaining_text = "/".join(downgraded)
     budget_note = (
         f"预算调整：为控制整张票总成本，本场移除{SELECTION_OUTCOME_LABELS[removed]}({removed}) "
@@ -161,8 +183,43 @@ def _downgrade_prediction(prediction: Prediction) -> Prediction:
         for reason in prediction.reasons
         if not reason.startswith(SELECTION_REASON_PREFIX)
     )
-    adjusted = replace(prediction, picks=downgraded, reasons=(*reasons, budget_note))
+    adjusted = replace(
+        prediction,
+        picks=downgraded,
+        original_picks=original_picks,
+        reasons=(*reasons, budget_note),
+        risk="高" if forced_single else prediction.risk,
+        budget_adjusted=True,
+        budget_forced_single=forced_single,
+        budget_removed_picks=(*prediction.budget_removed_picks, removed),
+    )
     return replace(adjusted, reasons=(selection_reason(adjusted), *adjusted.reasons))
+
+
+def _safe_budget_single(prediction: Prediction, outcome: str) -> bool:
+    """Only allow budget compression to call a genuinely strong result a single."""
+    if prediction.draw_guard:
+        return False
+    probabilities = prediction.probabilities
+    top_outcome, top_probability = max(probabilities.items(), key=lambda item: item[1])
+    if outcome != top_outcome or top_probability < MIN_SAFE_BUDGET_SINGLE_PROBABILITY:
+        return False
+
+    math_probabilities = prediction.dixon_coles_probabilities
+    if prediction.dixon_coles_quality_score >= 0.50 and math_probabilities:
+        math_top = max(math_probabilities, key=math_probabilities.get)
+        if math_top != top_outcome:
+            return False
+
+    audit = prediction.match.sources.get("collection_audit") if isinstance(prediction.match.sources, dict) else None
+    if isinstance(audit, dict) and audit.get("mode") == "full":
+        strength = audit.get("strength") if isinstance(audit.get("strength"), dict) else {}
+        xg = audit.get("xg") if isinstance(audit.get("xg"), dict) else {}
+        strength_ok = strength.get("status") in {"complete", "partial"}
+        xg_ok = xg.get("status") in {"complete", "partial"}
+        if not strength_ok and not xg_ok:
+            return False
+    return True
 
 
 def _coverage_value(prediction: Prediction, outcome: str) -> float:

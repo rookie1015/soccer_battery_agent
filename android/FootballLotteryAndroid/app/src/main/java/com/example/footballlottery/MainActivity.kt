@@ -151,6 +151,8 @@ data class ModelCalibration(
 data class ReportMetrics(
     val matchCount: Int,
     val singleCount: Int,
+    val ticketSingleCount: Int,
+    val budgetForcedSingleCount: Int,
     val lowRiskCount: Int,
     val averageConfidence: Double,
 )
@@ -163,6 +165,11 @@ data class MatchPrediction(
     val away: String,
     val pickText: String,
     val pickLabels: List<String>,
+    val analysisPickText: String,
+    val analysisPickLabels: List<String>,
+    val budgetAdjusted: Boolean,
+    val budgetForcedSingle: Boolean,
+    val drawGuard: Boolean,
     val confidence: Double,
     val risk: String,
     val probabilities: OutcomeProbabilities,
@@ -756,6 +763,8 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
+                ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
+                budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -798,6 +807,12 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             away = json.optString("away"),
             pickText = json.optString("pick_text"),
             pickLabels = json.optJSONArray("pick_labels").orEmptyArray().toStringList(),
+            analysisPickText = json.optString("analysis_pick_text", json.optString("pick_text")),
+            analysisPickLabels = json.optJSONArray("analysis_pick_labels").orEmptyArray().toStringList()
+                .ifEmpty { json.optJSONArray("pick_labels").orEmptyArray().toStringList() },
+            budgetAdjusted = json.optBoolean("budget_adjusted"),
+            budgetForcedSingle = json.optBoolean("budget_forced_single"),
+            drawGuard = json.optBoolean("draw_guard"),
             confidence = json.optDouble("confidence"),
             risk = json.optString("risk"),
             probabilities = OutcomeProbabilities(
@@ -973,6 +988,8 @@ class FootballLotteryApi(private val baseUrl: String) {
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
+                ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
+                budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1015,6 +1032,12 @@ class FootballLotteryApi(private val baseUrl: String) {
             away = json.optString("away"),
             pickText = json.optString("pick_text"),
             pickLabels = json.optJSONArray("pick_labels").orEmptyArray().toStringList(),
+            analysisPickText = json.optString("analysis_pick_text", json.optString("pick_text")),
+            analysisPickLabels = json.optJSONArray("analysis_pick_labels").orEmptyArray().toStringList()
+                .ifEmpty { json.optJSONArray("pick_labels").orEmptyArray().toStringList() },
+            budgetAdjusted = json.optBoolean("budget_adjusted"),
+            budgetForcedSingle = json.optBoolean("budget_forced_single"),
+            drawGuard = json.optBoolean("draw_guard"),
             confidence = json.optDouble("confidence"),
             risk = json.optString("risk"),
             probabilities = OutcomeProbabilities(
@@ -1684,7 +1707,14 @@ private fun SummaryCard(report: AnalysisReport) {
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MetricTile("比赛", report.metrics.matchCount.toString(), Modifier.weight(1f))
-                MetricTile(if (isReview) "单选命中" else "单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
+                MetricTile(if (isReview) "模型单选命中" else "模型单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
+            }
+            if (!isReview && report.metrics.budgetForcedSingleCount > 0) {
+                Text(
+                    text = "预算票面含 ${report.metrics.budgetForcedSingleCount} 场强制单选；这些场次不属于模型胆材。",
+                    color = Color(0xFFB54708),
+                    style = MaterialTheme.typography.bodySmall,
+                )
             }
             if (isReview) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -1811,8 +1841,12 @@ private fun PredictionCard(
     prediction: MatchPrediction,
     isReview: Boolean = false,
     choose9Keep: Set<Int> = emptySet(),
+    expandCommand: PredictionExpandCommand? = null,
 ) {
     var expanded by remember(prediction.seq, prediction.home, prediction.away) { mutableStateOf(false) }
+    LaunchedEffect(expandCommand?.revision) {
+        expandCommand?.let { command -> expanded = command.expanded }
+    }
     val cardModifier = if (isReview) {
         Modifier.fillMaxWidth()
     } else {
@@ -1874,6 +1908,14 @@ private fun PredictionCard(
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleSmall,
                 )
+                budgetSelectionText(prediction)?.let { text ->
+                    Text(
+                        text = text,
+                        color = if (prediction.budgetForcedSingle) Color(0xFFB54708) else Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = if (prediction.budgetForcedSingle) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
                 Text(
                     text = "任选九选择：" + if (prediction.seq in choose9Keep) "保留" else "未选",
                     style = MaterialTheme.typography.bodySmall,
@@ -1910,6 +1952,14 @@ private fun PredictionCard(
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleSmall,
                 )
+                budgetSelectionText(prediction)?.let { text ->
+                    Text(
+                        text = text,
+                        color = if (prediction.budgetForcedSingle) Color(0xFFB54708) else Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = if (prediction.budgetForcedSingle) FontWeight.Bold else FontWeight.Normal,
+                    )
+                }
                 Text(
                     text = "风险 ${prediction.risk} · 任九${if (prediction.seq in choose9Keep) "保留" else "剔除"}",
                     color = Color(0xFF667085),
@@ -1968,6 +2018,11 @@ private fun PredictionCard(
     }
 }
 
+private data class PredictionExpandCommand(
+    val expanded: Boolean,
+    val revision: Int,
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun HistoryGroupCard(
@@ -1978,6 +2033,8 @@ private fun HistoryGroupCard(
     onSelect: (HistoryEntry) -> Unit,
     onRequestDelete: ((List<HistoryEntry>) -> Unit)?,
 ) {
+    var allPredictionsExpanded by remember(selectedEntry?.id) { mutableStateOf(false) }
+    var predictionExpandRevision by remember(selectedEntry?.id) { mutableStateOf(0) }
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
@@ -2022,16 +2079,40 @@ private fun HistoryGroupCard(
                     if (selectedEntry?.id == entry.id) {
                         entry.report?.let { report ->
                             SummaryCard(report)
-                            Text(
-                                text = if (entry.kind == "review") "逐场复盘" else "逐场预测",
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = if (entry.kind == "review") "逐场复盘" else "逐场预测",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (entry.kind != "review") {
+                                    TextButton(
+                                        onClick = {
+                                            allPredictionsExpanded = !allPredictionsExpanded
+                                            predictionExpandRevision += 1
+                                        },
+                                    ) {
+                                        Text(if (allPredictionsExpanded) "一键收起" else "一键查看")
+                                    }
+                                }
+                            }
                             report.predictions.forEach { prediction ->
                                 PredictionCard(
                                     prediction = prediction,
                                     isReview = entry.kind == "review",
                                     choose9Keep = report.choose9Keep.toSet(),
+                                    expandCommand = if (entry.kind == "review") {
+                                        null
+                                    } else {
+                                        PredictionExpandCommand(
+                                            expanded = allPredictionsExpanded,
+                                            revision = predictionExpandRevision,
+                                        )
+                                    },
                                 )
                             }
                         } ?: EmptyCard("历史详情", "这条历史记录暂时没有可结构化展示的数据。")
@@ -2092,8 +2173,17 @@ private fun HistoryEntryCard(
 }
 
 private fun recommendationText(prediction: MatchPrediction): String {
+    val labels = prediction.analysisPickLabels.ifEmpty { prediction.analysisPickText.split("/") }
+    return "模型建议：${labels.joinToString(" / ")}（${prediction.analysisPickText}）"
+}
+
+private fun budgetSelectionText(prediction: MatchPrediction): String? {
+    if (!prediction.budgetAdjusted) {
+        return null
+    }
     val labels = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }
-    return "建议选择：${labels.joinToString(" / ")}（${prediction.pickText}）"
+    val warning = if (prediction.budgetForcedSingle) "；预算强制单选，不等于模型胆材" else ""
+    return "预算票面：${labels.joinToString(" / ")}（${prediction.pickText}）$warning"
 }
 
 private fun resultText(prediction: MatchPrediction): String {

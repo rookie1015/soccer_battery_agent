@@ -57,14 +57,14 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append("")
     lines.append("## 14场逐场建议")
     lines.append("")
-    lines.append("| 序号 | 联赛 | 对阵 | 推荐 | 置信度 | 概率(3/1/0) |")
-    lines.append("| --- | --- | --- | --- | ---: | --- |")
+    lines.append("| 序号 | 联赛 | 对阵 | 模型建议 | 预算票面 | 置信度 | 概率(3/1/0) |")
+    lines.append("| --- | --- | --- | --- | --- | ---: | --- |")
     for pred in plan.predictions:
         match = pred.match
         prob_text = f"{pred.probabilities['3']:.0%}/{pred.probabilities['1']:.0%}/{pred.probabilities['0']:.0%}"
         lines.append(
             f"| {match.seq} | {match.league} | {match.home} vs {match.away} | "
-            f"{pred.pick_text} | {pred.confidence:.1f}% | {prob_text} |"
+            f"{pred.analysis_pick_text} | {pred.pick_text} | {pred.confidence:.1f}% | {prob_text} |"
         )
 
     lines.append("")
@@ -96,9 +96,12 @@ def _render_prediction(prediction: Prediction) -> list[str]:
         f"### {match.seq}. {match.home} vs {match.away}",
         "",
         f"- 比赛：{match.league}，{match.kickoff.isoformat()}",
-        f"- 推荐：`{prediction.pick_text}`（{_pick_labels(prediction.picks)}）",
+        f"- 模型建议：`{prediction.analysis_pick_text}`（{_pick_labels(prediction.analysis_picks)}）",
         f"- 置信度：{prediction.confidence:.1f}%",
     ]
+    if prediction.budget_adjusted:
+        warning = "，预算强制单选，不能视为模型胆材" if prediction.budget_forced_single else ""
+        lines.append(f"- 预算票面：`{prediction.pick_text}`（{_pick_labels(prediction.picks)}）{warning}")
     for reason in prediction.reasons:
         lines.append(f"- {reason}")
     return lines

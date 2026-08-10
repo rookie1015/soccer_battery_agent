@@ -364,9 +364,11 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         seq = int(cells[0])
         home, away = _split_matchup(cells[2])
         legacy_layout = len(cells) >= 8
-        confidence_cell = cells[5] if legacy_layout else cells[4]
-        probability_cell = cells[7] if legacy_layout else cells[5]
-        pick_text = cells[3]
+        dual_selection_layout = len(cells) == 7
+        confidence_cell = cells[5] if legacy_layout or dual_selection_layout else cells[4]
+        probability_cell = cells[7] if legacy_layout else cells[6] if dual_selection_layout else cells[5]
+        analysis_pick_text = cells[3]
+        pick_text = cells[4] if dual_selection_layout else analysis_pick_text
         picks = tuple(pick for pick in pick_text.split("/") if pick in OUTCOME_LABELS)
         probabilities = _parse_probabilities(probability_cell)
         reasons = list(reasons_by_seq.get(seq, []))
@@ -386,6 +388,12 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
                 "away": away,
                 "pick_text": pick_text,
                 "pick_labels": [OUTCOME_LABELS.get(pick, pick) for pick in pick_text.split("/") if pick],
+                "analysis_pick_text": analysis_pick_text,
+                "analysis_pick_labels": [
+                    OUTCOME_LABELS.get(pick, pick) for pick in analysis_pick_text.split("/") if pick
+                ],
+                "budget_adjusted": pick_text != analysis_pick_text,
+                "budget_forced_single": pick_text != analysis_pick_text and "/" not in pick_text,
                 "confidence": _parse_percent(confidence_cell),
                 "risk": cells[6] if legacy_layout else "",
                 "probabilities": probabilities,
@@ -402,7 +410,9 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         return None
 
     low_risk = sum(1 for prediction in predictions if prediction["risk"] == "低")
-    singles = sum(1 for prediction in predictions if "/" not in str(prediction["pick_text"]))
+    singles = sum(1 for prediction in predictions if "/" not in str(prediction["analysis_pick_text"]))
+    ticket_singles = sum(1 for prediction in predictions if "/" not in str(prediction["pick_text"]))
+    forced_singles = sum(1 for prediction in predictions if prediction["budget_forced_single"])
     avg_confidence = sum(float(prediction["confidence"]) for prediction in predictions) / len(predictions)
     metadata = _parse_analysis_metadata(markdown_text)
     return {
@@ -416,6 +426,8 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         "metrics": {
             "match_count": len(predictions),
             "single_count": singles,
+            "ticket_single_count": ticket_singles,
+            "budget_forced_single_count": forced_singles,
             "low_risk_count": low_risk,
             "average_confidence": round(avg_confidence, 1),
         },
@@ -429,7 +441,15 @@ def _parse_analysis_reasons(markdown_text: str) -> dict[int, list[str]]:
     result: dict[int, list[str]] = {}
     in_details = False
     current_seq: int | None = None
-    metadata_prefixes = ("比赛：", "推荐：", "比分倾向：", "置信度：", "风险：")
+    metadata_prefixes = (
+        "比赛：",
+        "推荐：",
+        "模型建议：",
+        "预算票面：",
+        "比分倾向：",
+        "置信度：",
+        "风险：",
+    )
     for line in markdown_text.splitlines():
         if line.strip() == "## 详细理由":
             in_details = True
@@ -821,6 +841,8 @@ def _restore_analysis_recommendations(
         return None
 
     saved_picks: dict[int, tuple[str, ...]] = {}
+    saved_original_picks: dict[int, tuple[str, ...]] = {}
+    saved_budget_flags: dict[int, tuple[bool, bool]] = {}
     for saved in saved_predictions:
         if not isinstance(saved, dict):
             return None
@@ -832,6 +854,16 @@ def _restore_analysis_recommendations(
         if not picks:
             return None
         saved_picks[seq] = picks
+        original_picks = tuple(
+            item
+            for item in str(saved.get("analysis_pick_text") or saved.get("pick_text") or "").split("/")
+            if item in OUTCOME_LABELS
+        )
+        saved_original_picks[seq] = original_picks or picks
+        saved_budget_flags[seq] = (
+            bool(saved.get("budget_adjusted")),
+            bool(saved.get("budget_forced_single")),
+        )
 
     current_sequences = {prediction.match.seq for prediction in plan.predictions}
     if set(saved_picks) != current_sequences:
@@ -844,7 +876,16 @@ def _restore_analysis_recommendations(
 
     return TicketPlan(
         issue=plan.issue,
-        predictions=tuple(replace(prediction, picks=saved_picks[prediction.match.seq]) for prediction in plan.predictions),
+        predictions=tuple(
+            replace(
+                prediction,
+                picks=saved_picks[prediction.match.seq],
+                original_picks=saved_original_picks[prediction.match.seq],
+                budget_adjusted=saved_budget_flags[prediction.match.seq][0],
+                budget_forced_single=saved_budget_flags[prediction.match.seq][1],
+            )
+            for prediction in plan.predictions
+        ),
         choose9_keep=saved_keep,
         choose9_drop=saved_drop,
     )
@@ -878,6 +919,7 @@ def _serialize_review_report(
             prediction["final_result"] = row.result.outcome
             prediction["final_result_label"] = OUTCOME_LABELS[row.result.outcome]
             prediction["outcome_hit"] = row.outcome_hit
+            prediction["analysis_outcome_hit"] = row.analysis_outcome_hit
             prediction["diagnostic_tags"] = list(row.diagnostic_tags)
             prediction["post_match_evidence"] = normalize_evidence(
                 (post_match_evidence or {}).get(row.prediction.match.seq)
@@ -888,6 +930,10 @@ def _serialize_review_report(
     report["metrics"] = {
         "match_count": review.total,
         "single_count": review.single_hits,
+        "ticket_single_count": sum(
+            1 for row in review.rows if len(row.prediction.picks) == 1 and row.outcome_hit
+        ),
+        "budget_forced_single_count": review.budget_caused_misses,
         "low_risk_count": review.outcome_hits,
         "average_confidence": round(review.outcome_hits / review.total * 100, 1) if review.total else 0.0,
     }

@@ -7,6 +7,9 @@ from unittest.mock import Mock, patch
 
 from football_lottery_agent import standalone_api
 from football_lottery_agent.history import archive_report, load_history_entries
+from football_lottery_agent.loader import load_issue
+from football_lottery_agent.report import render_markdown
+from football_lottery_agent.strategy import build_ticket_plan
 
 
 class StandaloneApiTests(unittest.TestCase):
@@ -476,6 +479,21 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertIn("综合赔率和基本面", reasons[1])
         self.assertIn("双方近期状态接近", reasons[2])
         self.assertTrue(all(not reason.startswith("比赛：") for reason in reasons))
+
+    def test_history_parser_supports_separate_model_and_budget_selections(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=128)
+
+        parsed = standalone_api._parse_history_report(
+            render_markdown(plan),
+            plan.issue.issue,
+            "analysis",
+        )
+
+        self.assertIsNotNone(parsed)
+        first = parsed["predictions"][0]
+        self.assertEqual(first["analysis_pick_text"], plan.predictions[0].analysis_pick_text)
+        self.assertEqual(first["pick_text"], plan.predictions[0].pick_text)
+        self.assertEqual(first["budget_adjusted"], plan.predictions[0].budget_adjusted)
 
     def test_history_parses_purchase_deadline_from_new_markdown(self) -> None:
         markdown_text = _analysis_markdown("26095", "3", tuple(range(1, 10))).replace(

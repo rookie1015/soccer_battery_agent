@@ -53,6 +53,7 @@ class MatchReview:
     prediction: Prediction
     result: MatchResult
     outcome_hit: bool
+    analysis_outcome_hit: bool
     top_score_hit: bool
     score_top3_hit: bool
     bucket: str
@@ -74,11 +75,19 @@ class ReviewReport:
 
     @property
     def single_rows(self) -> tuple[MatchReview, ...]:
-        return tuple(row for row in self.rows if len(row.prediction.picks) == 1)
+        return tuple(row for row in self.rows if len(row.prediction.analysis_picks) == 1)
 
     @property
     def single_hits(self) -> int:
-        return sum(1 for row in self.single_rows if row.outcome_hit)
+        return sum(1 for row in self.single_rows if row.analysis_outcome_hit)
+
+    @property
+    def budget_caused_misses(self) -> int:
+        return sum(
+            1
+            for row in self.rows
+            if not row.outcome_hit and row.analysis_outcome_hit and row.prediction.budget_adjusted
+        )
 
     @property
     def top_score_hits(self) -> int:
@@ -272,6 +281,7 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
                 prediction=prediction,
                 result=result,
                 outcome_hit=result.outcome in prediction.picks,
+                analysis_outcome_hit=result.outcome in prediction.analysis_picks,
                 top_score_hit=result.score_exact and bool(score_texts and result.score_text == score_texts[0]),
                 score_top3_hit=result.score_exact and result.score_text in score_texts,
                 bucket=bucket,
@@ -298,6 +308,7 @@ def render_review_markdown(
     lines.append("")
     lines.append(f"- 胜平负命中：{report.outcome_hits}/{report.total}（{_rate(report.outcome_hits, report.total)}）")
     lines.append(f"- 单选命中：{report.single_hits}/{single_total}（{_rate(report.single_hits, single_total)}）")
+    lines.append(f"- 预算压缩导致漏判：{report.budget_caused_misses} 场")
     lines.append(f"- 比分 Top1 命中：{report.top_score_hits}/{report.score_total}（{_rate(report.top_score_hits, report.score_total)}）")
     lines.append(f"- 比分 Top3 命中：{report.score_top3_hits}/{report.score_total}（{_rate(report.score_top3_hits, report.score_total)}）")
     lines.append(f"- 任九保留命中：{report.keep_hits}/{keep_total}（{_rate(report.keep_hits, keep_total)}）")
@@ -322,7 +333,7 @@ def render_review_markdown(
         outcome_mark = "命中" if row.outcome_hit else "未中"
         lines.append(
             f"| {match.seq} | {match.home} vs {match.away} | {row.result.score_text} | {actual} | "
-            f"{prediction.pick_text} | {outcome_mark} | {_scoreline_summary(prediction)} | {row.bucket} | {'、'.join(row.diagnostic_tags) or '-'} | {_evidence_summary(evidence_by_seq.get(match.seq, []))} |"
+            f"{_review_pick_text(prediction)} | {outcome_mark} | {_scoreline_summary(prediction)} | {row.bucket} | {'、'.join(row.diagnostic_tags) or '-'} | {_evidence_summary(evidence_by_seq.get(match.seq, []))} |"
         )
     lines.append("")
     lines.append("## 需要关注")
@@ -364,6 +375,10 @@ def _diagnostic_tags(prediction: Prediction, result: MatchResult) -> tuple[str, 
     top_outcome, top_probability = max(prediction.probabilities.items(), key=lambda item: item[1])
     if result.outcome == "1" and "1" not in prediction.picks:
         tags.append("平局漏判")
+    if prediction.budget_adjusted and result.outcome in prediction.analysis_picks:
+        tags.append("预算压缩导致漏判")
+    elif prediction.budget_forced_single:
+        tags.append("预算强制单选")
     if len(prediction.picks) == 1:
         tags.append("单选覆盖不足")
     if prediction.risk == "低" or prediction.confidence >= 56.0:
@@ -373,6 +388,12 @@ def _diagnostic_tags(prediction: Prediction, result: MatchResult) -> tuple[str, 
     if actual_probability <= 0.25:
         tags.append("冷门结果")
     return tuple(tags or ["赛前概率偏差"])
+
+
+def _review_pick_text(prediction: Prediction) -> str:
+    if not prediction.budget_adjusted:
+        return prediction.pick_text
+    return f"模型 {prediction.analysis_pick_text} → 预算 {prediction.pick_text}"
 
 
 def write_review_report(

@@ -86,12 +86,16 @@ struct AnalysisReport: Decodable, Identifiable {
 struct ReportMetrics: Decodable {
     let matchCount: Int
     let singleCount: Int
+    let ticketSingleCount: Int?
+    let budgetForcedSingleCount: Int?
     let lowRiskCount: Int
     let averageConfidence: Double
 
     enum CodingKeys: String, CodingKey {
         case matchCount = "match_count"
         case singleCount = "single_count"
+        case ticketSingleCount = "ticket_single_count"
+        case budgetForcedSingleCount = "budget_forced_single_count"
         case lowRiskCount = "low_risk_count"
         case averageConfidence = "average_confidence"
     }
@@ -109,6 +113,11 @@ struct MatchPrediction: Decodable, Identifiable {
     let pickText: String
     let pickLabels: [String]
     let picks: [String]
+    let analysisPickText: String?
+    let analysisPickLabels: [String]?
+    let budgetAdjusted: Bool?
+    let budgetForcedSingle: Bool?
+    let drawGuard: Bool?
     let confidence: Double
     let risk: String
     let probabilities: OutcomeProbabilities
@@ -125,6 +134,11 @@ struct MatchPrediction: Decodable, Identifiable {
         case pickText = "pick_text"
         case pickLabels = "pick_labels"
         case picks
+        case analysisPickText = "analysis_pick_text"
+        case analysisPickLabels = "analysis_pick_labels"
+        case budgetAdjusted = "budget_adjusted"
+        case budgetForcedSingle = "budget_forced_single"
+        case drawGuard = "draw_guard"
         case confidence
         case risk
         case probabilities

@@ -10,7 +10,9 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     if not isinstance(foreign_odds_status, dict) or not foreign_odds_status.get("requested"):
         foreign_odds_status = None
     low_risk = sum(1 for prediction in predictions if prediction.risk == "低")
-    singles = sum(1 for prediction in predictions if len(prediction.picks) == 1)
+    model_singles = sum(1 for prediction in predictions if len(prediction.analysis_picks) == 1)
+    ticket_singles = sum(1 for prediction in predictions if len(prediction.picks) == 1)
+    forced_singles = sum(1 for prediction in predictions if prediction.budget_forced_single)
     avg_confidence = (
         sum(prediction.confidence for prediction in predictions) / len(predictions)
         if predictions
@@ -18,7 +20,9 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     )
     metrics: dict[str, object] = {
         "match_count": len(predictions),
-        "single_count": singles,
+        "single_count": model_singles,
+        "ticket_single_count": ticket_singles,
+        "budget_forced_single_count": forced_singles,
         "average_confidence": round(avg_confidence, 1),
     }
     if include_review_fields:
@@ -50,6 +54,13 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         "pick_text": prediction.pick_text,
         "pick_labels": [OUTCOME_LABELS[pick] for pick in prediction.picks],
         "picks": list(prediction.picks),
+        "analysis_pick_text": prediction.analysis_pick_text,
+        "analysis_pick_labels": [OUTCOME_LABELS[pick] for pick in prediction.analysis_picks],
+        "analysis_picks": list(prediction.analysis_picks),
+        "budget_adjusted": prediction.budget_adjusted,
+        "budget_forced_single": prediction.budget_forced_single,
+        "budget_removed_picks": list(prediction.budget_removed_picks),
+        "draw_guard": prediction.draw_guard,
         "confidence": prediction.confidence,
         "probabilities": {
             "home": round(prediction.probabilities["3"] * 100, 1),

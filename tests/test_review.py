@@ -1,11 +1,13 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.review import (
     MatchResult,
+    _diagnostic_tags,
     build_review,
     fetch_sporttery_results,
     fetch_results_with_fallbacks,
@@ -15,7 +17,7 @@ from football_lottery_agent.review import (
     parse_sporttery_result_row,
     render_review_markdown,
 )
-from football_lottery_agent.strategy import build_ticket_plan
+from football_lottery_agent.strategy import _fit_predictions_to_budget, build_ticket_plan
 
 
 class ReviewTests(unittest.TestCase):
@@ -216,6 +218,23 @@ class ReviewTests(unittest.TestCase):
         self.assertIn("比分 Top3 命中", markdown)
         self.assertIn("错因记录", markdown)
         self.assertIn("| 序号 | 对阵 | 最终比分 | 彩果 |", markdown)
+
+    def test_review_distinguishes_budget_caused_miss(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        prediction = replace(
+            plan.predictions[0],
+            probabilities={"3": 0.43, "1": 0.27, "0": 0.30},
+            picks=("3", "1", "0"),
+            original_picks=("3", "1", "0"),
+            selection_scores={},
+        )
+        forced = _fit_predictions_to_budget((prediction,), max_ticket_cost_yuan=2)[0]
+        result = MatchResult(seq=forced.match.seq, home_goals=0, away_goals=0)
+
+        tags = _diagnostic_tags(forced, result)
+
+        self.assertIn("预算压缩导致漏判", tags)
+        self.assertIn("平局漏判", tags)
 
 
 def _result_for_prediction(prediction):

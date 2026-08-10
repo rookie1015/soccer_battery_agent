@@ -112,10 +112,27 @@ class Prediction:
     risk: str
     reasons: tuple[str, ...]
     selection_scores: dict[Outcome, float] = field(default_factory=dict)
+    original_picks: tuple[Outcome, ...] = ()
+    dixon_coles_probabilities: dict[Outcome, float] = field(default_factory=dict)
+    dixon_coles_quality: str = ""
+    dixon_coles_quality_score: float = 0.0
+    budget_adjusted: bool = False
+    budget_forced_single: bool = False
+    budget_removed_picks: tuple[Outcome, ...] = ()
+    draw_guard: bool = False
 
     @property
     def pick_text(self) -> str:
         return "/".join(self.picks)
+
+    @property
+    def analysis_picks(self) -> tuple[Outcome, ...]:
+        """Return the model selection before whole-ticket budget compression."""
+        return self.original_picks or self.picks
+
+    @property
+    def analysis_pick_text(self) -> str:
+        return "/".join(self.analysis_picks)
 
 
 @dataclass(frozen=True)

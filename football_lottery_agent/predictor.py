@@ -12,8 +12,12 @@ SECONDARY_RAW_GAP_LIMIT = 0.04
 SECONDARY_EVIDENCE_MARGIN = 0.015
 MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
 DEFAULT_SELECTION_POLICY = {
-    "single_top": 0.52,
-    "single_spread": 0.14,
+    # Recent reviews showed that the former 52%/14-point gate admitted too
+    # many false bankers. A single now needs a materially stronger edge; the
+    # experiment layer may still replace these defaults after an out-of-sample
+    # policy passes all promotion gates.
+    "single_top": 0.60,
+    "single_spread": 0.20,
     "double_top": 0.44,
     "double_spread": 0.06,
     "triple_third": 0.25,
@@ -61,6 +65,9 @@ def predict_match(
         else {}
     )
     picks = _select_picks(ranked, selection_scores=selection_scores, selection_policy=selection_policy)
+    draw_guard = _favorite_draw_guard(probabilities, picks, math_forecast)
+    if draw_guard:
+        picks = (top_outcome, "1")
 
     confidence = round(top_prob * 100, 1)
     risk = _risk_label(top_prob, spread, len(picks))
@@ -68,6 +75,11 @@ def predict_match(
     reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
     if selection_scores:
         reasons.append(_selection_score_reason(selection_scores))
+    if draw_guard:
+        reasons.append(
+            "强胆防平：综合模型仍首选热门方，但 Dixon-Coles 对平局的判断明显更高，"
+            "模型原始建议保留平局，避免把模型分歧误当成稳胆。"
+        )
     reasons.insert(
         0,
         _selection_reason(
@@ -86,6 +98,13 @@ def predict_match(
         risk=risk,
         reasons=tuple(reasons),
         selection_scores=selection_scores,
+        original_picks=picks,
+        dixon_coles_probabilities={
+            key: round(value, 4) for key, value in math_forecast.probabilities.items()
+        },
+        dixon_coles_quality=math_forecast.data_quality,
+        dixon_coles_quality_score=math_forecast.data_quality_score,
+        draw_guard=draw_guard,
     )
 
 
@@ -222,6 +241,32 @@ def _select_picks(
             return ("3", "1", "0")
         return (top_outcome, evidence_choice or second_outcome)
     return ("3", "1", "0")
+
+
+def _favorite_draw_guard(
+    probabilities: dict[str, float],
+    picks: tuple[str, ...],
+    math_forecast: DixonColesForecast,
+) -> bool:
+    """Keep a draw beside a strong favourite when the goal model warns clearly.
+
+    This is deliberately narrow: it does not mechanically add every 15%-20%
+    draw. It only acts on an otherwise single non-draw favourite when the
+    independent Dixon-Coles estimate reaches 24% and exceeds the blended draw
+    probability by at least four points.
+    """
+    if len(picks) != 1 or picks[0] == "1":
+        return False
+    top_probability = probabilities.get(picks[0], 0.0)
+    blended_draw = probabilities.get("1", 0.0)
+    math_draw = math_forecast.probabilities.get("1", 0.0)
+    return bool(
+        top_probability >= 0.60
+        and blended_draw >= 0.18
+        and math_draw >= 0.24
+        and math_draw - blended_draw >= 0.04
+        and math_forecast.data_quality_score >= 0.50
+    )
 
 
 def _resolved_secondary_choice(

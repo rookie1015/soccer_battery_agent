@@ -35,6 +35,13 @@ class MobileApiTests(unittest.TestCase):
         self.assertNotIn("risk", first)
         self.assertIn("confidence", first)
         self.assertIn("pick_labels", first)
+        self.assertIn("analysis_pick_text", first)
+        self.assertIn("analysis_pick_labels", first)
+        self.assertIn("budget_adjusted", first)
+        self.assertIn("budget_forced_single", first)
+        self.assertIn("draw_guard", first)
+        self.assertIn("ticket_single_count", report["metrics"])
+        self.assertIn("budget_forced_single_count", report["metrics"])
 
 
 if __name__ == "__main__":

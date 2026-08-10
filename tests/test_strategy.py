@@ -4,7 +4,8 @@ from itertools import product
 from math import prod
 
 from football_lottery_agent.loader import load_issue
-from football_lottery_agent.predictor import _has_informative_signals, _select_picks
+from football_lottery_agent.dixon_coles import DixonColesForecast
+from football_lottery_agent.predictor import _favorite_draw_guard, _has_informative_signals, _select_picks
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import (
     _downgrade_prediction,
@@ -122,6 +123,35 @@ class StrategyTests(unittest.TestCase):
 
         self.assertEqual(_select_picks(ranked), ("3", "1", "0"))
 
+    def test_default_policy_no_longer_calls_58_percent_a_single(self) -> None:
+        ranked = [("3", 0.58), ("1", 0.23), ("0", 0.19)]
+
+        self.assertEqual(_select_picks(ranked), ("3", "1"))
+
+    def test_strong_favourite_keeps_draw_when_goal_model_warns(self) -> None:
+        forecast = DixonColesForecast(
+            home_xg=1.7,
+            away_xg=0.8,
+            probabilities={"3": 0.59, "1": 0.25, "0": 0.16},
+            data_quality="strength",
+            data_quality_score=0.80,
+        )
+
+        self.assertTrue(
+            _favorite_draw_guard(
+                {"3": 0.68, "1": 0.19, "0": 0.13},
+                ("3",),
+                forecast,
+            )
+        )
+        self.assertFalse(
+            _favorite_draw_guard(
+                {"3": 0.73, "1": 0.16, "0": 0.11},
+                ("3",),
+                forecast,
+            )
+        )
+
     def test_full_analysis_without_evidence_does_not_apply_legacy_draw_bonus(self) -> None:
         prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
         match = replace(
@@ -223,6 +253,59 @@ class StrategyTests(unittest.TestCase):
         )
 
         self.assertAlmostEqual(actual, expected, places=8)
+
+    def test_budget_single_preserves_original_selection_and_marks_warning(self) -> None:
+        prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        uncertain = replace(
+            prediction,
+            probabilities={"3": 0.43, "1": 0.27, "0": 0.30},
+            picks=("3", "1", "0"),
+            original_picks=("3", "1", "0"),
+            selection_scores={},
+        )
+
+        adjusted = _fit_predictions_to_budget((uncertain,), max_ticket_cost_yuan=2)[0]
+
+        self.assertEqual(adjusted.analysis_picks, ("3", "1", "0"))
+        self.assertEqual(adjusted.picks, ("3",))
+        self.assertTrue(adjusted.budget_adjusted)
+        self.assertTrue(adjusted.budget_forced_single)
+        self.assertEqual(adjusted.risk, "高")
+
+    def test_budget_optimizer_avoids_model_conflict_single_when_safe_choice_exists(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[:2]
+        conflict = replace(
+            base[0],
+            match=replace(base[0].match, sources={}),
+            probabilities={"3": 0.70, "1": 0.16, "0": 0.14},
+            picks=("3", "1", "0"),
+            original_picks=("3", "1", "0"),
+            selection_scores={},
+            dixon_coles_probabilities={"3": 0.30, "1": 0.25, "0": 0.45},
+            dixon_coles_quality_score=0.80,
+            budget_adjusted=False,
+            budget_forced_single=False,
+            budget_removed_picks=(),
+        )
+        safe = replace(
+            base[1],
+            match=replace(base[1].match, sources={}),
+            probabilities={"3": 0.60, "1": 0.22, "0": 0.18},
+            picks=("3", "1", "0"),
+            original_picks=("3", "1", "0"),
+            selection_scores={},
+            dixon_coles_probabilities={"3": 0.61, "1": 0.22, "0": 0.17},
+            dixon_coles_quality_score=0.80,
+            budget_adjusted=False,
+            budget_forced_single=False,
+            budget_removed_picks=(),
+        )
+
+        adjusted = _fit_predictions_to_budget((conflict, safe), max_ticket_cost_yuan=6)
+
+        self.assertEqual(adjusted[0].picks, ("3", "1", "0"))
+        self.assertEqual(adjusted[1].picks, ("3",))
+        self.assertFalse(adjusted[1].budget_forced_single)
 
 
 if __name__ == "__main__":
