@@ -8,11 +8,52 @@ from unittest.mock import Mock, patch
 from football_lottery_agent import standalone_api
 from football_lottery_agent.history import archive_report, load_history_entries
 from football_lottery_agent.loader import load_issue
+from football_lottery_agent.notifier import NotifyResult
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import build_ticket_plan
 
 
 class StandaloneApiTests(unittest.TestCase):
+    def test_send_feishu_accepts_success_response(self) -> None:
+        with patch.object(
+            standalone_api,
+            "send_text",
+            return_value=NotifyResult(channel="feishu", response_text='{"code":0,"msg":"success"}'),
+        ) as send_text:
+            result = standalone_api.run_send_feishu(
+                {
+                    "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+                    "text": "第 26090 期出票建议",
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        send_text.assert_called_once_with(
+            "feishu",
+            "第 26090 期出票建议",
+            "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+        )
+
+    def test_send_feishu_surfaces_bot_rejection(self) -> None:
+        with patch.object(
+            standalone_api,
+            "send_text",
+            return_value=NotifyResult(channel="feishu", response_text='{"code":19024,"msg":"Key Words Not Found"}'),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "19024"):
+                standalone_api.run_send_feishu(
+                    {
+                        "webhook_url": "https://open.feishu.cn/open-apis/bot/v2/hook/test-token",
+                        "text": "测试消息",
+                    }
+                )
+
+    def test_send_feishu_rejects_non_feishu_url(self) -> None:
+        with self.assertRaisesRegex(ValueError, "自定义机器人"):
+            standalone_api.run_send_feishu(
+                {"webhook_url": "https://example.com/hook", "text": "测试消息"}
+            )
+
     def test_health_reports_local_service(self) -> None:
         self.assertEqual(
             standalone_api.run_health(),

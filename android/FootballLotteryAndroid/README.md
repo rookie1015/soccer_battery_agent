@@ -15,11 +15,16 @@ The Settings screen has a local engine test button for checking that the embedde
 ## Current features
 
 - Generate an issue analysis report.
+- Save a Feishu custom-bot webhook and automatically send ticket recommendations after each analysis.
 - Read report history generated on the phone.
 - Long-press an analysis history group or entry to delete it after confirmation.
 - When network failures force simple-analysis fallback, list the unavailable information sources in each match's conclusion reasons.
 - Run a single-match prediction with optional 3-way odds.
 - Test the embedded local analysis engine from Settings.
+
+## Feishu delivery
+
+Open **Settings** in the Android app, paste a Feishu group custom-bot webhook, enable automatic delivery, save, and use **Test delivery**. The webhook is stored only in the app's local preferences. A failed delivery does not discard the locally generated analysis or history entry.
 
 ## Build from command line
 

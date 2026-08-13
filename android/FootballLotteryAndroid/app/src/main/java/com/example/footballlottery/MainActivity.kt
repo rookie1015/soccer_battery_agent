@@ -94,6 +94,8 @@ private enum class AppTab(val label: String) {
 
 private const val SETTINGS_PREFS = "football_lottery_settings"
 private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
+private const val PREF_FEISHU_WEBHOOK_URL = "feishu_webhook_url"
+private const val PREF_FEISHU_AUTO_SEND = "feishu_auto_send"
 private const val PREF_ANALYSIS_ISSUE = "analysis_issue"
 private const val PREF_ANALYSIS_MAX_TICKET_COST = "analysis_max_ticket_cost"
 private const val STRENGTH_XG_MATCHES = 20
@@ -252,7 +254,17 @@ class AppViewModel : ViewModel() {
         private set
     var theOddsApiKey by mutableStateOf("")
         private set
+    var feishuWebhookUrl by mutableStateOf("")
+        private set
+    var feishuAutoSend by mutableStateOf(false)
+        private set
     var settingsMessage by mutableStateOf("")
+        private set
+    var isTestingFeishu by mutableStateOf(false)
+        private set
+    var feishuTestMessage by mutableStateOf("")
+        private set
+    var feishuTestError by mutableStateOf("")
         private set
     var isCheckingApiUsage by mutableStateOf(false)
         private set
@@ -262,12 +274,26 @@ class AppViewModel : ViewModel() {
     fun loadSettings(context: Context) {
         val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
         theOddsApiKey = prefs.getString(PREF_THE_ODDS_API_KEY, "").orEmpty()
+        feishuWebhookUrl = prefs.getString(PREF_FEISHU_WEBHOOK_URL, "").orEmpty()
+        feishuAutoSend = prefs.getBoolean(PREF_FEISHU_AUTO_SEND, false)
     }
 
     fun updateTheOddsApiKey(value: String) {
         theOddsApiKey = value
         settingsMessage = ""
         apiUsage = null
+    }
+
+    fun updateFeishuWebhookUrl(value: String) {
+        feishuWebhookUrl = value
+        settingsMessage = ""
+        feishuTestMessage = ""
+        feishuTestError = ""
+    }
+
+    fun updateFeishuAutoSend(value: Boolean) {
+        feishuAutoSend = value
+        settingsMessage = ""
     }
 
     fun saveSettings(context: Context) {
@@ -278,6 +304,42 @@ class AppViewModel : ViewModel() {
             .apply()
         theOddsApiKey = cleanApiKey
         settingsMessage = "外盘设置已保存。"
+    }
+
+    fun saveFeishuSettings(context: Context) {
+        val cleanWebhook = feishuWebhookUrl.trim()
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_FEISHU_WEBHOOK_URL, cleanWebhook)
+            .putBoolean(PREF_FEISHU_AUTO_SEND, feishuAutoSend)
+            .apply()
+        feishuWebhookUrl = cleanWebhook
+        settingsMessage = if (feishuAutoSend && cleanWebhook.isBlank()) {
+            "已保存，但自动推送需要先填写飞书 Webhook。"
+        } else {
+            "飞书推送设置已保存。"
+        }
+    }
+
+    fun testFeishu(engine: FootballLotteryLocalEngine) {
+        val webhook = feishuWebhookUrl.trim()
+        if (webhook.isBlank()) {
+            feishuTestError = "请先填写飞书 Webhook。"
+            return
+        }
+        viewModelScope.launch {
+            isTestingFeishu = true
+            feishuTestMessage = ""
+            feishuTestError = ""
+            runCatching {
+                engine.sendFeishuText(webhook, "足球分析 App 飞书推送测试成功。")
+            }.onSuccess {
+                feishuTestMessage = "测试消息已发送到飞书。"
+            }.onFailure { throwable ->
+                feishuTestError = throwable.message ?: "飞书测试发送失败。"
+            }
+            isTestingFeishu = false
+        }
     }
 
     fun refreshForeignOddsUsage(engine: FootballLotteryLocalEngine) {
@@ -365,7 +427,12 @@ class AnalysisViewModel : ViewModel() {
             .apply()
     }
 
-    fun generateAnalysis(engine: FootballLotteryLocalEngine, foreignOddsApiKey: String) {
+    fun generateAnalysis(
+        engine: FootballLotteryLocalEngine,
+        foreignOddsApiKey: String,
+        feishuAutoSend: Boolean,
+        feishuWebhookUrl: String,
+    ) {
         val cleanIssue = issue.trim()
         val cleanMaxTicketCostYuan = maxTicketCostYuan.trim().toIntOrNull()
         val cleanForeignOddsApiKey = foreignOddsApiKey.trim()
@@ -390,10 +457,25 @@ class AnalysisViewModel : ViewModel() {
                 )
             }.onSuccess { response ->
                 report = response
-                message = if (response.analysisMode == "simple_fallback") {
+                val generatedMessage = if (response.analysisMode == "simple_fallback") {
                     "${response.issue} 分析报告已生成；检测到网络问题，已自动使用简单分析。"
                 } else {
                     "${response.issue} 完整分析报告已生成。"
+                }
+                message = generatedMessage
+                if (feishuAutoSend) {
+                    val webhook = feishuWebhookUrl.trim()
+                    if (webhook.isBlank()) {
+                        error = "报告已生成，但未填写飞书 Webhook，无法自动推送。"
+                    } else {
+                        runCatching {
+                            engine.sendAnalysisToFeishu(webhook, response)
+                        }.onSuccess {
+                            message = "$generatedMessage 出票建议已发送到飞书。"
+                        }.onFailure { throwable ->
+                            error = "报告已生成，但飞书推送失败：${throwable.message ?: "未知错误"}"
+                        }
+                    }
                 }
             }.onFailure { throwable ->
                 error = throwable.message ?: "生成分析报告失败。"
@@ -681,6 +763,20 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             throw IllegalStateException(json.optString("error", "本机分析失败。"))
         }
         parseReport(json.getJSONObject("report"))
+    }
+
+    suspend fun sendAnalysisToFeishu(webhookUrl: String, report: AnalysisReport) {
+        sendFeishuText(webhookUrl, feishuAnalysisText(report))
+    }
+
+    suspend fun sendFeishuText(webhookUrl: String, text: String): Unit = withContext(Dispatchers.IO) {
+        val body = JSONObject()
+            .put("webhook_url", webhookUrl)
+            .put("text", text.take(3_500))
+        val json = JSONObject(bridge.callAttr("send_feishu", body.toString()).toString())
+        if (!json.optBoolean("ok", false)) {
+            throw IllegalStateException(json.optString("error", "飞书发送失败。"))
+        }
     }
 
     suspend fun fetchHistory(): List<HistoryEntry> = withContext(Dispatchers.IO) {
@@ -1342,7 +1438,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.2.1（3） · 已包含球队身份记忆、历史长按删除和网络缺口说明",
+                        "App 版本 0.2.3（5） · 已支持分析完成后自动推送到飞书",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1391,6 +1487,51 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodySmall,
                     )
+                    HorizontalDivider()
+                    Text("飞书推送", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    Text(
+                        "填写飞书群自定义机器人的 Webhook 后，App 可在每次分析完成时直接把出票建议推送到该群。Webhook 仅保存在本机。",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    OutlinedTextField(
+                        value = appViewModel.feishuWebhookUrl,
+                        onValueChange = appViewModel::updateFeishuWebhookUrl,
+                        label = { Text("飞书机器人 Webhook") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = appViewModel.feishuAutoSend,
+                            onCheckedChange = appViewModel::updateFeishuAutoSend,
+                        )
+                        Text("每次分析完成后自动发送出票建议")
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = { appViewModel.saveFeishuSettings(context.applicationContext) },
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text("保存飞书设置")
+                        }
+                        Button(
+                            onClick = { appViewModel.testFeishu(localEngine) },
+                            enabled = !appViewModel.isTestingFeishu,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            LoadingPrefix(appViewModel.isTestingFeishu)
+                            Text(if (appViewModel.isTestingFeishu) "发送中" else "测试推送")
+                        }
+                    }
+                    if (appViewModel.feishuTestMessage.isNotBlank()) {
+                        StatusCard(text = appViewModel.feishuTestMessage, color = Color(0xFF16845B))
+                    }
+                    if (appViewModel.feishuTestError.isNotBlank()) {
+                        StatusCard(text = appViewModel.feishuTestError, color = Color(0xFFB42318))
+                    }
                     HorizontalDivider()
                     Button(
                         onClick = { appViewModel.testLocalEngine(localEngine) },
@@ -1477,7 +1618,14 @@ private fun RequestCard(
                 style = MaterialTheme.typography.bodySmall,
             )
             Button(
-                onClick = { viewModel.generateAnalysis(localEngine, appViewModel.theOddsApiKey) },
+                onClick = {
+                    viewModel.generateAnalysis(
+                        localEngine,
+                        appViewModel.theOddsApiKey,
+                        appViewModel.feishuAutoSend,
+                        appViewModel.feishuWebhookUrl,
+                    )
+                },
                 enabled = !viewModel.isLoading,
                 modifier = Modifier.fillMaxWidth(),
             ) {
@@ -2205,6 +2353,22 @@ private fun purchaseCostText(report: AnalysisReport): String {
         return ""
     }
     return "购彩 ¥${"%,d".format(units * 2L)}"
+}
+
+private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
+    appendLine("足球彩票分析 · 第 ${report.issue} 期")
+    appendLine(deadlineText(report))
+    purchaseCostText(report).takeIf { it.isNotBlank() }?.let(::appendLine)
+    appendLine("任选九保留：${report.choose9Keep.joinToString("、")}")
+    appendLine("建议剔除：${report.choose9Drop.joinToString("、")}")
+    appendLine()
+    appendLine("14 场出票建议")
+    report.predictions.forEach { prediction ->
+        val selection = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }.joinToString("/")
+        appendLine("${prediction.seq}. ${prediction.home} vs ${prediction.away}：$selection（${prediction.pickText}）")
+    }
+    appendLine()
+    append("仅供信息分析和娱乐参考，请理性购彩。")
 }
 
 private fun recommendedChoiceCount(prediction: MatchPrediction): Int {

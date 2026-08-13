@@ -7,6 +7,7 @@ from typing import Any
 import json
 import re
 import urllib.error
+import urllib.parse
 
 from .collectors import collect_issue
 from .calibration import build_calibration
@@ -16,6 +17,7 @@ from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
 from .models import Match, Odds, Signals, TicketPlan
+from .notifier import send_text
 from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
@@ -44,6 +46,37 @@ def run_foreign_odds_usage(payload: dict[str, Any]) -> dict[str, object]:
 
     usage = check_the_odds_api_usage(str(payload.get("foreign_odds_api_key") or ""))
     return {"ok": True, "usage": usage}
+
+
+def run_send_feishu(payload: dict[str, Any]) -> dict[str, object]:
+    webhook_url = str(payload.get("webhook_url") or "").strip()
+    text = str(payload.get("text") or "").strip()
+    if not webhook_url:
+        raise ValueError("请填写飞书 Webhook。")
+    if not text:
+        raise ValueError("飞书消息不能为空。")
+    parsed = urllib.parse.urlparse(webhook_url)
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"open.feishu.cn", "open.larksuite.com"}
+        or not parsed.path.startswith("/open-apis/bot/v2/hook/")
+    ):
+        raise ValueError("请填写飞书自定义机器人的 HTTPS Webhook 地址。")
+
+    result = send_text("feishu", text, webhook_url)
+    try:
+        response = json.loads(result.response_text or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("飞书返回了无法识别的响应。") from exc
+    code = response.get("code", response.get("StatusCode", 0))
+    try:
+        numeric_code = int(code)
+    except (TypeError, ValueError):
+        numeric_code = -1
+    if numeric_code != 0:
+        detail = str(response.get("msg") or response.get("StatusMessage") or "未知错误")
+        raise RuntimeError(f"飞书拒绝了消息（{numeric_code}：{detail}）。")
+    return {"ok": True, "message": "消息已发送到飞书。"}
 
 
 def run_analysis(

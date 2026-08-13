@@ -9,6 +9,7 @@ from football_lottery_agent.standalone_api import (
     run_health,
     run_history,
     run_review,
+    run_send_feishu,
     run_single_prediction,
 )
 
@@ -23,6 +24,10 @@ def analysis(payload_json: str, work_dir: str) -> str:
 
 def foreign_odds_usage(payload_json: str) -> str:
     return _json(run_foreign_odds_usage(json.loads(payload_json)))
+
+
+def send_feishu(payload_json: str) -> str:
+    return _json(run_send_feishu(json.loads(payload_json)))
 
 
 def history(work_dir: str) -> str:
