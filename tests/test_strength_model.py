@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from football_lottery_agent.strength_model import (
+    _JSON_OBJECT_CACHE,
     _estimate_starting_eleven,
     _has_injury,
     _player_strength,
@@ -13,6 +14,8 @@ from football_lottery_agent.strength_model import (
     _learn_bilingual_provider_aliases,
     _learn_unique_context_provider_aliases,
     _match_fotmob_event,
+    _match_details_payload,
+    _read_json_object,
     _team_score,
 )
 from football_lottery_agent.collectors import RawMatch
@@ -20,6 +23,31 @@ from football_lottery_agent.team_identity import TEAM_ALIASES, configure_team_id
 
 
 class StrengthModelTests(unittest.TestCase):
+    def test_match_details_payload_is_reused_within_fixture(self) -> None:
+        shared = {}
+        expected = {"general": {"matchId": 99}}
+        with TemporaryDirectory() as tmp:
+            with patch("football_lottery_agent.strength_model._fetch_json", return_value=expected) as fetch:
+                first = _match_details_payload(99, Path(tmp), 3600, shared)
+                second = _match_details_payload(99, Path(tmp), 86400, shared)
+
+        self.assertIs(first, expected)
+        self.assertIs(second, expected)
+        fetch.assert_called_once()
+
+    def test_json_file_is_decoded_once_while_unchanged(self) -> None:
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / "payload.json"
+            path.write_text('{"value": 7}', encoding="utf-8")
+            _JSON_OBJECT_CACHE.clear()
+            with patch("football_lottery_agent.strength_model.loads_json", wraps=lambda text: __import__("json").loads(text)) as loads:
+                first = _read_json_object(path)
+                second = _read_json_object(path)
+
+        self.assertEqual(first, {"value": 7})
+        self.assertIs(first, second)
+        self.assertEqual(loads.call_count, 1)
+
     def test_team_score_uses_aliases(self) -> None:
         self.assertEqual(_team_score("荷兰", "Netherlands"), 1.0)
         self.assertEqual(_team_score("热刺", "Tottenham Hotspur"), 1.0)

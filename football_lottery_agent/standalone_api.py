@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import json
@@ -28,6 +28,7 @@ import tempfile
 
 
 STRENGTH_XG_MATCHES = 20
+RECENT_SNAPSHOT_REUSE_SECONDS = 180
 NETWORK_SENSITIVE_SOURCE_LABELS = {
     "injuries": "伤停信息",
     "history": "历史交锋",
@@ -108,27 +109,37 @@ def run_analysis(
     markdown_path = report_dir / f"{_slug(issue)}_report.md"
     html_path = report_dir / f"{_slug(issue)}_report.html"
 
+    reused_snapshot = False
+    if not bool(payload.get("force_refresh", False)):
+        reused_snapshot = _reuse_recent_issue_snapshot(
+            issue_archive_path,
+            issue_path,
+            issue=issue,
+            foreign_odds_configured=foreign_odds_api_key is not None,
+        )
+
     fallback_reason = ""
     unavailable_sources: dict[str, object] = {"all": [], "matches": {}}
-    try:
-        _collect_mobile_analysis(
-            issue_path=issue_path,
-            issue=issue,
-            cache_dir=cache_dir,
-            full=True,
-            use_foreign_odds=use_foreign_odds,
-            foreign_odds_api_key=foreign_odds_api_key,
-        )
-    except (OSError, TimeoutError, urllib.error.URLError) as exc:
-        fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
-        unavailable_sources = {
-            "all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
-            "matches": {},
-        }
-    else:
-        if _full_collection_has_broad_network_failure(issue_path):
-            fallback_reason = "完整分析的关键资料源出现大范围网络请求失败，已自动降级为简单分析。"
-            unavailable_sources = _full_collection_network_gaps(issue_path)
+    if not reused_snapshot:
+        try:
+            _collect_mobile_analysis(
+                issue_path=issue_path,
+                issue=issue,
+                cache_dir=cache_dir,
+                full=True,
+                use_foreign_odds=use_foreign_odds,
+                foreign_odds_api_key=foreign_odds_api_key,
+            )
+        except (OSError, TimeoutError, urllib.error.URLError) as exc:
+            fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
+            unavailable_sources = {
+                "all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
+                "matches": {},
+            }
+        else:
+            if _full_collection_has_broad_network_failure(issue_path):
+                fallback_reason = "完整分析的关键资料源出现大范围网络请求失败，已自动降级为简单分析。"
+                unavailable_sources = _full_collection_network_gaps(issue_path)
 
     if fallback_reason:
         _collect_mobile_analysis(
@@ -191,6 +202,57 @@ def run_analysis(
 
 def _analysis_condition_key(issue: str, max_ticket_cost_yuan: int) -> str:
     return f"analysis|issue={issue.strip()}|max_ticket_cost_yuan={max_ticket_cost_yuan}"
+
+
+def _reuse_recent_issue_snapshot(
+    archive_path: Path,
+    output_path: Path,
+    *,
+    issue: str,
+    foreign_odds_configured: bool,
+    now: datetime | None = None,
+) -> bool:
+    """Reuse only an immediately preceding equivalent full collection.
+
+    This protects against double taps and an accidental immediate rerun while
+    keeping live odds fresh during normal use.  The original collection time
+    remains unchanged, so repeated reuse cannot extend the three-minute window.
+    """
+    try:
+        payload = json.loads(archive_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    metadata = payload.get("metadata")
+    matches = payload.get("matches")
+    if (
+        str(payload.get("issue") or "").strip() != issue.strip()
+        or not isinstance(metadata, dict)
+        or metadata.get("analysis_mode") != "full"
+        or not isinstance(matches, list)
+        or len(matches) != 14
+    ):
+        return False
+    audit = metadata.get("foreign_odds_audit")
+    previous_foreign_configured = bool(audit.get("configured")) if isinstance(audit, dict) else False
+    if previous_foreign_configured != foreign_odds_configured:
+        return False
+    try:
+        collected_at = datetime.fromisoformat(str(metadata.get("snapshot_collected_at") or ""))
+    except ValueError:
+        return False
+    if collected_at.tzinfo is None:
+        collected_at = collected_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    age_seconds = (current.astimezone(timezone.utc) - collected_at.astimezone(timezone.utc)).total_seconds()
+    if not 0 <= age_seconds <= RECENT_SNAPSHOT_REUSE_SECONDS:
+        return False
+
+    metadata["snapshot_reused"] = True
+    metadata["snapshot_reused_at"] = current.astimezone(timezone.utc).isoformat()
+    metadata["snapshot_reuse_age_seconds"] = round(age_seconds, 1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return True
 
 
 def _collect_mobile_analysis(

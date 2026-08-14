@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -22,6 +23,7 @@ from .team_identity import (
     TEAM_ALIASES as SHARED_TEAM_ALIASES,
     configure_team_identity,
     identity_path_for_cache,
+    team_match_score,
 )
 
 
@@ -34,6 +36,8 @@ MAINSTREAM_MEDIA_FEEDS = (
     ("bbc_sport", "BBC Sport Football", "https://feeds.bbci.co.uk/sport/football/rss.xml"),
     ("sky_sports", "Sky Sports Football", "https://www.skysports.com/rss/11095"),
 )
+OPTIONAL_SOURCE_TIMEOUT_SECONDS = 5.0
+OPTIONAL_SOURCE_WORKERS = 10
 MEDIA_TEAM_ALIASES = {
     "荷兰": ("netherlands", "holland"),
     "瑞典": ("sweden",),
@@ -131,6 +135,16 @@ def collect_issue(
     skip_sina_details: bool = False,
     sina_odds_only: bool = False,
 ) -> Path:
+    collection_started = time.perf_counter()
+    stage_started = collection_started
+    timings: dict[str, float] = {}
+
+    def finish_stage(name: str) -> None:
+        nonlocal stage_started
+        now = time.perf_counter()
+        timings[name] = round(now - stage_started, 3)
+        stage_started = now
+
     cache = Path(cache_dir)
     # Learned mappings live beside the cache so Android app upgrades do not
     # overwrite them and every downstream provider shares the same identities.
@@ -139,6 +153,7 @@ def collect_issue(
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
     metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
+    finish_stage("schedule_and_metadata")
     strength_by_seq = {}
     if strength_model and not offline:
         from .strength_model import build_strength_for_matches
@@ -153,14 +168,7 @@ def collect_issue(
             lookback=strength_lookback,
             xg_matches=strength_xg_matches,
         )
-    briefings = {} if skip_context_fetches else _fetch_briefings(raw_matches, cache, offline)
-    media_briefings = {} if skip_context_fetches else _fetch_mainstream_media_briefings(raw_matches, cache, offline)
-    if skip_sina_details:
-        sina_details = {}
-    elif sina_odds_only:
-        sina_details = _fetch_sina_odds(raw_matches, cache, offline)
-    else:
-        sina_details = _fetch_sina_details(raw_matches, cache, offline)
+    finish_stage("strength")
     foreign_requested = foreign_odds_requested or foreign_odds
     foreign_odds_audit: dict[str, Any] = {
         "provider": "the_odds_api",
@@ -188,11 +196,19 @@ def collect_issue(
     elif foreign_requested and offline:
         foreign_odds_audit.update(status="offline", message="离线模式未调用 The Odds API。")
 
-    foreign_odds_by_seq = {}
-    if foreign_odds and not offline:
+    def collect_sina() -> dict[int, SinaDetail]:
+        if skip_sina_details:
+            return {}
+        if sina_odds_only:
+            return _fetch_sina_odds(raw_matches, cache, offline)
+        return _fetch_sina_details(raw_matches, cache, offline)
+
+    def collect_foreign_odds() -> dict[int, Any]:
+        if not foreign_odds or offline:
+            return {}
         from .foreign_odds import fetch_foreign_odds_for_matches
 
-        foreign_odds_by_seq = fetch_foreign_odds_for_matches(
+        return fetch_foreign_odds_for_matches(
             raw_matches,
             cache_dir=cache,
             api_key=foreign_odds_api_key,
@@ -201,11 +217,44 @@ def collect_issue(
             sport_keys=tuple(item.strip() for item in foreign_odds_sports.split(",") if item.strip()),
             audit=foreign_odds_audit,
         )
-    polymarket_by_seq = {}
-    if not skip_context_fetches and not offline:
+
+    def collect_polymarket() -> dict[int, Any]:
+        if skip_context_fetches or offline:
+            return {}
         from .polymarket import fetch_polymarket_signals_for_matches
 
-        polymarket_by_seq = fetch_polymarket_signals_for_matches(raw_matches, cache_dir=cache)
+        return fetch_polymarket_signals_for_matches(raw_matches, cache_dir=cache)
+
+    def measured(call: Any) -> tuple[Any, float]:
+        started = time.perf_counter()
+        value = call()
+        return value, round(time.perf_counter() - started, 3)
+
+    # These providers are independent once the strength pass has learned team
+    # aliases.  Running them concurrently prevents one unavailable news index
+    # from serially delaying every other source.
+    context_calls = {
+        "briefings": lambda: {} if skip_context_fetches else _fetch_briefings(raw_matches, cache, offline),
+        "mainstream_media": lambda: {}
+        if skip_context_fetches
+        else _fetch_mainstream_media_briefings(raw_matches, cache, offline),
+        "sina_details": collect_sina,
+        "foreign_odds": collect_foreign_odds,
+        "polymarket": collect_polymarket,
+    }
+    context_results: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=len(context_calls)) as executor:
+        futures = {name: executor.submit(measured, call) for name, call in context_calls.items()}
+        for name, future in futures.items():
+            value, elapsed = future.result()
+            context_results[name] = value
+            timings[name] = elapsed
+    stage_started = time.perf_counter()
+    briefings = context_results["briefings"]
+    media_briefings = context_results["mainstream_media"]
+    sina_details = context_results["sina_details"]
+    foreign_odds_by_seq = context_results["foreign_odds"]
+    polymarket_by_seq = context_results["polymarket"]
     matches: list[dict[str, Any]] = []
     for item in raw_matches:
         detail = sina_details.get(item.seq, SinaDetail(None, (), (), (), {}))
@@ -228,12 +277,22 @@ def collect_issue(
             foreign_notes.append("外盘赔率：未匹配到国外 bookmaker 数据，保留国内/新浪赔率。")
         strength = strength_by_seq.get(item.seq)
         strength_notes = _strength_notes(strength) if strength else []
+        knockout_context = detail.raw.get("knockout_context") if isinstance(detail.raw, dict) else {}
+        knockout_notes = _knockout_context_notes(knockout_context, item)
         polymarket = polymarket_by_seq.get(item.seq)
         polymarket_notes = _polymarket_notes(polymarket)
         media_notes = _mainstream_media_notes(media_items)
         has_real_odds = item.seq in odds_by_seq or foreign is not None or detail.odds is not None
         notes = _build_notes(item, news, injury_news, history + history_notes, has_odds=has_real_odds)
-        notes[3:3] = injury_notes + intelligence_notes + media_notes + foreign_notes + polymarket_notes + strength_notes
+        notes[3:3] = (
+            injury_notes
+            + intelligence_notes
+            + knockout_notes
+            + media_notes
+            + foreign_notes
+            + polymarket_notes
+            + strength_notes
+        )
         odds = odds_by_seq.get(item.seq) or (foreign.odds if foreign else None) or detail.odds or OddsRow(item.seq, 2.35, 3.15, 2.95)
         odds_source = "csv"
         if item.seq not in odds_by_seq:
@@ -277,6 +336,7 @@ def collect_issue(
                     "injuries": [news_item.__dict__ for news_item in injury_news],
                     "history": history,
                     "sina_detail": detail.raw,
+                    "knockout_context": knockout_context if isinstance(knockout_context, dict) else {},
                     "foreign_odds": foreign.raw if foreign else {},
                     "odds_market": selected_market,
                     "polymarket": polymarket.raw if polymarket else {},
@@ -290,12 +350,15 @@ def collect_issue(
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
+    timings["assembly"] = round(time.perf_counter() - stage_started, 3)
+    timings["total"] = round(time.perf_counter() - collection_started, 3)
     metadata = {
         **metadata,
         "analysis_mode": "full" if not skip_context_fetches else "simple",
         "foreign_odds_audit": foreign_odds_audit,
         "snapshot_collected_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_schema_version": "1",
+        "collection_timings_seconds": timings,
     }
     output.write_text(
         json.dumps({"issue": issue_id, "metadata": metadata, "matches": matches}, ensure_ascii=False, indent=2),
@@ -341,7 +404,7 @@ def fetch_sporttery_issue_metadata(issue: str, cache_dir: str | Path = "data/cac
 def _fetch_briefings(raw_matches: list[RawMatch], cache: Path, offline: bool) -> dict[int, list[NewsItem]]:
     if offline:
         return {match.seq: [] for match in raw_matches}
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=min(OPTIONAL_SOURCE_WORKERS, len(raw_matches) or 1)) as executor:
         pairs = executor.map(lambda match: (match.seq, fetch_match_briefing(match, cache)), raw_matches)
     return dict(pairs)
 
@@ -350,7 +413,7 @@ def _fetch_mainstream_media_briefings(raw_matches: list[RawMatch], cache: Path, 
     if offline:
         return {match.seq: [] for match in raw_matches}
     feed_items = _fetch_mainstream_feed_items(cache)
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=min(OPTIONAL_SOURCE_WORKERS, len(raw_matches) or 1)) as executor:
         pairs = executor.map(lambda match: (match.seq, fetch_mainstream_media_news(match, cache, feed_items)), raw_matches)
     return dict(pairs)
 
@@ -519,6 +582,7 @@ def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
     odds = _average_sina_euro_odds(match.seq, raw_odds)
     injury_notes = tuple(_format_injury_notes(raw_injury, match))
     history_notes = tuple(_format_history_notes(raw_history, match))
+    knockout_context = _infer_two_leg_context(raw_history, match)
     intelligence_notes = tuple(_format_intelligence_notes(raw_intelligence, match))
     raw = {
         "odds_rows": _safe_len(raw_odds),
@@ -537,6 +601,7 @@ def fetch_sina_detail(match: RawMatch, cache_dir: Path) -> SinaDetail:
         "history_rows": _safe_len(raw_history),
         "history_fetch_status": history_status,
         **_history_signal_summary(raw_history),
+        "knockout_context": knockout_context,
     }
     return SinaDetail(
         odds=odds,
@@ -841,6 +906,73 @@ def _format_history_notes(raw: Any, match: RawMatch) -> list[str]:
     return notes
 
 
+def _infer_two_leg_context(raw: Any, match: RawMatch) -> dict[str, Any]:
+    """Identify a recent first leg between the same clubs without guessing.
+
+    Sina's structured H2H feed contains dates, teams and scores.  A matching
+    European fixture in the preceding three weeks is strong enough to mark the
+    current game as a return leg; ambiguous or malformed rows stay unused.
+    """
+    if "欧" not in match.league or not isinstance(raw, list):
+        return {}
+    try:
+        current_date = datetime.fromisoformat(match.kickoff.replace("Z", "+00:00")).date()
+    except ValueError:
+        return {}
+
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        date_text = str(row.get("matchTimeFormat") or "")[:10]
+        try:
+            first_leg_date = datetime.fromisoformat(date_text).date()
+            days_ago = (current_date - first_leg_date).days
+            score1 = int(float(row.get("score1")))
+            score2 = int(float(row.get("score2")))
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= days_ago <= 21 or score1 < 0 or score2 < 0:
+            continue
+
+        team1 = str(row.get("team1") or "")
+        team2 = str(row.get("team2") or "")
+        direct = team_match_score(match.home, team1) >= 0.8 and team_match_score(match.away, team2) >= 0.8
+        reverse = team_match_score(match.home, team2) >= 0.8 and team_match_score(match.away, team1) >= 0.8
+        if not direct and not reverse:
+            continue
+        home_goals = score1 if direct else score2
+        away_goals = score2 if direct else score1
+        candidates.append(
+            (
+                days_ago,
+                {
+                    "is_second_leg": True,
+                    "first_leg_date": date_text,
+                    "first_leg_home_goals": home_goals,
+                    "first_leg_away_goals": away_goals,
+                    "aggregate_margin_home": home_goals - away_goals,
+                    "source": "sina_structured_history",
+                },
+            )
+        )
+    return min(candidates, key=lambda item: item[0])[1] if candidates else {}
+
+
+def _knockout_context_notes(context: Any, match: RawMatch) -> list[str]:
+    if not isinstance(context, dict) or not context.get("is_second_leg"):
+        return []
+    home_goals = context.get("first_leg_home_goals")
+    away_goals = context.get("first_leg_away_goals")
+    if home_goals is None or away_goals is None:
+        return []
+    leader = match.home if home_goals > away_goals else match.away if away_goals > home_goals else "双方"
+    return [
+        f"两回合赛制：首回合折算为当前主客顺序 {match.home} {home_goals}-{away_goals} {match.away}；"
+        f"当前由{leader}在总比分上占优，90分钟胜负动机与晋级目标需分开判断。"
+    ]
+
+
 def _format_intelligence_notes(raw: Any, match: RawMatch) -> list[str]:
     data = _data(raw)
     if not isinstance(data, dict):
@@ -865,15 +997,28 @@ def _format_intelligence_notes(raw: Any, match: RawMatch) -> list[str]:
 
 
 def _fetch_mainstream_feed_items(cache_dir: Path) -> list[NewsItem]:
-    items: list[NewsItem] = []
     media_cache = cache_dir / "mainstream_media"
-    for _key, source, url in MAINSTREAM_MEDIA_FEEDS:
+
+    def fetch_feed(entry: tuple[str, str, str]) -> list[NewsItem]:
+        _key, source, url = entry
         try:
-            xml_text = _fetch_text(url, media_cache, max_age_seconds=1800)
+            xml_text = _fetch_text(
+                url,
+                media_cache,
+                max_age_seconds=1800,
+                timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+                attempts=1,
+            )
         except (OSError, urllib.error.URLError):
-            continue
-        for item in _parse_rss(xml_text):
-            items.append(NewsItem(title=f"{source}：{item.title}", link=item.link, published=item.published))
+            return []
+        return [
+            NewsItem(title=f"{source}：{item.title}", link=item.link, published=item.published)
+            for item in _parse_rss(xml_text)
+        ]
+
+    with ThreadPoolExecutor(max_workers=len(MAINSTREAM_MEDIA_FEEDS)) as executor:
+        groups = executor.map(fetch_feed, MAINSTREAM_MEDIA_FEEDS)
+        items = [item for group in groups for item in group]
     return _dedupe_news_items(items)
 
 
@@ -966,7 +1111,15 @@ def search_web_news(query: str, cache_dir: str | Path, limit: int = 5) -> list[N
 def _fetch_google_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]:
     url = f"https://news.google.com/rss/search?{urllib.parse.urlencode({'q': query, 'hl': 'en-US', 'gl': 'US', 'ceid': 'US:en'})}"
     try:
-        return _parse_rss(_fetch_text(url, cache_dir, max_age_seconds=3600))[:limit]
+        return _parse_rss(
+            _fetch_text(
+                url,
+                cache_dir,
+                max_age_seconds=3600,
+                timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+                attempts=1,
+            )
+        )[:limit]
     except (OSError, urllib.error.URLError, ET.ParseError):
         return []
 
@@ -981,7 +1134,13 @@ def _fetch_gdelt_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]
     }
     url = f"https://api.gdeltproject.org/api/v2/doc/doc?{urllib.parse.urlencode(params)}"
     try:
-        raw = _fetch_text(url, cache_dir, max_age_seconds=3600)
+        raw = _fetch_text(
+            url,
+            cache_dir,
+            max_age_seconds=3600,
+            timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+            attempts=1,
+        )
         data = loads_json(raw)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
         return []
@@ -998,7 +1157,13 @@ def _fetch_gdelt_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]
 def _fetch_duckduckgo_results(query: str, cache_dir: Path, limit: int) -> list[NewsItem]:
     url = f"https://duckduckgo.com/html/?{urllib.parse.urlencode({'q': query})}"
     try:
-        html = _fetch_text(url, cache_dir, max_age_seconds=3600)
+        html = _fetch_text(
+            url,
+            cache_dir,
+            max_age_seconds=3600,
+            timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+            attempts=1,
+        )
     except (OSError, urllib.error.URLError):
         return []
 
@@ -1013,7 +1178,14 @@ def _fetch_duckduckgo_results(query: str, cache_dir: Path, limit: int) -> list[N
     return items
 
 
-def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
+def _fetch_text(
+    url: str,
+    cache_dir: Path,
+    max_age_seconds: int,
+    *,
+    timeout_seconds: float = 8,
+    attempts: int = 3,
+) -> str:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.txt"
     if cache_path.exists():
@@ -1029,7 +1201,7 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         }
     request = urllib.request.Request(url, headers=headers)
     try:
-        text = read_url_text(request, timeout=8)
+        text = read_url_text(request, timeout=timeout_seconds, attempts=attempts)
     except urllib.error.HTTPError as exc:
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
@@ -1212,6 +1384,12 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "identity_status": "matched" if identity_matched else "unmatched",
         "home_rating": getattr(home, "rating", None),
         "away_rating": getattr(away, "rating", None),
+        "home_overall_win_rate": getattr(home, "win_rate", None),
+        "away_overall_win_rate": getattr(away, "win_rate", None),
+        "home_venue_win_rate": getattr(home, "home_win_rate", None),
+        "away_venue_win_rate": getattr(away, "away_win_rate", None),
+        "home_venue_matches": getattr(home, "home_matches_used", None),
+        "away_venue_matches": getattr(away, "away_matches_used", None),
         "home_draw_rate": getattr(home, "draw_rate", None),
         "away_draw_rate": getattr(away, "draw_rate", None),
         "home_matches_used": getattr(home, "matches_used", None),

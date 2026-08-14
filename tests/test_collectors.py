@@ -10,6 +10,7 @@ from football_lottery_agent.collectors import (
     SinaDetail,
     _apply_sina_detail_to_signals,
     _injury_signal_summary,
+    _infer_two_leg_context,
     _media_item_matches_match,
     _news_item_matches_both_teams,
     _odds_market_summary,
@@ -26,6 +27,48 @@ from football_lottery_agent.collectors import (
 
 
 class CollectorTests(unittest.TestCase):
+    def test_infer_two_leg_context_reorders_first_leg_into_current_home_away_order(self) -> None:
+        match = RawMatch(
+            seq=13,
+            kickoff="2026-08-13T19:45:00+00:00",
+            league="欧罗巴",
+            home="哈茨",
+            away="本菲卡",
+        )
+        history = [
+            {
+                "matchTimeFormat": "2026-08-06 20:00:00",
+                "league": "欧罗巴",
+                "team1": "Benfica",
+                "team2": "Hearts",
+                "score1": "6",
+                "score2": "1",
+            }
+        ]
+
+        context = _infer_two_leg_context(history, match)
+
+        self.assertTrue(context["is_second_leg"])
+        self.assertEqual(context["first_leg_home_goals"], 1)
+        self.assertEqual(context["first_leg_away_goals"], 6)
+        self.assertEqual(context["aggregate_margin_home"], -5)
+
+    def test_infer_two_leg_context_rejects_old_or_non_european_rematches(self) -> None:
+        old_history = [
+            {
+                "matchTimeFormat": "2026-06-01 20:00:00",
+                "team1": "本菲卡",
+                "team2": "哈茨",
+                "score1": 2,
+                "score2": 0,
+            }
+        ]
+        european = RawMatch(13, "2026-08-13T19:45:00+00:00", "欧罗巴", "哈茨", "本菲卡")
+        friendly = RawMatch(13, "2026-08-13T19:45:00+00:00", "球会友谊", "哈茨", "本菲卡")
+
+        self.assertEqual(_infer_two_leg_context(old_history, european), {})
+        self.assertEqual(_infer_two_leg_context(old_history, friendly), {})
+
     def test_strength_source_keeps_matched_identity_when_recent_profiles_are_empty(self) -> None:
         squad = SimpleNamespace(
             paper_rating=10.0,

@@ -14,6 +14,65 @@ from football_lottery_agent.strategy import build_ticket_plan
 
 
 class StandaloneApiTests(unittest.TestCase):
+    def test_recent_full_snapshot_is_reused_for_immediate_repeat(self) -> None:
+        now = datetime.now().astimezone()
+        snapshot = {
+            "issue": "26090",
+            "metadata": {
+                "analysis_mode": "full",
+                "snapshot_collected_at": now.isoformat(),
+                "foreign_odds_audit": {"configured": False},
+            },
+            "matches": [{"seq": seq} for seq in range(1, 15)],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "archive.json"
+            output = root / "collected.json"
+            archive.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            reused = standalone_api._reuse_recent_issue_snapshot(
+                archive,
+                output,
+                issue="26090",
+                foreign_odds_configured=False,
+                now=now,
+            )
+            copied = json.loads(output.read_text(encoding="utf-8"))
+
+        self.assertTrue(reused)
+        self.assertTrue(copied["metadata"]["snapshot_reused"])
+        self.assertEqual(copied["metadata"]["snapshot_reuse_age_seconds"], 0.0)
+
+    def test_stale_or_differently_configured_snapshot_is_not_reused(self) -> None:
+        now = datetime.now().astimezone()
+        snapshot = {
+            "issue": "26090",
+            "metadata": {
+                "analysis_mode": "full",
+                "snapshot_collected_at": (now - timedelta(minutes=4)).isoformat(),
+                "foreign_odds_audit": {"configured": False},
+            },
+            "matches": [{"seq": seq} for seq in range(1, 15)],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "archive.json"
+            output = root / "collected.json"
+            archive.write_text(json.dumps(snapshot), encoding="utf-8")
+
+            stale = standalone_api._reuse_recent_issue_snapshot(
+                archive, output, issue="26090", foreign_odds_configured=False, now=now
+            )
+            snapshot["metadata"]["snapshot_collected_at"] = now.isoformat()
+            archive.write_text(json.dumps(snapshot), encoding="utf-8")
+            mismatched = standalone_api._reuse_recent_issue_snapshot(
+                archive, output, issue="26090", foreign_odds_configured=True, now=now
+            )
+
+        self.assertFalse(stale)
+        self.assertFalse(mismatched)
+
     def test_send_feishu_accepts_success_response(self) -> None:
         with patch.object(
             standalone_api,

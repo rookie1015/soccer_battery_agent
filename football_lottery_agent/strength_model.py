@@ -7,10 +7,12 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from .bilingual_identity import fetch_dbpedia_club_aliases
@@ -29,6 +31,9 @@ from .team_identity import (
 
 
 FOTMOB_BASE = "https://www.fotmob.com/api/data"
+_JSON_OBJECT_CACHE_LIMIT = 64
+_JSON_OBJECT_CACHE: OrderedDict[str, tuple[int, int, Any]] = OrderedDict()
+_JSON_OBJECT_CACHE_LOCK = RLock()
 FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
     "英超": ("premier league",),
     "英冠": ("championship",),
@@ -88,6 +93,8 @@ class StrengthProfile:
     loss_rate: float
     home_win_rate: float | None
     away_win_rate: float | None
+    home_matches_used: int
+    away_matches_used: int
     goals_for_per_match: float
     goals_against_per_match: float
     xg_for_per_match: float | None
@@ -192,12 +199,38 @@ def _build_fixture_strength(
     home_ref = _team_ref(match.home, home_side, event, id_overrides)
     away_ref = _team_ref(match.away, away_side, event, id_overrides)
 
-    home = _build_team_profile(home_ref, cache, lookback, xg_matches) if home_ref else None
-    away = _build_team_profile(away_ref, cache, lookback, xg_matches) if away_ref else None
-    unavailable = _fixture_unavailable(event, cache)
-    home_squad = _build_squad_profile(home_ref, cache, unavailable.get("home", ())) if home_ref else None
-    away_squad = _build_squad_profile(away_ref, cache, unavailable.get("away", ())) if away_ref else None
-    h2h = _extract_h2h_from_event(event, cache) if event else ()
+    # A FotMob matchDetails payload is large. The former path parsed each
+    # recent game once for xG and again for player form, and parsed the current
+    # fixture once for absences and again for H2H. Keep one fixture-local map
+    # so every payload is fetched and decoded only once per analysis.
+    match_details: dict[int, Any] = {}
+    # An empty mapping is also a completed fetch result.  Passing it through
+    # prevents the profile and squad paths from retrying the same failed team
+    # request independently.
+    home_team_data = (_fetch_team_data(home_ref, cache) or {}) if home_ref else None
+    away_team_data = (_fetch_team_data(away_ref, cache) or {}) if away_ref else None
+    home = (
+        _build_team_profile(home_ref, cache, lookback, xg_matches, home_team_data, match_details)
+        if home_ref
+        else None
+    )
+    away = (
+        _build_team_profile(away_ref, cache, lookback, xg_matches, away_team_data, match_details)
+        if away_ref
+        else None
+    )
+    unavailable = _fixture_unavailable(event, cache, match_details)
+    home_squad = (
+        _build_squad_profile(home_ref, cache, unavailable.get("home", ()), home_team_data, match_details)
+        if home_ref
+        else None
+    )
+    away_squad = (
+        _build_squad_profile(away_ref, cache, unavailable.get("away", ()), away_team_data, match_details)
+        if away_ref
+        else None
+    )
+    h2h = _extract_h2h_from_event(event, cache, match_details) if event else ()
     return FixtureStrength(
         home=home,
         away=away,
@@ -216,8 +249,21 @@ def _build_fixture_strength(
     )
 
 
-def _build_team_profile(team: TeamRef, cache: Path, lookback: int, xg_matches: int) -> StrengthProfile | None:
-    team_data = _fetch_json(f"{FOTMOB_BASE}/teams?{urllib.parse.urlencode({'id': team.id})}", cache, 86400)
+def _fetch_team_data(team: TeamRef, cache: Path) -> dict[str, Any] | None:
+    payload = _fetch_json(f"{FOTMOB_BASE}/teams?{urllib.parse.urlencode({'id': team.id})}", cache, 86400)
+    return payload if isinstance(payload, dict) else None
+
+
+def _build_team_profile(
+    team: TeamRef,
+    cache: Path,
+    lookback: int,
+    xg_matches: int,
+    team_data: dict[str, Any] | None = None,
+    match_details: dict[int, Any] | None = None,
+) -> StrengthProfile | None:
+    if team_data is None:
+        team_data = _fetch_team_data(team, cache)
     fixtures = (((team_data or {}).get("fixtures") or {}).get("allFixtures") or {}).get("fixtures") or []
     finished = [_fixture_to_match_stat(item, team.id) for item in fixtures if _is_finished(item)]
     finished = [item for item in finished if item is not None]
@@ -229,7 +275,7 @@ def _build_team_profile(team: TeamRef, cache: Path, lookback: int, xg_matches: i
     xg_for = []
     xg_against = []
     for item in recent[:xg_matches]:
-        xg = _fetch_match_xg(item.match_id, team.id, cache)
+        xg = _fetch_match_xg(item.match_id, team.id, cache, match_details)
         if xg:
             xg_for.append(xg[0])
             xg_against.append(xg[1])
@@ -258,6 +304,8 @@ def _build_team_profile(team: TeamRef, cache: Path, lookback: int, xg_matches: i
         loss_rate=round(losses / len(recent), 3),
         home_win_rate=_win_rate(home_games),
         away_win_rate=_win_rate(away_games),
+        home_matches_used=len(home_games),
+        away_matches_used=len(away_games),
         goals_for_per_match=round(gf, 3),
         goals_against_per_match=round(ga, 3),
         xg_for_per_match=round(xgf, 3) if xgf is not None else None,
@@ -312,6 +360,8 @@ def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) ->
             loss_rate=sofascore.loss_rate,
             home_win_rate=sofascore.home_win_rate,
             away_win_rate=sofascore.away_win_rate,
+            home_matches_used=sofascore.home_matches_used,
+            away_matches_used=sofascore.away_matches_used,
             goals_for_per_match=sofascore.goals_for_per_match,
             goals_against_per_match=sofascore.goals_against_per_match,
             xg_for_per_match=sofascore.xg_for_per_match,
@@ -348,6 +398,8 @@ def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) ->
         loss_rate=primary.loss_rate,
         home_win_rate=primary.home_win_rate,
         away_win_rate=primary.away_win_rate,
+        home_matches_used=primary.home_matches_used,
+        away_matches_used=primary.away_matches_used,
         goals_for_per_match=primary.goals_for_per_match,
         goals_against_per_match=primary.goals_against_per_match,
         xg_for_per_match=xgf,
@@ -359,8 +411,15 @@ def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) ->
     )
 
 
-def _build_squad_profile(team: TeamRef, cache: Path, fixture_unavailable: tuple[dict[str, Any], ...]) -> SquadProfile | None:
-    team_data = _fetch_json(f"{FOTMOB_BASE}/teams?{urllib.parse.urlencode({'id': team.id})}", cache, 86400)
+def _build_squad_profile(
+    team: TeamRef,
+    cache: Path,
+    fixture_unavailable: tuple[dict[str, Any], ...],
+    team_data: dict[str, Any] | None = None,
+    match_details: dict[int, Any] | None = None,
+) -> SquadProfile | None:
+    if team_data is None:
+        team_data = _fetch_team_data(team, cache)
     groups = (((team_data or {}).get("squad") or {}).get("squad")) or []
     players = [member for group in groups for member in (group.get("members") or []) if _is_player(member)]
     if len(players) < 11:
@@ -370,7 +429,7 @@ def _build_squad_profile(team: TeamRef, cache: Path, fixture_unavailable: tuple[
     unavailable_ids.update(str(player.get("id")) for player in players if _has_injury(player.get("injury")))
     unavailable_players = [player for player in players if str(player.get("id")) in unavailable_ids]
     available_players = [player for player in players if str(player.get("id")) not in unavailable_ids]
-    recent_forms = _recent_player_forms(team, team_data, cache)
+    recent_forms = _recent_player_forms(team, team_data or {}, cache, match_details=match_details)
     selected = _estimate_starting_eleven(available_players, recent_forms)
     if len(selected) < 8:
         selected = _estimate_starting_eleven(players, recent_forms)
@@ -404,12 +463,14 @@ def _build_squad_profile(team: TeamRef, cache: Path, fixture_unavailable: tuple[
     )
 
 
-def _fixture_unavailable(event: dict[str, Any] | None, cache: Path) -> dict[str, tuple[dict[str, Any], ...]]:
+def _fixture_unavailable(
+    event: dict[str, Any] | None,
+    cache: Path,
+    match_details: dict[int, Any] | None = None,
+) -> dict[str, tuple[dict[str, Any], ...]]:
     if not event or _is_finished(event) or not event.get("id"):
         return {"home": (), "away": ()}
-    payload = _fetch_json(
-        f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': event['id']})}", cache, 900
-    )
+    payload = _match_details_payload(int(event["id"]), cache, 900, match_details)
     lineup = (((payload or {}).get("content") or {}).get("lineup")) or {}
     return {
         "home": tuple(((lineup.get("homeTeam") or {}).get("unavailable")) or []),
@@ -447,15 +508,19 @@ def _position_group(player: dict[str, Any]) -> str:
     return "other"
 
 
-def _recent_player_forms(team: TeamRef, team_data: dict[str, Any], cache: Path, limit: int = 8) -> dict[str, tuple[int, float]]:
+def _recent_player_forms(
+    team: TeamRef,
+    team_data: dict[str, Any],
+    cache: Path,
+    limit: int = 8,
+    match_details: dict[int, Any] | None = None,
+) -> dict[str, tuple[int, float]]:
     fixtures = (((team_data.get("fixtures") or {}).get("allFixtures") or {}).get("fixtures")) or []
     finished = [_fixture_to_match_stat(item, team.id) for item in fixtures if _is_finished(item)]
     recent = sorted((item for item in finished if item is not None), key=lambda item: item.date, reverse=True)[:limit]
     values: dict[str, list[float]] = {}
     for item in recent:
-        payload = _fetch_json(
-            f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': item.match_id})}", cache, 86400 * 30
-        )
+        payload = _match_details_payload(item.match_id, cache, 86400 * 30, match_details)
         lineup = (((payload or {}).get("content") or {}).get("lineup")) or {}
         for side in ("homeTeam", "awayTeam"):
             team_lineup = lineup.get(side) or {}
@@ -872,8 +937,13 @@ def _fixture_to_match_stat(item: dict[str, Any], team_id: int) -> MatchStat | No
     )
 
 
-def _fetch_match_xg(match_id: int, team_id: int, cache: Path) -> tuple[float, float] | None:
-    payload = _fetch_json(f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': match_id})}", cache, 86400 * 30)
+def _fetch_match_xg(
+    match_id: int,
+    team_id: int,
+    cache: Path,
+    match_details: dict[int, Any] | None = None,
+) -> tuple[float, float] | None:
+    payload = _match_details_payload(match_id, cache, 86400 * 30, match_details)
     if not payload or payload.get("error"):
         return None
     home_id = int(((payload.get("general") or {}).get("homeTeam") or {}).get("id", -1))
@@ -897,11 +967,15 @@ def _fetch_match_xg(match_id: int, team_id: int, cache: Path) -> tuple[float, fl
     return (home_xg, away_xg) if team_id == home_id else (away_xg, home_xg)
 
 
-def _extract_h2h_from_event(event: dict[str, Any], cache: Path) -> tuple[str, ...]:
+def _extract_h2h_from_event(
+    event: dict[str, Any],
+    cache: Path,
+    match_details: dict[int, Any] | None = None,
+) -> tuple[str, ...]:
     match_id = event.get("id")
     if not match_id:
         return ()
-    payload = _fetch_json(f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': match_id})}", cache, 3600)
+    payload = _match_details_payload(int(match_id), cache, 3600, match_details)
     if not payload or payload.get("error"):
         return ()
     # Pre-match pages vary; keep this conservative and rely on team histories when absent.
@@ -912,22 +986,73 @@ def _is_finished(item: dict[str, Any]) -> bool:
     return bool(((item.get("status") or {}).get("finished")))
 
 
+def _match_details_payload(
+    match_id: int,
+    cache: Path,
+    max_age_seconds: int,
+    match_details: dict[int, Any] | None = None,
+) -> Any:
+    if match_details is not None and match_id in match_details:
+        return match_details[match_id]
+    payload = _fetch_json(
+        f"{FOTMOB_BASE}/matchDetails?{urllib.parse.urlencode({'matchId': match_id})}",
+        cache,
+        max_age_seconds,
+    )
+    if match_details is not None:
+        match_details[match_id] = payload
+    return payload
+
+
 def _fetch_json(url: str, cache: Path, max_age_seconds: int) -> Any:
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
     if path.exists():
         age = datetime.now().timestamp() - path.stat().st_mtime
         if age <= max_age_seconds:
-            return loads_json(path.read_text(encoding="utf-8", errors="replace"))
+            return _read_json_object(path)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
     try:
         text = read_url_text(req, timeout=12)
     except (OSError, urllib.error.URLError):
         if path.exists():
-            return loads_json(path.read_text(encoding="utf-8", errors="replace"))
+            return _read_json_object(path)
         return None
     path.write_text(text, encoding="utf-8")
-    return loads_json(text)
+    payload = loads_json(text)
+    _remember_json_object(path, payload)
+    return payload
+
+
+def _read_json_object(path: Path) -> Any:
+    stat = path.stat()
+    key = str(path.absolute())
+    signature = (stat.st_mtime_ns, stat.st_size)
+    with _JSON_OBJECT_CACHE_LOCK:
+        cached = _JSON_OBJECT_CACHE.get(key)
+        if cached is not None and cached[:2] == signature:
+            _JSON_OBJECT_CACHE.move_to_end(key)
+            return cached[2]
+    payload = loads_json(path.read_text(encoding="utf-8", errors="replace"))
+    _remember_json_object(path, payload, signature=signature)
+    return payload
+
+
+def _remember_json_object(
+    path: Path,
+    payload: Any,
+    *,
+    signature: tuple[int, int] | None = None,
+) -> None:
+    if signature is None:
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+    key = str(path.absolute())
+    with _JSON_OBJECT_CACHE_LOCK:
+        _JSON_OBJECT_CACHE[key] = (signature[0], signature[1], payload)
+        _JSON_OBJECT_CACHE.move_to_end(key)
+        while len(_JSON_OBJECT_CACHE) > _JSON_OBJECT_CACHE_LIMIT:
+            _JSON_OBJECT_CACHE.popitem(last=False)
 
 
 def _walk_dicts(value: Any):

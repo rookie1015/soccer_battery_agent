@@ -3,11 +3,100 @@ from dataclasses import replace
 
 from football_lottery_agent.dixon_coles import forecast
 from football_lottery_agent.loader import load_issue
-from football_lottery_agent.models import Match
-from football_lottery_agent.predictor import _blend_weights, _select_picks, _signal_scores, predict_match
+from football_lottery_agent.models import Match, Odds
+from football_lottery_agent.predictor import (
+    _apply_venue_form_adjustment,
+    _blend_weights,
+    _select_picks,
+    _signal_scores,
+    predict_match,
+)
 
 
 class DixonColesTests(unittest.TestCase):
+    def test_venue_form_uses_shrunk_residual_instead_of_raw_home_away_comparison(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        probabilities = {"3": 0.20, "1": 0.20, "0": 0.60}
+        venue_match = replace(
+            match,
+            sources={
+                "strength_model": {
+                    "home_overall_win_rate": 0.45,
+                    "home_venue_win_rate": 0.50,
+                    "home_venue_matches": 4,
+                    "away_overall_win_rate": 0.70,
+                    "away_venue_win_rate": 0.25,
+                    "away_venue_matches": 4,
+                }
+            },
+        )
+
+        adjusted, details = _apply_venue_form_adjustment(venue_match, probabilities)
+
+        self.assertGreater(adjusted["3"], probabilities["3"])
+        self.assertLess(adjusted["0"], probabilities["0"])
+        self.assertLessEqual(abs(details["shift"]), 0.04)
+
+    def test_venue_form_ignores_one_match_samples(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        probabilities = {"3": 0.20, "1": 0.20, "0": 0.60}
+        tiny_sample = replace(
+            match,
+            sources={
+                "strength_model": {
+                    "home_overall_win_rate": 0.45,
+                    "home_venue_win_rate": 1.0,
+                    "home_venue_matches": 1,
+                    "away_overall_win_rate": 0.70,
+                    "away_venue_win_rate": 0.0,
+                    "away_venue_matches": 1,
+                }
+            },
+        )
+
+        adjusted, details = _apply_venue_form_adjustment(tiny_sample, probabilities)
+
+        self.assertEqual(adjusted, probabilities)
+        self.assertEqual(details, {})
+
+    def test_large_first_leg_lead_prevents_benfica_away_single(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        benfica_match = replace(
+            match,
+            league="欧罗巴",
+            home="哈茨",
+            away="本菲卡",
+            odds=Odds(home=6.80, draw=4.70, away=1.36),
+            sources={
+                "strength_model": {
+                    "home_overall_win_rate": 0.40,
+                    "home_venue_win_rate": 0.60,
+                    "home_venue_matches": 5,
+                    "away_overall_win_rate": 0.75,
+                    "away_venue_win_rate": 0.25,
+                    "away_venue_matches": 4,
+                },
+                "knockout_context": {
+                    "is_second_leg": True,
+                    "first_leg_home_goals": 1,
+                    "first_leg_away_goals": 6,
+                    "aggregate_margin_home": -5,
+                },
+            },
+        )
+        ordinary_match = replace(benfica_match, sources={"strength_model": benfica_match.sources["strength_model"]})
+
+        forced_single_policy = {"single_top": 0.40, "single_spread": 0.10}
+        prediction = predict_match(benfica_match, selection_policy=forced_single_policy)
+        ordinary = predict_match(ordinary_match, selection_policy=forced_single_policy)
+
+        self.assertLess(prediction.probabilities["0"], ordinary.probabilities["0"])
+        self.assertTrue(prediction.draw_guard)
+        self.assertIn("0", prediction.picks)
+        self.assertIn("1", prediction.picks)
+        self.assertTrue(any("次回合单选保护" in reason for reason in prediction.reasons))
+        self.assertTrue(any("同场地近期表现" in reason for reason in prediction.reasons))
+
     def test_forecast_returns_normalized_outcome_probabilities(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
 

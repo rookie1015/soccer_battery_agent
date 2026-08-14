@@ -32,6 +32,8 @@ class SofaScoreTeamProfile:
     loss_rate: float
     home_win_rate: float | None
     away_win_rate: float | None
+    home_matches_used: int
+    away_matches_used: int
     goals_for_per_match: float
     goals_against_per_match: float
     xg_for_per_match: float | None
@@ -282,6 +284,8 @@ def _profile_for_team(
     loss_rate = max(0.0, 1.0 - win_rate - draw_rate)
     home_win_rate = _side_win_rate(recent, match_weights, True)
     away_win_rate = _side_win_rate(recent, match_weights, False)
+    home_matches_used = sum(1 for item in recent if item.is_home)
+    away_matches_used = len(recent) - home_matches_used
 
     xg_samples: list[tuple[float, float, float]] = []
     for item, weight in zip(recent[:xg_matches], match_weights[:xg_matches]):
@@ -305,6 +309,8 @@ def _profile_for_team(
         loss_rate=round(loss_rate, 3),
         home_win_rate=_rounded(home_win_rate),
         away_win_rate=_rounded(away_win_rate),
+        home_matches_used=home_matches_used,
+        away_matches_used=away_matches_used,
         goals_for_per_match=round(goals_for, 3),
         goals_against_per_match=round(goals_against, 3),
         xg_for_per_match=_rounded(xgf),

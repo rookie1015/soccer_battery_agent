@@ -11,6 +11,9 @@ SELECTION_OUTCOME_LABELS = {"3": "主胜", "1": "平局", "0": "客胜"}
 SECONDARY_RAW_GAP_LIMIT = 0.04
 SECONDARY_EVIDENCE_MARGIN = 0.015
 MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
+VENUE_FORM_PRIOR_MATCHES = 6.0
+MAX_VENUE_PROBABILITY_SHIFT = 0.04
+MAX_KNOCKOUT_PROBABILITY_SHIFT = 0.07
 DEFAULT_SELECTION_POLICY = {
     # Recent reviews showed that the former 52%/14-point gate admitted too
     # many false bankers. A single now needs a materially stronger edge; the
@@ -47,6 +50,8 @@ def predict_match(
         for outcome in ("3", "1", "0")
     }
     probabilities = _normalize(mixed)
+    probabilities, venue_adjustment = _apply_venue_form_adjustment(match, probabilities)
+    probabilities, knockout_adjustment = _apply_knockout_adjustment(match, probabilities)
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
 
     top_outcome, top_prob = ranked[0]
@@ -65,7 +70,9 @@ def predict_match(
         else {}
     )
     picks = _select_picks(ranked, selection_scores=selection_scores, selection_policy=selection_policy)
-    draw_guard = _favorite_draw_guard(probabilities, picks, math_forecast)
+    math_draw_guard = _favorite_draw_guard(probabilities, picks, math_forecast)
+    knockout_draw_guard = _knockout_single_guard(match, picks)
+    draw_guard = math_draw_guard or knockout_draw_guard
     if draw_guard:
         picks = (top_outcome, "1")
 
@@ -73,12 +80,21 @@ def predict_match(
     risk = _risk_label(top_prob, spread, len(picks))
     scorelines = _predict_scorelines(match, probabilities, math_forecast)
     reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
+    if venue_adjustment:
+        reasons.append(_venue_adjustment_reason(match, venue_adjustment))
+    if knockout_adjustment:
+        reasons.append(_knockout_adjustment_reason(match, knockout_adjustment))
     if selection_scores:
         reasons.append(_selection_score_reason(selection_scores))
-    if draw_guard:
+    if math_draw_guard:
         reasons.append(
             "强胆防平：综合模型仍首选热门方，但 Dixon-Coles 对平局的判断明显更高，"
             "模型原始建议保留平局，避免把模型分歧误当成稳胆。"
+        )
+    if knockout_draw_guard:
+        reasons.append(
+            "次回合单选保护：热门方已在总比分明显领先，晋级不要求本场90分钟继续取胜，"
+            "因此强制保留平局，不能按普通联赛稳胆处理。"
         )
     reasons.insert(
         0,
@@ -266,6 +282,123 @@ def _favorite_draw_guard(
         and math_draw >= 0.24
         and math_draw - blended_draw >= 0.04
         and math_forecast.data_quality_score >= 0.50
+    )
+
+
+def _apply_venue_form_adjustment(
+    match: Match,
+    probabilities: dict[str, float],
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Apply a shrunk team-specific home/away residual to the 1X2 blend.
+
+    The comparison is venue form versus the same team's overall form, not raw
+    home versus away win rates.  This avoids treating a strong club's normal
+    away record as weak and keeps one or two matches from dominating.
+    """
+    source = match.sources.get("strength_model") if isinstance(match.sources, dict) else {}
+    source = source if isinstance(source, dict) else {}
+    home_overall = _probability_number(source.get("home_overall_win_rate"))
+    away_overall = _probability_number(source.get("away_overall_win_rate"))
+    home_venue = _probability_number(source.get("home_venue_win_rate"))
+    away_venue = _probability_number(source.get("away_venue_win_rate"))
+    home_samples = _nonnegative_number(source.get("home_venue_matches"))
+    away_samples = _nonnegative_number(source.get("away_venue_matches"))
+    if None in (home_overall, away_overall, home_venue, away_venue, home_samples, away_samples):
+        return probabilities, {}
+    if home_samples < 2 or away_samples < 2:
+        return probabilities, {}
+
+    home_reliability = home_samples / (home_samples + VENUE_FORM_PRIOR_MATCHES)
+    away_reliability = away_samples / (away_samples + VENUE_FORM_PRIOR_MATCHES)
+    home_residual = (home_venue - home_overall) * home_reliability
+    away_residual = (away_venue - away_overall) * away_reliability
+    shift = max(
+        -MAX_VENUE_PROBABILITY_SHIFT,
+        min(MAX_VENUE_PROBABILITY_SHIFT, (home_residual - away_residual) * 0.14),
+    )
+    if abs(shift) < 0.002:
+        return probabilities, {}
+
+    adjusted = dict(probabilities)
+    adjusted["3"] = max(0.01, adjusted["3"] + shift)
+    adjusted["0"] = max(0.01, adjusted["0"] - shift)
+    return _normalize(adjusted), {
+        "shift": shift,
+        "home_samples": home_samples,
+        "away_samples": away_samples,
+        "home_venue": home_venue,
+        "away_venue": away_venue,
+        "home_overall": home_overall,
+        "away_overall": away_overall,
+    }
+
+
+def _apply_knockout_adjustment(
+    match: Match,
+    probabilities: dict[str, float],
+) -> tuple[dict[str, float], dict[str, float]]:
+    context = _knockout_context(match)
+    if not context:
+        return probabilities, {}
+    try:
+        home_margin = int(context.get("aggregate_margin_home"))
+    except (TypeError, ValueError):
+        return probabilities, {}
+
+    favorite = "3" if probabilities["3"] >= probabilities["0"] else "0"
+    favorite_margin = home_margin if favorite == "3" else -home_margin
+    if favorite_margin < 2:
+        return probabilities, {}
+
+    shift = min(MAX_KNOCKOUT_PROBABILITY_SHIFT, 0.015 * favorite_margin)
+    adjusted = dict(probabilities)
+    actual_shift = min(shift, max(0.0, adjusted[favorite] - 0.34))
+    opponent = "0" if favorite == "3" else "3"
+    adjusted[favorite] -= actual_shift
+    adjusted["1"] += actual_shift * 0.72
+    adjusted[opponent] += actual_shift * 0.28
+    return _normalize(adjusted), {
+        "favorite": favorite,
+        "aggregate_lead": float(favorite_margin),
+        "shift": actual_shift,
+    }
+
+
+def _knockout_single_guard(match: Match, picks: tuple[str, ...]) -> bool:
+    if len(picks) != 1 or picks[0] == "1":
+        return False
+    context = _knockout_context(match)
+    if not context:
+        return False
+    try:
+        home_margin = int(context.get("aggregate_margin_home"))
+    except (TypeError, ValueError):
+        return False
+    favorite_margin = home_margin if picks[0] == "3" else -home_margin
+    return favorite_margin >= 3
+
+
+def _knockout_context(match: Match) -> dict[str, object]:
+    context = match.sources.get("knockout_context") if isinstance(match.sources, dict) else {}
+    return context if isinstance(context, dict) and context.get("is_second_leg") else {}
+
+
+def _venue_adjustment_reason(match: Match, values: dict[str, float]) -> str:
+    shift = values["shift"]
+    direction = f"{match.home}主胜" if shift > 0 else f"{match.away}客胜"
+    return (
+        "同场地近期表现："
+        f"{match.home}主场胜率 {values['home_venue']:.1%}（{int(values['home_samples'])}场，整体 {values['home_overall']:.1%}），"
+        f"{match.away}客场胜率 {values['away_venue']:.1%}（{int(values['away_samples'])}场，整体 {values['away_overall']:.1%}）；"
+        f"经6场先验收缩后，{direction}概率调整 {abs(shift):.1%}。"
+    )
+
+
+def _knockout_adjustment_reason(match: Match, values: dict[str, float]) -> str:
+    favorite = match.home if values["favorite"] == "3" else match.away
+    return (
+        f"两回合情境：{favorite}首回合折算后领先 {int(values['aggregate_lead'])} 球，"
+        f"晋级不要求本场90分钟继续取胜；其胜率下调 {values['shift']:.1%}，主要转移至平局。"
     )
 
 
@@ -555,6 +688,14 @@ def _positive_number(value: object) -> float | None:
     except (TypeError, ValueError):
         return None
     return number if number > 0 else None
+
+
+def _nonnegative_number(value: object) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number >= 0 else None
 
 
 def _probability_number(value: object) -> float | None:
