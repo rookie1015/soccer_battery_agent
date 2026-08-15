@@ -40,8 +40,12 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("budget_adjusted", first)
         self.assertIn("budget_forced_single", first)
         self.assertIn("draw_guard", first)
+        self.assertIn("tactical_draw", first)
+        self.assertIn("market_probabilities", first)
+        self.assertIn("blend_weights", first)
         self.assertIn("ticket_single_count", report["metrics"])
         self.assertIn("budget_forced_single_count", report["metrics"])
+        self.assertIn("tactical_draw_count", report["metrics"])
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from football_lottery_agent.dixon_coles import DixonColesForecast
 from football_lottery_agent.predictor import _favorite_draw_guard, _has_informative_signals, _select_picks
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import (
+    _apply_tactical_draw_strategy,
     _downgrade_prediction,
     _fit_predictions_to_budget,
     _pick_coverage_probability,
@@ -306,6 +307,58 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(adjusted[0].picks, ("3", "1", "0"))
         self.assertEqual(adjusted[1].picks, ("3",))
         self.assertFalse(adjusted[1].budget_forced_single)
+
+    def test_issue_can_select_one_explicit_high_risk_tactical_draw(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[:2]
+        candidates = tuple(
+            replace(
+                prediction,
+                match=replace(
+                    prediction.match,
+                    sources={
+                        **prediction.match.sources,
+                        "odds": "sina_average_euro",
+                        "odds_market": {
+                            "market_movement": {"3": -0.005, "1": 0.010, "0": -0.005},
+                            "asian_current_line": 0.0,
+                        },
+                    },
+                ),
+                probabilities={"3": 0.34, "1": 0.32 - index * 0.01, "0": 0.34 + index * 0.01},
+                picks=("3", "1", "0"),
+                original_picks=("3", "1", "0"),
+                market_probabilities={"3": 0.36, "1": 0.29, "0": 0.35},
+                dixon_coles_probabilities={"3": 0.335, "1": 0.33, "0": 0.335},
+                dixon_coles_quality="strength",
+                dixon_coles_quality_score=0.80,
+                tactical_draw=False,
+            )
+            for index, prediction in enumerate(base)
+        )
+
+        adjusted = _apply_tactical_draw_strategy(candidates)
+        tactical = [prediction for prediction in adjusted if prediction.tactical_draw]
+
+        self.assertEqual(len(tactical), 1)
+        self.assertEqual(tactical[0].match.seq, candidates[0].match.seq)
+        self.assertEqual(tactical[0].picks, ("1",))
+        self.assertEqual(tactical[0].analysis_picks, ("1",))
+        self.assertEqual(tactical[0].risk, "高")
+        self.assertTrue(any("不是稳胆" in reason for reason in tactical[0].reasons))
+
+    def test_tactical_draw_rejects_low_quality_math(self) -> None:
+        prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        candidate = replace(
+            prediction,
+            probabilities={"3": 0.34, "1": 0.32, "0": 0.34},
+            market_probabilities={"3": 0.36, "1": 0.29, "0": 0.35},
+            dixon_coles_probabilities={"3": 0.335, "1": 0.33, "0": 0.335},
+            dixon_coles_quality_score=0.30,
+        )
+
+        adjusted = _apply_tactical_draw_strategy((candidate,))
+
+        self.assertFalse(adjusted[0].tactical_draw)
 
 
 if __name__ == "__main__":

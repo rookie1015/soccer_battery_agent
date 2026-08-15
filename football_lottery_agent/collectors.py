@@ -9,13 +9,13 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .json_utils import loads_json
 from .http_utils import read_url_text
@@ -134,6 +134,7 @@ def collect_issue(
     skip_context_fetches: bool = False,
     skip_sina_details: bool = False,
     sina_odds_only: bool = False,
+    cancel_check: Callable[[], None] | None = None,
 ) -> Path:
     collection_started = time.perf_counter()
     stage_started = collection_started
@@ -145,13 +146,26 @@ def collect_issue(
         timings[name] = round(now - stage_started, 3)
         stage_started = now
 
+    def check_cancelled() -> None:
+        if cancel_check is not None:
+            cancel_check()
+
     cache = Path(cache_dir)
+    check_cancelled()
     # Learned mappings live beside the cache so Android app upgrades do not
     # overwrite them and every downstream provider shares the same identities.
     configure_team_identity(identity_path_for_cache(cache))
-    source_issue, raw_matches = load_matches(source=source, seed_path=seed_path, cache_dir=cache, issue=issue)
+    source_issue, raw_matches = load_matches(
+        source=source,
+        seed_path=seed_path,
+        cache_dir=cache,
+        issue=issue,
+        cancel_check=cancel_check,
+    )
+    check_cancelled()
     issue_id = issue or source_issue or f"collected-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
-    metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache)
+    metadata = {} if offline else fetch_sporttery_issue_metadata(issue_id, cache, cancel_check=cancel_check)
+    check_cancelled()
     odds_by_seq = load_odds_csv(odds_path) if odds_path else {}
     finish_stage("schedule_and_metadata")
     strength_by_seq = {}
@@ -167,7 +181,9 @@ def collect_issue(
             team_ids_path=strength_team_ids,
             lookback=strength_lookback,
             xg_matches=strength_xg_matches,
+            cancel_check=cancel_check,
         )
+    check_cancelled()
     finish_stage("strength")
     foreign_requested = foreign_odds_requested or foreign_odds
     foreign_odds_audit: dict[str, Any] = {
@@ -243,12 +259,26 @@ def collect_issue(
         "polymarket": collect_polymarket,
     }
     context_results: dict[str, Any] = {}
-    with ThreadPoolExecutor(max_workers=len(context_calls)) as executor:
-        futures = {name: executor.submit(measured, call) for name, call in context_calls.items()}
-        for name, future in futures.items():
-            value, elapsed = future.result()
-            context_results[name] = value
-            timings[name] = elapsed
+    executor = ThreadPoolExecutor(max_workers=len(context_calls))
+    futures = {executor.submit(measured, call): name for name, call in context_calls.items()}
+    pending = set(futures)
+    try:
+        while pending:
+            check_cancelled()
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for future in done:
+                value, elapsed = future.result()
+                name = futures[future]
+                context_results[name] = value
+                timings[name] = elapsed
+    except BaseException:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    check_cancelled()
     stage_started = time.perf_counter()
     briefings = context_results["briefings"]
     media_briefings = context_results["mainstream_media"]
@@ -257,6 +287,7 @@ def collect_issue(
     polymarket_by_seq = context_results["polymarket"]
     matches: list[dict[str, Any]] = []
     for item in raw_matches:
+        check_cancelled()
         detail = sina_details.get(item.seq, SinaDetail(None, (), (), (), {}))
         briefing = briefings.get(item.seq, [])
         media_items = media_briefings.get(item.seq, [])
@@ -349,6 +380,7 @@ def collect_issue(
         )
 
     output = Path(output_path)
+    check_cancelled()
     output.parent.mkdir(parents=True, exist_ok=True)
     timings["assembly"] = round(time.perf_counter() - stage_started, 3)
     timings["total"] = round(time.perf_counter() - collection_started, 3)
@@ -367,9 +399,16 @@ def collect_issue(
     return output
 
 
-def fetch_sporttery_issue_metadata(issue: str, cache_dir: str | Path = "data/cache") -> dict[str, str]:
+def fetch_sporttery_issue_metadata(
+    issue: str,
+    cache_dir: str | Path = "data/cache",
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> dict[str, str]:
     cache = Path(cache_dir)
     for sell_status in ("0", "1", "3"):
+        if cancel_check is not None:
+            cancel_check()
         params = {
             "param": "90,0",
             "lotteryDrawNum": issue,
@@ -378,7 +417,7 @@ def fetch_sporttery_issue_metadata(issue: str, cache_dir: str | Path = "data/cac
         }
         url = f"{SPORTTERY_FOOTBALL_MATCH_URL}?{urllib.parse.urlencode(params)}"
         try:
-            raw = loads_json(_fetch_text(url, cache, max_age_seconds=300))
+            raw = loads_json(_fetch_text(url, cache, max_age_seconds=300, cancel_check=cancel_check))
         except (urllib.error.URLError, ValueError):
             continue
         if str(raw.get("errorCode")) != "0":
@@ -439,11 +478,14 @@ def load_matches(
     seed_path: str | Path | None,
     cache_dir: Path,
     issue: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> tuple[str, list[RawMatch]]:
     if seed_path:
         return "", load_seed_matches(seed_path)
     if source == "sina":
-        return fetch_sina_sfc(cache_dir, issue=issue)
+        if cancel_check is None:
+            return fetch_sina_sfc(cache_dir, issue=issue)
+        return fetch_sina_sfc(cache_dir, issue=issue, cancel_check=cancel_check)
     raise ValueError("Unsupported source. Use 'sina' or pass --seed.")
 
 
@@ -482,10 +524,11 @@ def fetch_sina_sfc(
     cache_dir: Path,
     url: str = SINA_SFC_URL,
     issue: str | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> tuple[str, list[RawMatch]]:
     if issue:
         url = f"{url}{urllib.parse.quote(issue)}"
-    html = _fetch_text(url, cache_dir, max_age_seconds=900)
+    html = _fetch_text(url, cache_dir, max_age_seconds=900, cancel_check=cancel_check)
     source_issue = _first_match(r'name="num"\s+value="(\d+)"', html) or _first_match(r'<option value="(\d+)"[^>]*selected', html)
     if issue and source_issue and source_issue != issue:
         raise ValueError(f"Sina returned issue {source_issue} when issue {issue} was requested.")
@@ -1185,6 +1228,7 @@ def _fetch_text(
     *,
     timeout_seconds: float = 8,
     attempts: int = 3,
+    cancel_check: Callable[[], None] | None = None,
 ) -> str:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.txt"
@@ -1201,7 +1245,12 @@ def _fetch_text(
         }
     request = urllib.request.Request(url, headers=headers)
     try:
-        text = read_url_text(request, timeout=timeout_seconds, attempts=attempts)
+        text = read_url_text(
+            request,
+            timeout=timeout_seconds,
+            attempts=attempts,
+            cancel_check=cancel_check,
+        )
     except urllib.error.HTTPError as exc:
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")

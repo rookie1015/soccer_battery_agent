@@ -3,6 +3,7 @@ from __future__ import annotations
 import http.client
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 
 
 def read_url_text(
@@ -11,6 +12,7 @@ def read_url_text(
     timeout: float,
     attempts: int = 3,
     encoding: str = "utf-8",
+    cancel_check: Callable[[], None] | None = None,
 ) -> str:
     """Read a complete HTTP response, retrying truncated mobile downloads.
 
@@ -22,9 +24,14 @@ def read_url_text(
     attempts = max(1, int(attempts))
     last_error: BaseException | None = None
     for _ in range(attempts):
+        if cancel_check is not None:
+            cancel_check()
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read().decode(encoding, errors="replace")
+                text = response.read().decode(encoding, errors="replace")
+                if cancel_check is not None:
+                    cancel_check()
+                return text
         except urllib.error.HTTPError:
             raise
         except (http.client.HTTPException, urllib.error.URLError, OSError) as exc:

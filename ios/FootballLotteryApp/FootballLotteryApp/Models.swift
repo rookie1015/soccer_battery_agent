@@ -88,6 +88,7 @@ struct ReportMetrics: Decodable {
     let singleCount: Int
     let ticketSingleCount: Int?
     let budgetForcedSingleCount: Int?
+    let tacticalDrawCount: Int?
     let lowRiskCount: Int
     let averageConfidence: Double
 
@@ -96,6 +97,7 @@ struct ReportMetrics: Decodable {
         case singleCount = "single_count"
         case ticketSingleCount = "ticket_single_count"
         case budgetForcedSingleCount = "budget_forced_single_count"
+        case tacticalDrawCount = "tactical_draw_count"
         case lowRiskCount = "low_risk_count"
         case averageConfidence = "average_confidence"
     }
@@ -118,6 +120,7 @@ struct MatchPrediction: Decodable, Identifiable {
     let budgetAdjusted: Bool?
     let budgetForcedSingle: Bool?
     let drawGuard: Bool?
+    let tacticalDraw: Bool?
     let confidence: Double
     let risk: String
     let probabilities: OutcomeProbabilities
@@ -139,6 +142,7 @@ struct MatchPrediction: Decodable, Identifiable {
         case budgetAdjusted = "budget_adjusted"
         case budgetForcedSingle = "budget_forced_single"
         case drawGuard = "draw_guard"
+        case tacticalDraw = "tactical_draw"
         case confidence
         case risk
         case probabilities

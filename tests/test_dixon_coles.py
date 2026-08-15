@@ -7,6 +7,8 @@ from football_lottery_agent.models import Match, Odds
 from football_lottery_agent.predictor import (
     _apply_venue_form_adjustment,
     _blend_weights,
+    _cap_market_anchor_shift,
+    _effective_blend_weights,
     _select_picks,
     _signal_scores,
     predict_match,
@@ -322,6 +324,25 @@ class DixonColesTests(unittest.TestCase):
 
         for actual, expected in zip(weights, (0.20, 0.70, 0.10)):
             self.assertAlmostEqual(actual, expected)
+
+    def test_real_market_recovers_weight_from_missing_information_and_weak_math(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        neutral = replace(match, signals=type(match.signals)(), sources={})
+        math_forecast = forecast(neutral)
+
+        market, information, mathematical = _effective_blend_weights(neutral, math_forecast, None)
+
+        self.assertAlmostEqual(information, 0.0)
+        self.assertAlmostEqual(mathematical, 0.12 * 0.30)
+        self.assertAlmostEqual(market, 1.0 - mathematical)
+
+    def test_market_anchor_caps_every_outcome_shift(self) -> None:
+        market = {"3": 0.60, "1": 0.25, "0": 0.15}
+
+        adjusted = _cap_market_anchor_shift({"3": 0.30, "1": 0.35, "0": 0.35}, market)
+
+        self.assertAlmostEqual(sum(adjusted.values()), 1.0)
+        self.assertLessEqual(max(abs(adjusted[key] - market[key]) for key in market), 0.120001)
 
 
 if __name__ == "__main__":

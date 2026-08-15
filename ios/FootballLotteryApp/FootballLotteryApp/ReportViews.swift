@@ -20,6 +20,7 @@ struct ReportSummaryView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 MetricTile(title: "比赛", value: "\(report.metrics.matchCount)", tint: .blue)
                 MetricTile(title: "模型单选", value: "\(report.metrics.singleCount)", tint: .indigo)
+                MetricTile(title: "战术单平", value: "\(report.metrics.tacticalDrawCount ?? 0)", tint: .orange)
                 MetricTile(title: "低风险", value: "\(report.metrics.lowRiskCount)", tint: .green)
                 MetricTile(title: "平均置信", value: "\(report.metrics.averageConfidence, specifier: "%.1f")%", tint: .orange)
             }
@@ -117,6 +118,11 @@ struct MatchDetailView: View {
                     HStack {
                         RiskBadge(text: (prediction.analysisPickLabels ?? prediction.pickLabels).joined(separator: " / "))
                         RiskBadge(text: "风险 \(prediction.risk)")
+                    }
+                    if prediction.tacticalDraw == true {
+                        Text("战术单平 · 高风险主动博取，不属于稳胆")
+                            .font(.caption.bold())
+                            .foregroundStyle(.orange)
                     }
                     if prediction.budgetAdjusted == true {
                         Text(

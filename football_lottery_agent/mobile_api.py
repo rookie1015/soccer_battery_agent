@@ -13,6 +13,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     model_singles = sum(1 for prediction in predictions if len(prediction.analysis_picks) == 1)
     ticket_singles = sum(1 for prediction in predictions if len(prediction.picks) == 1)
     forced_singles = sum(1 for prediction in predictions if prediction.budget_forced_single)
+    tactical_draws = sum(1 for prediction in predictions if prediction.tactical_draw)
     avg_confidence = (
         sum(prediction.confidence for prediction in predictions) / len(predictions)
         if predictions
@@ -23,6 +24,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "single_count": model_singles,
         "ticket_single_count": ticket_singles,
         "budget_forced_single_count": forced_singles,
+        "tactical_draw_count": tactical_draws,
         "average_confidence": round(avg_confidence, 1),
     }
     if include_review_fields:
@@ -61,12 +63,21 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         "budget_forced_single": prediction.budget_forced_single,
         "budget_removed_picks": list(prediction.budget_removed_picks),
         "draw_guard": prediction.draw_guard,
+        "tactical_draw": prediction.tactical_draw,
+        "tactical_draw_score": round(prediction.tactical_draw_score * 100, 1),
+        "tactical_draw_evidence": list(prediction.tactical_draw_evidence),
         "confidence": prediction.confidence,
         "probabilities": {
             "home": round(prediction.probabilities["3"] * 100, 1),
             "draw": round(prediction.probabilities["1"] * 100, 1),
             "away": round(prediction.probabilities["0"] * 100, 1),
         },
+        "market_probabilities": {
+            "home": round(prediction.market_probabilities.get("3", 0.0) * 100, 1),
+            "draw": round(prediction.market_probabilities.get("1", 0.0) * 100, 1),
+            "away": round(prediction.market_probabilities.get("0", 0.0) * 100, 1),
+        },
+        "blend_weights": dict(prediction.blend_weights),
         "reasons": list(prediction.reasons),
     }
     if include_review_fields:

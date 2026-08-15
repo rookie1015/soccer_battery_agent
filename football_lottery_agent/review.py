@@ -375,6 +375,8 @@ def _diagnostic_tags(prediction: Prediction, result: MatchResult) -> tuple[str, 
     top_outcome, top_probability = max(prediction.probabilities.items(), key=lambda item: item[1])
     if result.outcome == "1" and "1" not in prediction.picks:
         tags.append("平局漏判")
+    if prediction.tactical_draw:
+        tags.append("战术单平失误")
     if prediction.budget_adjusted and result.outcome in prediction.analysis_picks:
         tags.append("预算压缩导致漏判")
     elif prediction.budget_forced_single:

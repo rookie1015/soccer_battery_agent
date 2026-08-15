@@ -97,6 +97,7 @@ def _render_prediction(prediction: Prediction) -> list[str]:
         "",
         f"- 比赛：{match.league}，{match.kickoff.isoformat()}",
         f"- 模型建议：`{prediction.analysis_pick_text}`（{_pick_labels(prediction.analysis_picks)}）",
+        f"- 策略类型：{_strategy_label(prediction)}",
         f"- 置信度：{prediction.confidence:.1f}%",
     ]
     if prediction.budget_adjusted:
@@ -105,6 +106,14 @@ def _render_prediction(prediction: Prediction) -> list[str]:
     for reason in prediction.reasons:
         lines.append(f"- {reason}")
     return lines
+
+
+def _strategy_label(prediction: Prediction) -> str:
+    if prediction.tactical_draw:
+        return "战术单平（高风险，不是稳胆）"
+    if len(prediction.analysis_picks) == 1:
+        return "稳胆单选"
+    return "覆盖型选择"
 
 
 def _pick_labels(picks: tuple[str, ...]) -> str:

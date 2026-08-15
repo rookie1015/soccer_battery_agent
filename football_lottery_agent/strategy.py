@@ -4,12 +4,23 @@ from dataclasses import replace
 from math import log
 
 from .models import Issue, Prediction, TicketPlan
-from .predictor import SELECTION_OUTCOME_LABELS, SELECTION_REASON_PREFIX, _draw_context, predict_issue, selection_reason
+from .predictor import (
+    SELECTION_OUTCOME_LABELS,
+    SELECTION_REASON_PREFIX,
+    _draw_context,
+    _has_informative_signals,
+    predict_issue,
+    selection_reason,
+)
 
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
 STAKE_PER_LINE_YUAN = 2
 MIN_SAFE_BUDGET_SINGLE_PROBABILITY = 0.60
+TACTICAL_DRAW_MIN_PROBABILITY = 0.29
+TACTICAL_DRAW_MAX_TOP_GAP = 0.06
+TACTICAL_DRAW_MIN_MATH_PROBABILITY = 0.30
+TACTICAL_DRAW_MIN_MATH_QUALITY = 0.50
 
 
 def build_ticket_plan(
@@ -20,11 +31,13 @@ def build_ticket_plan(
     selection_policy: dict[str, float] | None = None,
 ) -> TicketPlan:
     predictions = _fit_predictions_to_budget(
-        predict_issue(
-            issue.matches,
-            model_weights=model_weights,
-            evidence_aware_secondary=evidence_aware_secondary,
-            selection_policy=selection_policy,
+        _apply_tactical_draw_strategy(
+            predict_issue(
+                issue.matches,
+                model_weights=model_weights,
+                evidence_aware_secondary=evidence_aware_secondary,
+                selection_policy=selection_policy,
+            )
         ),
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
@@ -36,6 +49,134 @@ def build_ticket_plan(
         choose9_keep=choose9_keep,
         choose9_drop=choose9_drop,
     )
+
+
+def _apply_tactical_draw_strategy(predictions: tuple[Prediction, ...]) -> tuple[Prediction, ...]:
+    """Select at most one explicitly high-risk draw single for the whole issue.
+
+    A tactical draw is not a 60% banker. It is allowed only when a real market,
+    a sufficiently reliable goal model, and at least one supporting market or
+    information condition agree that the draw is unusually competitive.
+    """
+    candidates = [
+        (score, prediction.match.seq, prediction, evidence)
+        for prediction in predictions
+        for score, evidence in [_tactical_draw_assessment(prediction)]
+        if score is not None
+    ]
+    if not candidates:
+        return predictions
+
+    selected_score, _, selected, evidence = max(candidates, key=lambda item: (item[0], -item[1]))
+    updated = replace(
+        selected,
+        picks=("1",),
+        original_picks=("1",),
+        risk="高",
+        tactical_draw=True,
+        tactical_draw_score=round(selected_score, 4),
+        tactical_draw_evidence=evidence,
+    )
+    reasons = tuple(reason for reason in updated.reasons if not reason.startswith(SELECTION_REASON_PREFIX))
+    tactical_reason = (
+        "战术单平：这不是稳胆；市场、数学模型与赛前结构共同确认平局具有竞争力，"
+        f"本期只选择评分最高的一场主动博平。证据：{'；'.join(evidence)}。"
+    )
+    updated = replace(updated, reasons=(selection_reason(updated), tactical_reason, *reasons))
+    return tuple(updated if prediction.match.seq == selected.match.seq else prediction for prediction in predictions)
+
+
+def _tactical_draw_assessment(prediction: Prediction) -> tuple[float | None, tuple[str, ...]]:
+    market = prediction.market_probabilities
+    if not market:
+        return None, ()
+
+    probabilities = prediction.probabilities
+    draw_probability = probabilities.get("1", 0.0)
+    top_probability = max(probabilities.values())
+    top_gap = top_probability - draw_probability
+    math_draw = prediction.dixon_coles_probabilities.get("1", 0.0)
+    if (
+        draw_probability < TACTICAL_DRAW_MIN_PROBABILITY
+        or top_gap > TACTICAL_DRAW_MAX_TOP_GAP
+        or prediction.dixon_coles_quality_score < TACTICAL_DRAW_MIN_MATH_QUALITY
+        or math_draw < TACTICAL_DRAW_MIN_MATH_PROBABILITY
+    ):
+        return None, ()
+
+    evidence = [
+        f"数学平局 {math_draw:.1%}（质量 {prediction.dixon_coles_quality_score:.0%}）",
+    ]
+    market_support, market_text = _tactical_market_draw_support(prediction)
+    information_support, information_text = _tactical_information_draw_support(prediction)
+    if market_support:
+        evidence.append(market_text)
+    if information_support:
+        evidence.append(information_text)
+    if not market_support and not information_support:
+        return None, ()
+
+    market_draw = market.get("1", 0.0)
+    score = (
+        draw_probability
+        - 0.60 * top_gap
+        + 0.35 * max(0.0, math_draw - market_draw)
+        + 0.008 * int(market_support)
+        + 0.008 * int(information_support)
+    )
+    return score, tuple(evidence)
+
+
+def _tactical_market_draw_support(prediction: Prediction) -> tuple[bool, str]:
+    market_draw = prediction.market_probabilities.get("1", 0.0)
+    market = prediction.match.sources.get("odds_market") if isinstance(prediction.match.sources, dict) else {}
+    market = market if isinstance(market, dict) else {}
+    movement = market.get("market_movement") if isinstance(market.get("market_movement"), dict) else {}
+    try:
+        draw_movement = float(movement.get("1") or 0.0)
+    except (TypeError, ValueError):
+        draw_movement = 0.0
+    total = _number_or_none(market.get("total_points"))
+    handicap = _number_or_none(
+        market.get("asian_current_line")
+        if market.get("asian_current_line") is not None
+        else market.get("spread_home_point")
+    )
+    structural = draw_movement >= 0.005 or (total is not None and total <= 2.5) or (
+        handicap is not None and abs(handicap) <= 0.25
+    )
+    supported = market_draw >= 0.28 and structural
+    details = [f"市场平局 {market_draw:.1%}"]
+    if draw_movement >= 0.005:
+        details.append(f"较初盘上升 {draw_movement:.1%}")
+    if total is not None and total <= 2.5:
+        details.append(f"大小球 {total:g}")
+    if handicap is not None and abs(handicap) <= 0.25:
+        details.append(f"浅盘 {handicap:+g}")
+    return supported, "市场支持：" + "、".join(details)
+
+
+def _tactical_information_draw_support(prediction: Prediction) -> tuple[bool, str]:
+    if not _has_informative_signals(prediction.match):
+        return False, ""
+    expected_total, recent_draw_rate = _draw_context(prediction.match)
+    low_scoring = expected_total is not None and expected_total <= 2.40
+    draw_prone = recent_draw_rate is not None and recent_draw_rate >= 0.30
+    if not low_scoring and not draw_prone:
+        return False, ""
+    details = []
+    if low_scoring:
+        details.append(f"预期总进球 {expected_total:.2f}")
+    if draw_prone:
+        details.append(f"近期/交锋平局率 {recent_draw_rate:.1%}")
+    return True, "信息支持：" + "、".join(details)
+
+
+def _number_or_none(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _select_choose9(predictions: tuple[Prediction, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:

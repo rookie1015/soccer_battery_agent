@@ -1,6 +1,6 @@
 [project]
 name = "football-lottery-agent"
-version = "0.1.0"
+version = "0.3.0"
 description = "Football lottery analysis assistant for 14-match and choose-9 SFC tickets."
 requires-python = ">=3.10"
 dependencies = []
@@ -11,4 +11,3 @@ football-lottery-agent = "football_lottery_agent.cli:main"
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
-

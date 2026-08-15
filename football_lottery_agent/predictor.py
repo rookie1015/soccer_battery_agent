@@ -14,6 +14,7 @@ MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
 VENUE_FORM_PRIOR_MATCHES = 6.0
 MAX_VENUE_PROBABILITY_SHIFT = 0.04
 MAX_KNOCKOUT_PROBABILITY_SHIFT = 0.07
+MAX_MARKET_ANCHOR_SHIFT = 0.12
 DEFAULT_SELECTION_POLICY = {
     # Recent reviews showed that the former 52%/14-point gate admitted too
     # many false bankers. A single now needs a materially stronger edge; the
@@ -39,7 +40,11 @@ def predict_match(
     odds_probs = _odds_to_probabilities(match)
     signal_scores = _signal_scores(match)
     math_forecast = dixon_coles_forecast(match)
-    odds_weight, signal_weight, math_weight = _blend_weights(match, math_forecast, model_weights)
+    odds_weight, signal_weight, math_weight = _effective_blend_weights(
+        match,
+        math_forecast,
+        model_weights,
+    )
 
     mixed = {
         outcome: (
@@ -50,6 +55,8 @@ def predict_match(
         for outcome in ("3", "1", "0")
     }
     probabilities = _normalize(mixed)
+    if match.sources.get("odds") != "default_placeholder":
+        probabilities = _cap_market_anchor_shift(probabilities, odds_probs)
     probabilities, venue_adjustment = _apply_venue_form_adjustment(match, probabilities)
     probabilities, knockout_adjustment = _apply_knockout_adjustment(match, probabilities)
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
@@ -79,7 +86,15 @@ def predict_match(
     confidence = round(top_prob * 100, 1)
     risk = _risk_label(top_prob, spread, len(picks))
     scorelines = _predict_scorelines(match, probabilities, math_forecast)
-    reasons = _build_reasons(match, probabilities, ranked, spread, math_forecast)
+    reasons = _build_reasons(
+        match,
+        probabilities,
+        ranked,
+        spread,
+        math_forecast,
+        odds_probs,
+        (odds_weight, signal_weight, math_weight),
+    )
     if venue_adjustment:
         reasons.append(_venue_adjustment_reason(match, venue_adjustment))
     if knockout_adjustment:
@@ -120,6 +135,14 @@ def predict_match(
         },
         dixon_coles_quality=math_forecast.data_quality,
         dixon_coles_quality_score=math_forecast.data_quality_score,
+        market_probabilities={key: round(value, 4) for key, value in odds_probs.items()}
+        if match.sources.get("odds") != "default_placeholder"
+        else {},
+        blend_weights={
+            "market": round(odds_weight, 4),
+            "information": round(signal_weight, 4),
+            "mathematical": round(math_weight, 4),
+        },
         draw_guard=draw_guard,
     )
 
@@ -595,6 +618,33 @@ def _blend_weights(
     return odds, signals, math
 
 
+def _effective_blend_weights(
+    match: Match,
+    math_forecast: DixonColesForecast,
+    model_weights: dict[str, float] | None,
+) -> tuple[float, float, float]:
+    """Turn configured weights into evidence-aware, market-anchored weights.
+
+    Configured weights are upper bounds. Missing information contributes zero,
+    and the mathematical share is discounted by its declared data quality. Any
+    released share returns to the real market rather than to a neutral prior.
+    """
+    market, information, mathematical = _blend_weights(match, math_forecast, model_weights)
+    placeholder_market = match.sources.get("odds") == "default_placeholder"
+    information = information if _has_informative_signals(match) else 0.0
+    mathematical *= math_forecast.data_quality_score
+
+    if not placeholder_market:
+        market = max(0.0, 1.0 - information - mathematical)
+        total = market + information + mathematical
+        return market / total, information / total, mathematical / total
+
+    total = information + mathematical
+    if total <= 0:
+        return 0.0, 0.70, 0.30
+    return 0.0, information / total, mathematical / total
+
+
 def _odds_to_probabilities(match: Match) -> dict[str, float]:
     if match.sources.get("odds") == "default_placeholder":
         return {"3": 1 / 3, "1": 1 / 3, "0": 1 / 3}
@@ -610,6 +660,23 @@ def _odds_to_probabilities(match: Match) -> dict[str, float]:
         "0": 1.0 / match.odds.away,
     }
     return _normalize(implied)
+
+
+def _cap_market_anchor_shift(
+    probabilities: dict[str, float],
+    market_probabilities: dict[str, float],
+) -> dict[str, float]:
+    deltas = {
+        outcome: probabilities[outcome] - market_probabilities[outcome]
+        for outcome in ("3", "1", "0")
+    }
+    largest_shift = max(abs(value) for value in deltas.values())
+    scale = min(1.0, MAX_MARKET_ANCHOR_SHIFT / largest_shift) if largest_shift else 1.0
+    bounded = {
+        outcome: market_probabilities[outcome] + deltas[outcome] * scale
+        for outcome in ("3", "1", "0")
+    }
+    return _normalize({outcome: max(0.01, value) for outcome, value in bounded.items()})
 
 
 def _signal_scores(match: Match) -> dict[str, float]:
@@ -811,12 +878,25 @@ def _build_reasons(
     ranked: list[tuple[str, float]],
     spread: float,
     math_forecast: DixonColesForecast,
+    market_probabilities: dict[str, float],
+    blend_weights: tuple[float, float, float],
 ) -> list[str]:
     top, top_prob = ranked[0]
     second, second_prob = ranked[1]
+    market_weight, information_weight, math_weight = blend_weights
     reasons = [
-        f"综合赔率和基本面，{OUTCOME_LABELS[top]}最高，约 {top_prob:.0%}；次选{OUTCOME_LABELS[second]}约 {second_prob:.0%}。",
+        f"市场锚定结论：{OUTCOME_LABELS[top]}最高，约 {top_prob:.0%}；次选{OUTCOME_LABELS[second]}约 {second_prob:.0%}。",
     ]
+    if match.sources.get("odds") != "default_placeholder":
+        reasons.append(
+            "市场基准与有效修正："
+            f"去水胜/平/负 {market_probabilities['3']:.0%}/{market_probabilities['1']:.0%}/{market_probabilities['0']:.0%}；"
+            f"本场权重为市场 {market_weight:.0%}、信息 {information_weight:.0%}、数学 {math_weight:.0%}。"
+        )
+    else:
+        reasons.append(
+            "本场没有真实市场赔率，结论只使用有效信息和低质量数学先验，不能按市场锚定场次同等看待。"
+        )
     math_probs = math_forecast.probabilities
     reasons.append(
         "Dixon-Coles 数学模型："

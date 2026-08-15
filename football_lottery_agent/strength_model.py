@@ -8,12 +8,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import RLock
-from typing import Any
+from typing import Any, Callable
 
 from .bilingual_identity import fetch_dbpedia_club_aliases
 from .collectors import RawMatch
@@ -140,23 +140,46 @@ def build_strength_for_matches(
     team_ids_path: str | Path | None = None,
     lookback: int = 20,
     xg_matches: int = 8,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[int, FixtureStrength]:
+    def check_cancelled() -> None:
+        if cancel_check is not None:
+            cancel_check()
+
+    check_cancelled()
     configure_team_identity(identity_path_for_cache(cache_dir))
     cache = Path(cache_dir) / "fotmob"
     id_overrides = load_team_ids(team_ids_path) if team_ids_path else {}
-    fotmob_events = _fetch_events_for_dates(matches, cache)
+    fotmob_events = _fetch_events_for_dates(matches, cache, cancel_check=cancel_check)
+    check_cancelled()
     _learn_unique_context_provider_aliases(matches, fotmob_events)
     _learn_one_sided_provider_aliases(matches, fotmob_events)
+    check_cancelled()
     _learn_bilingual_provider_aliases(matches, fotmob_events, Path(cache_dir))
+    check_cancelled()
 
     result: dict[int, FixtureStrength] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [
-            executor.submit(_build_fixture_strength, match, cache, id_overrides, fotmob_events, lookback, xg_matches)
-            for match in matches
-        ]
-        for match, future in zip(matches, futures):
-            result[match.seq] = future.result()
+    executor = ThreadPoolExecutor(max_workers=4)
+    futures = {
+        executor.submit(_build_fixture_strength, match, cache, id_overrides, fotmob_events, lookback, xg_matches): match
+        for match in matches
+    }
+    pending = set(futures)
+    try:
+        while pending:
+            check_cancelled()
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for future in done:
+                match = futures[future]
+                result[match.seq] = future.result()
+    except BaseException:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
+    check_cancelled()
 
     # SofaScore is an additive source: it fills missing team/xG history but
     # never removes FotMob lineup, squad or form information.
@@ -169,6 +192,7 @@ def build_strength_for_matches(
         xg_matches=xg_matches,
         team_score=_team_score,
     )
+    check_cancelled()
     for match in matches:
         result[match.seq] = _merge_sofascore_strength(result.get(match.seq), sofascore.get(match.seq))
     return result
@@ -590,11 +614,23 @@ def _player_strength(player: dict[str, Any], recent_forms: dict[str, tuple[int, 
     return math.log1p(_player_value(player)) * weights.get(_position_group(player), 1.0) * form_factor
 
 
-def _fetch_events_for_dates(matches: list[RawMatch], cache: Path) -> dict[str, list[dict[str, Any]]]:
+def _fetch_events_for_dates(
+    matches: list[RawMatch],
+    cache: Path,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     dates = sorted({date for match in matches for date in _candidate_date_keys(match.kickoff)})
     result = {}
     for date in dates:
-        payload = _fetch_json(f"{FOTMOB_BASE}/matches?{urllib.parse.urlencode({'date': date})}", cache, 3600)
+        if cancel_check is not None:
+            cancel_check()
+        payload = _fetch_json(
+            f"{FOTMOB_BASE}/matches?{urllib.parse.urlencode({'date': date})}",
+            cache,
+            3600,
+            cancel_check=cancel_check,
+        )
         events = []
         for league in (payload or {}).get("leagues", []):
             for item in league.get("matches", []):
@@ -1004,7 +1040,13 @@ def _match_details_payload(
     return payload
 
 
-def _fetch_json(url: str, cache: Path, max_age_seconds: int) -> Any:
+def _fetch_json(
+    url: str,
+    cache: Path,
+    max_age_seconds: int,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> Any:
     cache.mkdir(parents=True, exist_ok=True)
     path = cache / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
     if path.exists():
@@ -1013,7 +1055,7 @@ def _fetch_json(url: str, cache: Path, max_age_seconds: int) -> Any:
             return _read_json_object(path)
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
     try:
-        text = read_url_text(req, timeout=12)
+        text = read_url_text(req, timeout=12, cancel_check=cancel_check)
     except (OSError, urllib.error.URLError):
         if path.exists():
             return _read_json_object(path)

@@ -361,6 +361,56 @@ class StandaloneApiTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "最高购彩金额不能低于 2 元"):
                 standalone_api.run_analysis({"issue": "26090", "max_ticket_cost_yuan": 1}, Path(tmp))
 
+    def test_analysis_honors_cancellation_before_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cancel_path = root / "cache" / "analysis_cancel_request-1.flag"
+            cancel_path.parent.mkdir(parents=True)
+            cancel_path.write_text("cancel", encoding="utf-8")
+            with (
+                patch.object(standalone_api, "collect_issue") as collect_issue,
+                patch.object(standalone_api, "write_report") as write_report,
+                patch.object(standalone_api, "archive_report") as archive_report,
+                self.assertRaisesRegex(standalone_api.AnalysisCancelledError, "分析已取消"),
+            ):
+                standalone_api.run_analysis(
+                    {"issue": "26090", "cancel_token": "request-1"},
+                    root,
+                )
+
+            collect_issue.assert_not_called()
+            write_report.assert_not_called()
+            archive_report.assert_not_called()
+            self.assertFalse(cancel_path.exists())
+
+    def test_analysis_cancelled_during_collection_does_not_write_reports_or_history(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cancel_path = root / "cache" / "analysis_cancel_request-2.flag"
+
+            def fake_collect(**kwargs: object) -> Path:
+                cancel_path.parent.mkdir(parents=True, exist_ok=True)
+                cancel_path.write_text("cancel", encoding="utf-8")
+                kwargs["cancel_check"]()
+                return root / "data" / "collected_issue.json"
+
+            with (
+                patch.object(standalone_api, "collect_issue", side_effect=fake_collect),
+                patch.object(standalone_api, "write_report") as write_report,
+                patch.object(standalone_api, "write_analysis_html") as write_analysis_html,
+                patch.object(standalone_api, "archive_report") as archive_report,
+                self.assertRaisesRegex(standalone_api.AnalysisCancelledError, "分析已取消"),
+            ):
+                standalone_api.run_analysis(
+                    {"issue": "26090", "cancel_token": "request-2"},
+                    root,
+                )
+
+            write_report.assert_not_called()
+            write_analysis_html.assert_not_called()
+            archive_report.assert_not_called()
+            self.assertFalse(cancel_path.exists())
+
     def test_full_analysis_uses_saved_foreign_odds_key(self) -> None:
         fake_plan = Mock()
         fake_plan.issue.issue = "26090"

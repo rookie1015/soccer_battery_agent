@@ -63,14 +63,18 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.chaquo.python.Python
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.File
 import java.io.OutputStreamWriter
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.UUID
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -155,6 +159,7 @@ data class ReportMetrics(
     val singleCount: Int,
     val ticketSingleCount: Int,
     val budgetForcedSingleCount: Int,
+    val tacticalDrawCount: Int,
     val lowRiskCount: Int,
     val averageConfidence: Double,
 )
@@ -172,6 +177,7 @@ data class MatchPrediction(
     val budgetAdjusted: Boolean,
     val budgetForcedSingle: Boolean,
     val drawGuard: Boolean,
+    val tacticalDraw: Boolean,
     val confidence: Double,
     val risk: String,
     val probabilities: OutcomeProbabilities,
@@ -383,6 +389,8 @@ class AppViewModel : ViewModel() {
 
 class AnalysisViewModel : ViewModel() {
     private var savedInputsLoaded = false
+    private var analysisJob: Job? = null
+    private var activeRequestId: String? = null
 
     var issue by mutableStateOf("26090")
         private set
@@ -433,6 +441,9 @@ class AnalysisViewModel : ViewModel() {
         feishuAutoSend: Boolean,
         feishuWebhookUrl: String,
     ) {
+        if (isLoading) {
+            return
+        }
         val cleanIssue = issue.trim()
         val cleanMaxTicketCostYuan = maxTicketCostYuan.trim().toIntOrNull()
         val cleanForeignOddsApiKey = foreignOddsApiKey.trim()
@@ -444,18 +455,21 @@ class AnalysisViewModel : ViewModel() {
             error = "请填写不低于 2 元的最高购彩金额。"
             return
         }
-        viewModelScope.launch {
+        val requestId = UUID.randomUUID().toString()
+        activeRequestId = requestId
+        engine.prepareAnalysisCancellation(requestId)
+        val job = viewModelScope.launch {
             isLoading = true
             error = ""
             message = ""
-            runCatching {
-                engine.generateAnalysis(
+            try {
+                val response = engine.generateAnalysis(
                     issue = cleanIssue,
                     maxTicketCostYuan = cleanMaxTicketCostYuan,
                     foreignOdds = cleanForeignOddsApiKey.isNotEmpty(),
                     foreignOddsApiKey = cleanForeignOddsApiKey,
+                    cancelToken = requestId,
                 )
-            }.onSuccess { response ->
                 report = response
                 val generatedMessage = if (response.analysisMode == "simple_fallback") {
                     "${response.issue} 分析报告已生成；检测到网络问题，已自动使用简单分析。"
@@ -477,11 +491,33 @@ class AnalysisViewModel : ViewModel() {
                         }
                     }
                 }
-            }.onFailure { throwable ->
-                error = throwable.message ?: "生成分析报告失败。"
+            } catch (_: CancellationException) {
+                // cancelAnalysis has already updated the visible state.
+            } catch (throwable: Throwable) {
+                if (activeRequestId == requestId) {
+                    error = throwable.message ?: "生成分析报告失败。"
+                }
+            } finally {
+                if (activeRequestId == requestId) {
+                    activeRequestId = null
+                    analysisJob = null
+                    isLoading = false
+                }
             }
-            isLoading = false
         }
+        job.invokeOnCompletion { engine.clearAnalysisCancellation(requestId) }
+        analysisJob = job
+    }
+
+    fun cancelAnalysis(engine: FootballLotteryLocalEngine) {
+        val requestId = activeRequestId ?: return
+        engine.requestAnalysisCancellation(requestId)
+        activeRequestId = null
+        analysisJob?.cancel()
+        analysisJob = null
+        isLoading = false
+        error = ""
+        message = "分析已取消；后台将在当前数据请求结束后停止，不会生成报告或历史记录。"
     }
 }
 
@@ -749,6 +785,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         maxTicketCostYuan: Int,
         foreignOdds: Boolean,
         foreignOddsApiKey: String,
+        cancelToken: String,
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
@@ -758,11 +795,32 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             .put("full_analysis", true)
             .put("foreign_odds", foreignOdds)
             .put("foreign_odds_api_key", foreignOddsApiKey)
+            .put("cancel_token", cancelToken)
         val json = JSONObject(bridge.callAttr("analysis", body.toString(), workDir).toString())
         if (!json.optBoolean("ok", false)) {
             throw IllegalStateException(json.optString("error", "本机分析失败。"))
         }
         parseReport(json.getJSONObject("report"))
+    }
+
+    private fun analysisCancellationFile(requestId: String): File {
+        val safeRequestId = requestId.replace(Regex("[^A-Za-z0-9_-]"), "")
+        return File(File(context.filesDir, "cache"), "analysis_cancel_${safeRequestId}.flag")
+    }
+
+    fun prepareAnalysisCancellation(requestId: String) {
+        analysisCancellationFile(requestId).delete()
+    }
+
+    fun requestAnalysisCancellation(requestId: String) {
+        analysisCancellationFile(requestId).apply {
+            parentFile?.mkdirs()
+            writeText("cancel", Charsets.UTF_8)
+        }
+    }
+
+    fun clearAnalysisCancellation(requestId: String) {
+        analysisCancellationFile(requestId).delete()
     }
 
     suspend fun sendAnalysisToFeishu(webhookUrl: String, report: AnalysisReport) {
@@ -861,6 +919,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 singleCount = metrics.optInt("single_count"),
                 ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
+                tacticalDrawCount = metrics.optInt("tactical_draw_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -909,6 +968,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             budgetAdjusted = json.optBoolean("budget_adjusted"),
             budgetForcedSingle = json.optBoolean("budget_forced_single"),
             drawGuard = json.optBoolean("draw_guard"),
+            tacticalDraw = json.optBoolean("tactical_draw"),
             confidence = json.optDouble("confidence"),
             risk = json.optString("risk"),
             probabilities = OutcomeProbabilities(
@@ -1086,6 +1146,7 @@ class FootballLotteryApi(private val baseUrl: String) {
                 singleCount = metrics.optInt("single_count"),
                 ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
+                tacticalDrawCount = metrics.optInt("tactical_draw_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1134,6 +1195,7 @@ class FootballLotteryApi(private val baseUrl: String) {
             budgetAdjusted = json.optBoolean("budget_adjusted"),
             budgetForcedSingle = json.optBoolean("budget_forced_single"),
             drawGuard = json.optBoolean("draw_guard"),
+            tacticalDraw = json.optBoolean("tactical_draw"),
             confidence = json.optDouble("confidence"),
             risk = json.optString("risk"),
             probabilities = OutcomeProbabilities(
@@ -1438,7 +1500,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.2.3（5） · 已支持分析完成后自动推送到飞书",
+                        "App 版本 0.3.0（6） · 市场锚定分析与战术单平",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1619,18 +1681,21 @@ private fun RequestCard(
             )
             Button(
                 onClick = {
-                    viewModel.generateAnalysis(
-                        localEngine,
-                        appViewModel.theOddsApiKey,
-                        appViewModel.feishuAutoSend,
-                        appViewModel.feishuWebhookUrl,
-                    )
+                    if (viewModel.isLoading) {
+                        viewModel.cancelAnalysis(localEngine)
+                    } else {
+                        viewModel.generateAnalysis(
+                            localEngine,
+                            appViewModel.theOddsApiKey,
+                            appViewModel.feishuAutoSend,
+                            appViewModel.feishuWebhookUrl,
+                        )
+                    }
                 },
-                enabled = !viewModel.isLoading,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 LoadingPrefix(viewModel.isLoading)
-                Text(if (viewModel.isLoading) "生成中" else "生成分析报告")
+                Text(if (viewModel.isLoading) "取消分析" else "生成分析报告")
             }
         }
     }
@@ -1860,6 +1925,13 @@ private fun SummaryCard(report: AnalysisReport) {
             if (!isReview && report.metrics.budgetForcedSingleCount > 0) {
                 Text(
                     text = "预算票面含 ${report.metrics.budgetForcedSingleCount} 场强制单选；这些场次不属于模型胆材。",
+                    color = Color(0xFFB54708),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
+            if (!isReview && report.metrics.tacticalDrawCount > 0) {
+                Text(
+                    text = "本期含 ${report.metrics.tacticalDrawCount} 场战术单平；这是高风险主动博取，不属于稳胆。",
                     color = Color(0xFFB54708),
                     style = MaterialTheme.typography.bodySmall,
                 )
@@ -2322,7 +2394,8 @@ private fun HistoryEntryCard(
 
 private fun recommendationText(prediction: MatchPrediction): String {
     val labels = prediction.analysisPickLabels.ifEmpty { prediction.analysisPickText.split("/") }
-    return "模型建议：${labels.joinToString(" / ")}（${prediction.analysisPickText}）"
+    val strategy = if (prediction.tacticalDraw) "战术单平（高风险）" else "模型建议"
+    return "$strategy：${labels.joinToString(" / ")}（${prediction.analysisPickText}）"
 }
 
 private fun budgetSelectionText(prediction: MatchPrediction): String? {

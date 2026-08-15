@@ -116,10 +116,15 @@ class Prediction:
     dixon_coles_probabilities: dict[Outcome, float] = field(default_factory=dict)
     dixon_coles_quality: str = ""
     dixon_coles_quality_score: float = 0.0
+    market_probabilities: dict[Outcome, float] = field(default_factory=dict)
+    blend_weights: dict[str, float] = field(default_factory=dict)
     budget_adjusted: bool = False
     budget_forced_single: bool = False
     budget_removed_picks: tuple[Outcome, ...] = ()
     draw_guard: bool = False
+    tactical_draw: bool = False
+    tactical_draw_score: float = 0.0
+    tactical_draw_evidence: tuple[str, ...] = ()
 
     @property
     def pick_text(self) -> str:

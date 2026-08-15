@@ -32,6 +32,7 @@ Response includes the existing report links plus an app-ready `report` object:
     "metrics": {
       "match_count": 14,
       "single_count": 4,
+      "tactical_draw_count": 1,
       "average_confidence": 47.2
     },
     "choose9_keep": [1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -47,11 +48,22 @@ Response includes the existing report links plus an app-ready `report` object:
         "pick_text": "3/1",
         "pick_labels": ["主胜", "平"],
         "picks": ["3", "1"],
+        "tactical_draw": false,
         "confidence": 48.6,
         "probabilities": {
           "home": 48.6,
           "draw": 28.1,
           "away": 23.3
+        },
+        "market_probabilities": {
+          "home": 49.8,
+          "draw": 27.4,
+          "away": 22.8
+        },
+        "blend_weights": {
+          "market": 0.61,
+          "information": 0.22,
+          "mathematical": 0.17
         },
         "reasons": ["主胜优势较明确，可作为候选胆材。"]
       }
@@ -64,6 +76,8 @@ Response includes the existing report links plus an app-ready `report` object:
 ```
 
 分析接口固定优先执行完整分析，并固定使用最近 20 场增强样本。客户端传入旧的模式或样本参数不会改变这一行为；关键资料源出现大范围网络请求失败时，`analysis_mode` 会返回 `simple_fallback`。
+
+`tactical_draw` 为 `true` 时表示本场是每期最多一场的高风险战术单平，不是稳胆。`market_probabilities` 是去水后的市场锚点，`blend_weights` 记录本场实际使用的市场、有效信息和数学模型权重。
 
 ## Single Prediction
 

@@ -84,6 +84,35 @@ def run_analysis(
     payload: dict[str, Any],
     work_dir: str | Path,
 ) -> dict[str, object]:
+    cancel_path = _analysis_cancel_path(payload, work_dir)
+    try:
+        return _run_analysis(payload, work_dir, cancel_path=cancel_path)
+    finally:
+        if cancel_path is not None:
+            cancel_path.unlink(missing_ok=True)
+
+
+class AnalysisCancelledError(RuntimeError):
+    """Raised when the mobile client cancels an in-flight analysis."""
+
+
+def _analysis_cancel_path(payload: dict[str, Any], work_dir: str | Path) -> Path | None:
+    token = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("cancel_token") or ""))
+    if not token:
+        return None
+    return Path(work_dir) / "cache" / f"analysis_cancel_{token}.flag"
+
+
+def _run_analysis(
+    payload: dict[str, Any],
+    work_dir: str | Path,
+    *,
+    cancel_path: Path | None,
+) -> dict[str, object]:
+    def check_cancelled() -> None:
+        if cancel_path is not None and cancel_path.exists():
+            raise AnalysisCancelledError("分析已取消。")
+
     issue = str(payload.get("issue") or "").strip()
     if not issue:
         raise ValueError("请填写期号。")
@@ -103,6 +132,7 @@ def run_analysis(
     cache_dir = root / "cache"
     data_dir.mkdir(parents=True, exist_ok=True)
     report_dir.mkdir(parents=True, exist_ok=True)
+    check_cancelled()
 
     issue_path = data_dir / "collected_issue.json"
     issue_archive_path = data_dir / f"{_slug(issue)}_issue.json"
@@ -117,6 +147,7 @@ def run_analysis(
             issue=issue,
             foreign_odds_configured=foreign_odds_api_key is not None,
         )
+    check_cancelled()
 
     fallback_reason = ""
     unavailable_sources: dict[str, object] = {"all": [], "matches": {}}
@@ -129,6 +160,7 @@ def run_analysis(
                 full=True,
                 use_foreign_odds=use_foreign_odds,
                 foreign_odds_api_key=foreign_odds_api_key,
+                cancel_check=check_cancelled,
             )
         except (OSError, TimeoutError, urllib.error.URLError) as exc:
             fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
@@ -149,10 +181,14 @@ def run_analysis(
             full=False,
             use_foreign_odds=False,
             foreign_odds_api_key=None,
+            cancel_check=check_cancelled,
         )
+    check_cancelled()
     _record_analysis_mode(issue_path, fallback_reason, unavailable_sources)
+    check_cancelled()
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
+    check_cancelled()
     calibration = build_calibration(root)
     active_weights = load_active_model_weights(root)
     active_selection_policy = load_active_selection_policy(root)
@@ -178,8 +214,18 @@ def run_analysis(
     if full_analysis:
         strategy_options["evidence_aware_secondary"] = True
     plan = build_ticket_plan(issue_data, **strategy_options)
-    write_report(plan, markdown_path)
-    write_analysis_html(plan, html_path)
+    check_cancelled()
+    with tempfile.TemporaryDirectory(prefix="analysis-", dir=report_dir) as temp_dir:
+        temporary_markdown_path = Path(temp_dir) / markdown_path.name
+        temporary_html_path = Path(temp_dir) / html_path.name
+        write_report(plan, temporary_markdown_path)
+        write_analysis_html(plan, temporary_html_path)
+        check_cancelled()
+        if temporary_markdown_path.exists():
+            temporary_markdown_path.replace(markdown_path)
+        if temporary_html_path.exists():
+            temporary_html_path.replace(html_path)
+    check_cancelled()
     history_path = archive_report(
         "analysis",
         plan.issue.issue,
@@ -263,6 +309,7 @@ def _collect_mobile_analysis(
     full: bool,
     use_foreign_odds: bool,
     foreign_odds_api_key: str | None,
+    cancel_check: Any | None = None,
 ) -> None:
     collect_issue(
         output_path=issue_path,
@@ -275,6 +322,7 @@ def _collect_mobile_analysis(
         strength_xg_matches=STRENGTH_XG_MATCHES,
         skip_context_fetches=not full,
         sina_odds_only=not full,
+        cancel_check=cancel_check,
     )
 
 
@@ -489,6 +537,7 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
                 ],
                 "budget_adjusted": pick_text != analysis_pick_text,
                 "budget_forced_single": pick_text != analysis_pick_text and "/" not in pick_text,
+                "tactical_draw": any("战术单平" in reason for reason in reasons),
                 "confidence": _parse_percent(confidence_cell),
                 "risk": cells[6] if legacy_layout else "",
                 "probabilities": probabilities,
@@ -508,6 +557,7 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
     singles = sum(1 for prediction in predictions if "/" not in str(prediction["analysis_pick_text"]))
     ticket_singles = sum(1 for prediction in predictions if "/" not in str(prediction["pick_text"]))
     forced_singles = sum(1 for prediction in predictions if prediction["budget_forced_single"])
+    tactical_draws = sum(1 for prediction in predictions if prediction["tactical_draw"])
     avg_confidence = sum(float(prediction["confidence"]) for prediction in predictions) / len(predictions)
     metadata = _parse_analysis_metadata(markdown_text)
     return {
@@ -523,6 +573,7 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
             "single_count": singles,
             "ticket_single_count": ticket_singles,
             "budget_forced_single_count": forced_singles,
+            "tactical_draw_count": tactical_draws,
             "low_risk_count": low_risk,
             "average_confidence": round(avg_confidence, 1),
         },
@@ -938,6 +989,7 @@ def _restore_analysis_recommendations(
     saved_picks: dict[int, tuple[str, ...]] = {}
     saved_original_picks: dict[int, tuple[str, ...]] = {}
     saved_budget_flags: dict[int, tuple[bool, bool]] = {}
+    saved_tactical_draws: dict[int, bool] = {}
     for saved in saved_predictions:
         if not isinstance(saved, dict):
             return None
@@ -959,6 +1011,7 @@ def _restore_analysis_recommendations(
             bool(saved.get("budget_adjusted")),
             bool(saved.get("budget_forced_single")),
         )
+        saved_tactical_draws[seq] = bool(saved.get("tactical_draw"))
 
     current_sequences = {prediction.match.seq for prediction in plan.predictions}
     if set(saved_picks) != current_sequences:
@@ -978,6 +1031,7 @@ def _restore_analysis_recommendations(
                 original_picks=saved_original_picks[prediction.match.seq],
                 budget_adjusted=saved_budget_flags[prediction.match.seq][0],
                 budget_forced_single=saved_budget_flags[prediction.match.seq][1],
+                tactical_draw=saved_tactical_draws[prediction.match.seq],
             )
             for prediction in plan.predictions
         ),

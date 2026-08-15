@@ -25,6 +25,7 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 def render_analysis_html(plan: TicketPlan) -> str:
     singles = sum(1 for pred in plan.predictions if len(pred.analysis_picks) == 1)
     forced_singles = sum(1 for pred in plan.predictions if pred.budget_forced_single)
+    tactical_draws = sum(1 for pred in plan.predictions if pred.tactical_draw)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
@@ -33,6 +34,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("模型单选", str(singles), "预算压缩前"),
             _metric_card("强制单选", str(forced_singles), "仅由预算压缩产生"),
+            _metric_card("战术单平", str(tactical_draws), "高风险且每期最多一场"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
     )
@@ -168,6 +170,13 @@ def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
     reasons = "".join(f"<li>{escape(reason)}</li>" for reason in prediction.reasons)
     if not reasons:
         reasons = "<li>当前没有可展示的结论依据。</li>"
+    strategy_label = (
+        "战术单平（高风险，不是稳胆）"
+        if prediction.tactical_draw
+        else "稳胆单选"
+        if len(prediction.analysis_picks) == 1
+        else "覆盖型选择"
+    )
     return f"""
     <details class="match-tab">
       <summary>
@@ -182,7 +191,7 @@ def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
         <div class="analysis-result">
           <span>模型建议</span>
           <strong>{escape(pick_labels)}（{escape(prediction.analysis_pick_text)}）</strong>
-          <small>风险：{escape(prediction.risk)} · 任九：{"保留" if keep else "剔除"}</small>
+          <small>{escape(strategy_label)} · 风险：{escape(prediction.risk)} · 任九：{"保留" if keep else "剔除"}</small>
         </div>
         {budget_html}
         <div class="analysis-probabilities">
