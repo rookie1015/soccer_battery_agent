@@ -98,6 +98,7 @@ private enum class AppTab(val label: String) {
 
 private const val SETTINGS_PREFS = "football_lottery_settings"
 private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
+private const val PREF_FOOTBALL_DATA_API_KEY = "football_data_api_key"
 private const val PREF_FEISHU_WEBHOOK_URL = "feishu_webhook_url"
 private const val PREF_FEISHU_AUTO_SEND = "feishu_auto_send"
 private const val PREF_ANALYSIS_ISSUE = "analysis_issue"
@@ -260,6 +261,8 @@ class AppViewModel : ViewModel() {
         private set
     var theOddsApiKey by mutableStateOf("")
         private set
+    var footballDataApiKey by mutableStateOf("")
+        private set
     var feishuWebhookUrl by mutableStateOf("")
         private set
     var feishuAutoSend by mutableStateOf(false)
@@ -280,6 +283,7 @@ class AppViewModel : ViewModel() {
     fun loadSettings(context: Context) {
         val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
         theOddsApiKey = prefs.getString(PREF_THE_ODDS_API_KEY, "").orEmpty()
+        footballDataApiKey = prefs.getString(PREF_FOOTBALL_DATA_API_KEY, "").orEmpty()
         feishuWebhookUrl = prefs.getString(PREF_FEISHU_WEBHOOK_URL, "").orEmpty()
         feishuAutoSend = prefs.getBoolean(PREF_FEISHU_AUTO_SEND, false)
     }
@@ -288,6 +292,11 @@ class AppViewModel : ViewModel() {
         theOddsApiKey = value
         settingsMessage = ""
         apiUsage = null
+    }
+
+    fun updateFootballDataApiKey(value: String) {
+        footballDataApiKey = value
+        settingsMessage = ""
     }
 
     fun updateFeishuWebhookUrl(value: String) {
@@ -305,11 +314,14 @@ class AppViewModel : ViewModel() {
     fun saveSettings(context: Context) {
         val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
         val cleanApiKey = theOddsApiKey.trim()
+        val cleanFootballDataApiKey = footballDataApiKey.trim()
         prefs.edit()
             .putString(PREF_THE_ODDS_API_KEY, cleanApiKey)
+            .putString(PREF_FOOTBALL_DATA_API_KEY, cleanFootballDataApiKey)
             .apply()
         theOddsApiKey = cleanApiKey
-        settingsMessage = "外盘设置已保存。"
+        footballDataApiKey = cleanFootballDataApiKey
+        settingsMessage = "数据源设置已保存。"
     }
 
     fun saveFeishuSettings(context: Context) {
@@ -438,6 +450,7 @@ class AnalysisViewModel : ViewModel() {
     fun generateAnalysis(
         engine: FootballLotteryLocalEngine,
         foreignOddsApiKey: String,
+        footballDataApiKey: String,
         feishuAutoSend: Boolean,
         feishuWebhookUrl: String,
     ) {
@@ -447,6 +460,7 @@ class AnalysisViewModel : ViewModel() {
         val cleanIssue = issue.trim()
         val cleanMaxTicketCostYuan = maxTicketCostYuan.trim().toIntOrNull()
         val cleanForeignOddsApiKey = foreignOddsApiKey.trim()
+        val cleanFootballDataApiKey = footballDataApiKey.trim()
         if (cleanIssue.isEmpty()) {
             error = "请填写期号。"
             return
@@ -468,14 +482,11 @@ class AnalysisViewModel : ViewModel() {
                     maxTicketCostYuan = cleanMaxTicketCostYuan,
                     foreignOdds = cleanForeignOddsApiKey.isNotEmpty(),
                     foreignOddsApiKey = cleanForeignOddsApiKey,
+                    footballDataApiKey = cleanFootballDataApiKey,
                     cancelToken = requestId,
                 )
                 report = response
-                val generatedMessage = if (response.analysisMode == "simple_fallback") {
-                    "${response.issue} 分析报告已生成；检测到网络问题，已自动使用简单分析。"
-                } else {
-                    "${response.issue} 完整分析报告已生成。"
-                }
+                val generatedMessage = "${response.issue} 完整分析报告已生成。"
                 message = generatedMessage
                 if (feishuAutoSend) {
                     val webhook = feishuWebhookUrl.trim()
@@ -495,7 +506,7 @@ class AnalysisViewModel : ViewModel() {
                 // cancelAnalysis has already updated the visible state.
             } catch (throwable: Throwable) {
                 if (activeRequestId == requestId) {
-                    error = throwable.message ?: "生成分析报告失败。"
+                    error = userFacingAnalysisError(throwable)
                 }
             } finally {
                 if (activeRequestId == requestId) {
@@ -785,6 +796,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         maxTicketCostYuan: Int,
         foreignOdds: Boolean,
         foreignOddsApiKey: String,
+        footballDataApiKey: String,
         cancelToken: String,
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
@@ -795,10 +807,11 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             .put("full_analysis", true)
             .put("foreign_odds", foreignOdds)
             .put("foreign_odds_api_key", foreignOddsApiKey)
+            .put("football_data_api_key", footballDataApiKey)
             .put("cancel_token", cancelToken)
         val json = JSONObject(bridge.callAttr("analysis", body.toString(), workDir).toString())
         if (!json.optBoolean("ok", false)) {
-            throw IllegalStateException(json.optString("error", "本机分析失败。"))
+            throw IllegalStateException(json.optString("error", "完整分析失败：本机分析引擎没有返回有效结果，请重试。"))
         }
         parseReport(json.getJSONObject("report"))
     }
@@ -1519,6 +1532,20 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                         visualTransformation = PasswordVisualTransformation(),
                     )
+                    OutlinedTextField(
+                        value = appViewModel.footballDataApiKey,
+                        onValueChange = appViewModel::updateFootballDataApiKey,
+                        label = { Text("football-data.org 免费 Token（可选）") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
+                        visualTransformation = PasswordVisualTransformation(),
+                    )
+                    Text(
+                        "500网和中国足彩网无需配置；football-data.org 免费档需要在其官网申请 Token。辅助源只做交叉核验和新浪缺失时补缺。",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                     Button(
                         onClick = {
                             appViewModel.saveSettings(context.applicationContext)
@@ -1526,7 +1553,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                         },
                         modifier = Modifier.fillMaxWidth(),
                     ) {
-                        Text("保存并检查 API Key")
+                        Text("保存数据源设置并检查外盘 Key")
                     }
                     if (appViewModel.settingsMessage.isNotBlank()) {
                         StatusCard(text = appViewModel.settingsMessage, color = Color(0xFF16845B))
@@ -1675,7 +1702,7 @@ private fun RequestCard(
                 )
             }
             Text(
-                "默认执行完整分析，增强样本固定为最近 20 场；检测到关键资料源网络故障时自动降级为简单分析，并在结论理由中列出未获得的信息来源。",
+                "始终执行完整分析，增强样本固定为最近 20 场；关键资料源大范围不可用时会停止分析，并用中文说明问题，不会生成不完整报告。",
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1687,6 +1714,7 @@ private fun RequestCard(
                         viewModel.generateAnalysis(
                             localEngine,
                             appViewModel.theOddsApiKey,
+                            appViewModel.footballDataApiKey,
                             appViewModel.feishuAutoSend,
                             appViewModel.feishuWebhookUrl,
                         )
@@ -1909,7 +1937,7 @@ private fun SummaryCard(report: AnalysisReport) {
             if (!isReview && report.analysisModeMessage.isNotBlank()) {
                 Text(
                     text = report.analysisModeMessage,
-                    color = if (report.analysisMode == "simple_fallback") Color(0xFFB54708) else Color(0xFF16845B),
+                    color = Color(0xFF16845B),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
@@ -2611,6 +2639,15 @@ private fun deadlineText(report: AnalysisReport): String {
         "购彩截止时间：${report.purchaseDeadline}"
     } else {
         "购彩截止时间：${report.purchaseDeadline} · ${report.purchaseDeadlineSource}"
+    }
+}
+
+private fun userFacingAnalysisError(throwable: Throwable): String {
+    val message = throwable.message?.trim().orEmpty()
+    return if (message.startsWith("完整分析失败：") || message == "分析已取消。") {
+        message
+    } else {
+        "完整分析失败：本机分析引擎遇到异常，请重新尝试；如果仍然失败，请重新打开 App。"
     }
 }
 

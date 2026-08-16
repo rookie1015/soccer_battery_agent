@@ -1,5 +1,5 @@
 Football Lottery Agent 当前数据来源说明
-更新时间：2026-06-17
+更新时间：2026-08-16
 
 项目定位：
 本工具用于中国大陆足球彩票「14场胜平负」和「任选9场」的信息整理、概率估算、比分倾向、任九取舍和赛后复盘。
@@ -129,9 +129,23 @@ Football Lottery Agent 当前数据来源说明
    对应代码：
    football_lottery_agent\collectors.py
 
+7. 免费国内辅助信源
+   地址：
+   - 500网胜负彩：https://trade.500.com/sfc/?expect=
+   - 中国足彩网胜负彩：https://cp.zgzcw.com/lottery/zcplayvs.action
+
+   当前用途：
+   - 按期号和14场固定顺序核验主客队、开球时间、公开欧赔和亚洲让球
+   - 新浪数据正常时只记录一致性和明显差异，不覆盖新浪
+   - 新浪欧赔缺失时，使用已匹配辅助源的公开欧赔均值补缺
+   - 每场在 sources.auxiliary_verification 中保存来源、链接和匹配数据
+
+   对应代码：
+   football_lottery_agent\auxiliary_sources.py
+
 二、可选数据来源
 
-7. The Odds API
+8. The Odds API
    地址：
    https://api.the-odds-api.com/v4
 
@@ -166,9 +180,27 @@ Football Lottery Agent 当前数据来源说明
    对应代码：
    football_lottery_agent\foreign_odds.py
 
+9. football-data.org
+   地址：
+   https://api.football-data.org/v4/matches
+
+   当前用途：
+   - 在免费方案覆盖范围内辅助核验比赛时间和比赛状态
+   - 不直接改变胜平负概率
+
+   使用前需要设置：
+   FOOTBALL_DATA_API_KEY
+
+   如果没有 Token：
+   - 自动跳过并记录为未配置
+   - 不影响新浪、500网和中国足彩网继续工作
+
+   对应代码：
+   football_lottery_agent\auxiliary_sources.py
+
 三、手工 / 本地数据来源
 
-8. 手工赛程 CSV
+10. 手工赛程 CSV
    示例文件：
    data\seed_matches.csv
 
@@ -179,7 +211,7 @@ Football Lottery Agent 当前数据来源说明
    格式：
    seq,kickoff,league,home,away
 
-9. 手工赔率 CSV
+11. 手工赔率 CSV
    示例文件：
    data\odds.example.csv
 
@@ -190,7 +222,7 @@ Football Lottery Agent 当前数据来源说明
    格式：
    seq,home,draw,away
 
-10. FotMob team id 映射 CSV
+12. FotMob team id 映射 CSV
    示例文件：
    data\team_ids.example.csv
 
@@ -200,7 +232,7 @@ Football Lottery Agent 当前数据来源说明
    格式：
    name,fotmob_id
 
-11. 赛果 CSV
+13. 赛果 CSV
     示例文件：
     data\results.example.csv
     data\sample_results.csv

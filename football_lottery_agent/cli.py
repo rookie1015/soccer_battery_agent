@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
 
 from .collectors import collect_issue
@@ -156,6 +157,10 @@ def _add_collect_options(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--foreign-odds-regions", default="uk,eu", help="The Odds API regions, for example uk,eu,us.")
     parser.add_argument("--foreign-odds-bookmakers", default="", help="Comma-separated bookmaker keys. Empty means API region defaults.")
     parser.add_argument("--foreign-odds-sports", default="", help="Comma-separated The Odds API sport keys.")
+    parser.add_argument(
+        "--football-data-api-key",
+        help="Optional free football-data.org token. Defaults to FOOTBALL_DATA_API_KEY environment variable.",
+    )
     parser.add_argument("--strength-model", action="store_true", help="Build FotMob-based team strength model.")
     parser.add_argument("--strength-team-ids", help="Optional CSV mapping name,fotmob_id.")
     parser.add_argument("--strength-lookback", type=int, default=20, help="Number of past matches for form model.")
@@ -172,10 +177,11 @@ def _collect_from_args(args: argparse.Namespace, output_path: Path) -> Path:
         cache_dir=Path(args.cache_dir),
         offline=args.offline,
         foreign_odds=args.foreign_odds,
-        foreign_odds_api_key=args.foreign_odds_api_key,
+        foreign_odds_api_key=args.foreign_odds_api_key or os.getenv("THE_ODDS_API_KEY"),
         foreign_odds_regions=args.foreign_odds_regions,
         foreign_odds_bookmakers=args.foreign_odds_bookmakers,
         foreign_odds_sports=args.foreign_odds_sports,
+        football_data_api_key=args.football_data_api_key or os.getenv("FOOTBALL_DATA_API_KEY"),
         strength_model=args.strength_model,
         strength_team_ids=Path(args.strength_team_ids) if args.strength_team_ids else None,
         strength_lookback=args.strength_lookback,

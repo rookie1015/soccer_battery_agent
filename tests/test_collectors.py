@@ -280,6 +280,8 @@ class CollectorTests(unittest.TestCase):
 
     @patch("football_lottery_agent.polymarket.fetch_polymarket_signals_for_matches", return_value={})
     @patch("football_lottery_agent.collectors.fetch_sporttery_issue_metadata", return_value={})
+    @patch("football_lottery_agent.auxiliary_sources.fetch_500_issue", return_value=[])
+    @patch("football_lottery_agent.auxiliary_sources.fetch_zgzcw_issue", return_value=[])
     @patch("football_lottery_agent.collectors._fetch_sina_details", return_value={})
     @patch("football_lottery_agent.collectors._fetch_mainstream_media_briefings", return_value={})
     @patch("football_lottery_agent.collectors._fetch_briefings", return_value={})
@@ -290,6 +292,8 @@ class CollectorTests(unittest.TestCase):
         _briefings_mock,
         _media_mock,
         _sina_mock,
+        _zgzcw_mock,
+        _five_hundred_mock,
         _metadata_mock,
         polymarket_mock,
     ) -> None:

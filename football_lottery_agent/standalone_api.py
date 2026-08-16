@@ -96,6 +96,71 @@ class AnalysisCancelledError(RuntimeError):
     """Raised when the mobile client cancels an in-flight analysis."""
 
 
+class AnalysisUserError(RuntimeError):
+    """A sanitized Chinese analysis error which is safe to show in the App."""
+
+
+def analysis_error_message(exc: BaseException) -> str:
+    """Return a Chinese user-facing message without leaking implementation details."""
+    if isinstance(exc, AnalysisUserError):
+        return str(exc)
+    if isinstance(exc, AnalysisCancelledError):
+        return "分析已取消。"
+
+    message = str(exc).strip()
+    if isinstance(exc, ValueError):
+        if message.startswith("请填写期号"):
+            return "完整分析失败：请填写正确的期号。"
+        if "最高购彩金额" in message:
+            return "完整分析失败：最高购彩金额不能低于 2 元。"
+        lowered = message.casefold()
+        if "returned issue" in lowered or "belongs to issue" in lowered or "mixed issue" in lowered:
+            return "完整分析失败：期号与获取到的赛程不一致，请确认期号后重新分析。"
+        if "sfc table not found" in lowered or "expected 14 matches" in lowered:
+            return "完整分析失败：没有获取到完整的 14 场赛程，请确认该期已经开售后重试。"
+        return "完整分析失败：获取到的赛程或赔率数据不完整，请稍后重新分析。"
+    if isinstance(exc, TimeoutError):
+        return "完整分析失败：连接数据源超时，请检查网络后重试。"
+    if isinstance(exc, urllib.error.HTTPError):
+        return "完整分析失败：数据服务暂时无法访问，请稍后重试。"
+    if isinstance(exc, (urllib.error.URLError, ConnectionError)):
+        return "完整分析失败：无法连接数据源，请检查手机网络后重试。"
+    if isinstance(exc, PermissionError):
+        return "完整分析失败：无法保存本机报告，请检查 App 存储空间后重试。"
+    if isinstance(exc, OSError):
+        return "完整分析失败：读取或保存分析数据失败，请检查网络和手机存储空间后重试。"
+    return "完整分析失败：本机分析引擎遇到异常，请重新尝试；如果仍然失败，请重新打开 App。"
+
+
+def _validate_analysis_issue(issue: str, *, now: datetime | None = None) -> None:
+    if not re.fullmatch(r"\d{5}", issue):
+        raise AnalysisUserError("完整分析失败：期号格式不正确，请输入 5 位数字，例如 26105。")
+
+    current_year = (now or datetime.now().astimezone()).year % 100
+    issue_year = int(issue[:2])
+    issue_sequence = int(issue[2:])
+    allowed_years = {(current_year - 1) % 100, current_year, (current_year + 1) % 100}
+    if issue_year not in allowed_years or issue_sequence == 0:
+        raise AnalysisUserError(f"完整分析失败：第 {issue} 期不存在，请检查期号后重试。")
+
+
+def _analysis_collection_error_message(exc: BaseException, issue: str) -> str:
+    message = str(exc).strip()
+    lowered = message.casefold()
+    if isinstance(exc, ValueError):
+        if "returned issue" in lowered or "belongs to issue" in lowered or "mixed issue" in lowered:
+            return f"完整分析失败：没有找到第 {issue} 期，请检查期号是否正确，或确认该期已经开售。"
+        if "sfc table not found" in lowered:
+            return f"完整分析失败：第 {issue} 期暂时没有可用赛程，请确认期号正确且该期已经开售。"
+        match_count = re.search(r"expected 14 matches, got (\d+)", lowered)
+        if match_count:
+            return (
+                f"完整分析失败：第 {issue} 期赛程不完整，目前只获取到 "
+                f"{match_count.group(1)} 场，完整分析需要 14 场。"
+            )
+    return analysis_error_message(exc)
+
+
 def _analysis_cancel_path(payload: dict[str, Any], work_dir: str | Path) -> Path | None:
     token = re.sub(r"[^A-Za-z0-9_-]", "", str(payload.get("cancel_token") or ""))
     if not token:
@@ -116,14 +181,15 @@ def _run_analysis(
     issue = str(payload.get("issue") or "").strip()
     if not issue:
         raise ValueError("请填写期号。")
+    _validate_analysis_issue(issue)
     max_ticket_cost_yuan = int(payload.get("max_ticket_cost_yuan") or DEFAULT_MAX_TICKET_COST_YUAN)
     if max_ticket_cost_yuan < 2:
         raise ValueError("最高购彩金额不能低于 2 元。")
-    # 手机端始终优先完整分析。样本数是模型参数，不再暴露给用户调整。
-    full_analysis = True
+    # 手机端只执行完整分析。样本数是模型参数，不再暴露给用户调整。
     foreign_odds = bool(payload.get("foreign_odds", False))
     foreign_odds_api_key = str(payload.get("foreign_odds_api_key") or "").strip() or None
-    use_foreign_odds = foreign_odds or (full_analysis and foreign_odds_api_key is not None)
+    football_data_api_key = str(payload.get("football_data_api_key") or "").strip() or None
+    use_foreign_odds = foreign_odds or foreign_odds_api_key is not None
 
     root = Path(work_dir)
     data_dir = root / "data"
@@ -146,45 +212,37 @@ def _run_analysis(
             issue_path,
             issue=issue,
             foreign_odds_configured=foreign_odds_api_key is not None,
+            football_data_configured=football_data_api_key is not None,
         )
     check_cancelled()
 
-    fallback_reason = ""
-    unavailable_sources: dict[str, object] = {"all": [], "matches": {}}
     if not reused_snapshot:
         try:
             _collect_mobile_analysis(
                 issue_path=issue_path,
                 issue=issue,
                 cache_dir=cache_dir,
-                full=True,
                 use_foreign_odds=use_foreign_odds,
                 foreign_odds_api_key=foreign_odds_api_key,
+                football_data_api_key=football_data_api_key,
                 cancel_check=check_cancelled,
             )
-        except (OSError, TimeoutError, urllib.error.URLError) as exc:
-            fallback_reason = f"完整分析发生网络错误（{exc}），已自动降级为简单分析。"
-            unavailable_sources = {
-                "all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
-                "matches": {},
-            }
-        else:
-            if _full_collection_has_broad_network_failure(issue_path):
-                fallback_reason = "完整分析的关键资料源出现大范围网络请求失败，已自动降级为简单分析。"
-                unavailable_sources = _full_collection_network_gaps(issue_path)
-
-    if fallback_reason:
-        _collect_mobile_analysis(
-            issue_path=issue_path,
-            issue=issue,
-            cache_dir=cache_dir,
-            full=False,
-            use_foreign_odds=False,
-            foreign_odds_api_key=None,
-            cancel_check=check_cancelled,
+        except AnalysisCancelledError:
+            raise
+        except Exception as exc:
+            # Preserve the original cause for developer diagnostics. The App
+            # still receives only the sanitized Chinese AnalysisUserError.
+            raise AnalysisUserError(_analysis_collection_error_message(exc, issue)) from exc
+    if _full_collection_has_broad_critical_failure(issue_path):
+        unavailable = _full_collection_failed_sources(issue_path)
+        source_text = "、".join(str(item) for item in unavailable)
+        detail = f"（{source_text}）" if source_text else ""
+        raise AnalysisUserError(
+            "完整分析失败：多个关键资料源大范围不可用"
+            f"{detail}。请检查网络后重试，本次未生成分析报告。"
         )
     check_cancelled()
-    _record_analysis_mode(issue_path, fallback_reason, unavailable_sources)
+    _record_analysis_mode(issue_path)
     check_cancelled()
     if issue_path.exists():
         issue_archive_path.write_text(issue_path.read_text(encoding="utf-8"), encoding="utf-8")
@@ -211,8 +269,7 @@ def _run_analysis(
         strategy_options["model_weights"] = active_weights
     if active_selection_policy is not None:
         strategy_options["selection_policy"] = active_selection_policy
-    if full_analysis:
-        strategy_options["evidence_aware_secondary"] = True
+    strategy_options["evidence_aware_secondary"] = True
     plan = build_ticket_plan(issue_data, **strategy_options)
     check_cancelled()
     with tempfile.TemporaryDirectory(prefix="analysis-", dir=report_dir) as temp_dir:
@@ -256,6 +313,7 @@ def _reuse_recent_issue_snapshot(
     *,
     issue: str,
     foreign_odds_configured: bool,
+    football_data_configured: bool = False,
     now: datetime | None = None,
 ) -> bool:
     """Reuse only an immediately preceding equivalent full collection.
@@ -282,6 +340,16 @@ def _reuse_recent_issue_snapshot(
     previous_foreign_configured = bool(audit.get("configured")) if isinstance(audit, dict) else False
     if previous_foreign_configured != foreign_odds_configured:
         return False
+    auxiliary_audit = metadata.get("free_auxiliary_sources_audit")
+    auxiliary_providers = auxiliary_audit.get("providers") if isinstance(auxiliary_audit, dict) else {}
+    football_data_audit = (
+        auxiliary_providers.get("football-data.org") if isinstance(auxiliary_providers, dict) else {}
+    )
+    previous_football_data_configured = (
+        bool(football_data_audit.get("configured")) if isinstance(football_data_audit, dict) else False
+    )
+    if previous_football_data_configured != football_data_configured:
+        return False
     try:
         collected_at = datetime.fromisoformat(str(metadata.get("snapshot_collected_at") or ""))
     except ValueError:
@@ -306,27 +374,28 @@ def _collect_mobile_analysis(
     issue_path: Path,
     issue: str,
     cache_dir: Path,
-    full: bool,
     use_foreign_odds: bool,
     foreign_odds_api_key: str | None,
+    football_data_api_key: str | None = None,
     cancel_check: Any | None = None,
 ) -> None:
     collect_issue(
         output_path=issue_path,
         issue=issue,
         cache_dir=cache_dir,
-        foreign_odds=use_foreign_odds if full else False,
-        foreign_odds_requested=full,
-        foreign_odds_api_key=foreign_odds_api_key if full else None,
-        strength_model=full,
+        foreign_odds=use_foreign_odds,
+        foreign_odds_requested=True,
+        foreign_odds_api_key=foreign_odds_api_key,
+        football_data_api_key=football_data_api_key,
+        strength_model=True,
         strength_xg_matches=STRENGTH_XG_MATCHES,
-        skip_context_fetches=not full,
-        sina_odds_only=not full,
+        skip_context_fetches=False,
+        sina_odds_only=False,
         cancel_check=cancel_check,
     )
 
 
-def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
+def _full_collection_has_broad_critical_failure(issue_path: Path) -> bool:
     try:
         payload = json.loads(issue_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -344,7 +413,8 @@ def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
         failed = sum(
             1
             for key in NETWORK_SENSITIVE_SOURCE_LABELS
-            if isinstance(audit.get(key), dict) and audit[key].get("status") == "request_failed"
+            if isinstance(audit.get(key), dict)
+            and audit[key].get("status") in {"request_failed", "provider_error", "missing_match_id"}
         )
         if failed >= 3:
             broad_failures += 1
@@ -352,14 +422,13 @@ def _full_collection_has_broad_network_failure(issue_path: Path) -> bool:
     return broad_failures >= threshold
 
 
-def _full_collection_network_gaps(issue_path: Path) -> dict[str, object]:
+def _full_collection_failed_sources(issue_path: Path) -> list[str]:
     try:
         payload = json.loads(issue_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"all": list(NETWORK_SENSITIVE_SOURCE_LABELS.values()), "matches": {}}
+        return list(NETWORK_SENSITIVE_SOURCE_LABELS.values())
 
     all_missing: list[str] = []
-    matches: dict[str, list[str]] = {}
     for match in payload.get("matches", []):
         if not isinstance(match, dict):
             continue
@@ -370,26 +439,19 @@ def _full_collection_network_gaps(issue_path: Path) -> dict[str, object]:
         missing = [
             label
             for key, label in NETWORK_SENSITIVE_SOURCE_LABELS.items()
-            if isinstance(audit.get(key), dict) and audit[key].get("status") == "request_failed"
+            if isinstance(audit.get(key), dict)
+            and audit[key].get("status") in {"request_failed", "provider_error", "missing_match_id"}
         ]
         if not missing:
             continue
-        seq = str(match.get("seq") or "").strip()
-        if seq:
-            matches[seq] = missing
         for label in missing:
             if label not in all_missing:
                 all_missing.append(label)
-    return {
-        "all": all_missing or list(NETWORK_SENSITIVE_SOURCE_LABELS.values()),
-        "matches": matches,
-    }
+    return all_missing or list(NETWORK_SENSITIVE_SOURCE_LABELS.values())
 
 
 def _record_analysis_mode(
     issue_path: Path,
-    fallback_reason: str,
-    unavailable_sources: dict[str, object] | None = None,
 ) -> None:
     try:
         payload = json.loads(issue_path.read_text(encoding="utf-8"))
@@ -397,33 +459,9 @@ def _record_analysis_mode(
         return
     metadata = payload.setdefault("metadata", {})
     metadata["analysis_mode_requested"] = "full"
-    metadata["analysis_mode"] = "simple_fallback" if fallback_reason else "full"
-    all_missing = [
-        str(item)
-        for item in ((unavailable_sources or {}).get("all") or [])
-        if str(item).strip()
-    ]
-    if fallback_reason and all_missing:
-        metadata["analysis_mode_message"] = (
-            f"{fallback_reason} 未获得的信息来源：{'、'.join(all_missing)}；这些资料未参与本次结论。"
-        )
-        metadata["analysis_unavailable_sources"] = all_missing
-        missing_by_match = (unavailable_sources or {}).get("matches") or {}
-        for match in payload.get("matches", []):
-            if not isinstance(match, dict):
-                continue
-            seq = str(match.get("seq") or "").strip()
-            match_missing = missing_by_match.get(seq) if isinstance(missing_by_match, dict) else None
-            sources = match.setdefault("sources", {})
-            if not isinstance(sources, dict):
-                sources = {}
-                match["sources"] = sources
-            sources["analysis_network_fallback"] = {
-                "scope": "match" if match_missing else "issue",
-                "unavailable_sources": list(match_missing or all_missing),
-            }
-    else:
-        metadata["analysis_mode_message"] = fallback_reason or "已完成完整分析，增强样本固定为最近 20 场。"
+    metadata["analysis_mode"] = "full"
+    metadata["analysis_mode_message"] = "已完成完整分析，增强样本固定为最近 20 场。"
+    metadata.pop("analysis_unavailable_sources", None)
     issue_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 

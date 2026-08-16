@@ -170,6 +170,47 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
         self.assertEqual(collect_issue.call_args.kwargs["strength_xg_matches"], 20)
 
+    def test_analysis_rejects_malformed_issue_before_network_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue") as collect_issue,
+                self.assertRaisesRegex(
+                    standalone_api.AnalysisUserError,
+                    "期号格式不正确，请输入 5 位数字",
+                ),
+            ):
+                standalone_api.run_analysis({"issue": "abc"}, Path(tmp))
+
+        collect_issue.assert_not_called()
+
+    def test_analysis_rejects_impossible_issue_before_network_collection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue") as collect_issue,
+                self.assertRaisesRegex(
+                    standalone_api.AnalysisUserError,
+                    "第 99999 期不存在，请检查期号后重试",
+                ),
+            ):
+                standalone_api.run_analysis({"issue": "99999"}, Path(tmp))
+
+        collect_issue.assert_not_called()
+
+    def test_analysis_reports_requested_issue_when_schedule_provider_returns_another_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(
+                    standalone_api,
+                    "collect_issue",
+                    side_effect=ValueError("Sina returned issue 26104 when issue 26105 was requested."),
+                ),
+                self.assertRaisesRegex(
+                    standalone_api.AnalysisUserError,
+                    "没有找到第 26105 期，请检查期号是否正确",
+                ),
+            ):
+                standalone_api.run_analysis({"issue": "26105"}, Path(tmp))
+
     def test_analysis_can_use_full_mobile_mode(self) -> None:
         fake_plan = Mock()
         fake_plan.issue.issue = "26090"
@@ -194,35 +235,25 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertFalse(collect_issue.call_args.kwargs["foreign_odds"])
         self.assertTrue(build_ticket_plan.call_args.kwargs["evidence_aware_secondary"])
 
-    def test_analysis_auto_falls_back_when_full_sources_have_broad_network_failures(self) -> None:
-        fake_plan = Mock()
-        fake_plan.issue.issue = "26090"
-        fake_plan.issue.metadata = {"analysis_mode": "simple_fallback"}
-        fake_plan.predictions = []
-        fake_plan.choose9_keep = []
-        fake_plan.choose9_drop = []
-
+    def test_analysis_stops_when_full_sources_have_broad_network_failures(self) -> None:
         def fake_collect(**kwargs: object) -> Path:
             output_path = Path(str(kwargs["output_path"]))
-            if not kwargs["skip_context_fetches"]:
-                failed_source = {"status": "request_failed"}
-                matches = [
-                    {
-                        "seq": seq,
-                        "sources": {
-                            "collection_audit": {
-                                "injuries": failed_source,
-                                "history": failed_source,
-                                "intelligence": failed_source,
-                                "odds_movement": failed_source,
-                                "asian_handicap": failed_source,
-                            }
+            failed_source = {"status": "request_failed"}
+            matches = [
+                {
+                    "seq": seq,
+                    "sources": {
+                        "collection_audit": {
+                            "injuries": failed_source,
+                            "history": failed_source,
+                            "intelligence": failed_source,
+                            "odds_movement": failed_source,
+                            "asian_handicap": failed_source,
                         }
                     }
-                    for seq in range(1, 15)
-                ]
-            else:
-                matches = [{"seq": seq, "sources": {}} for seq in range(1, 15)]
+                }
+                for seq in range(1, 15)
+            ]
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(
                 json.dumps({"issue": "26090", "metadata": {}, "matches": matches}),
@@ -233,28 +264,41 @@ class StandaloneApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             with (
                 patch.object(standalone_api, "collect_issue", side_effect=fake_collect) as collect_issue,
-                patch.object(standalone_api, "load_issue", return_value=Mock()),
-                patch.object(standalone_api, "build_ticket_plan", return_value=fake_plan),
-                patch.object(standalone_api, "write_report"),
-                patch.object(standalone_api, "write_analysis_html"),
-                patch.object(standalone_api, "archive_report", return_value=Path(tmp) / "history.html"),
+                patch.object(standalone_api, "write_report") as write_report,
+                patch.object(standalone_api, "archive_report") as archive_report,
+                self.assertRaises(standalone_api.AnalysisUserError) as raised,
             ):
                 standalone_api.run_analysis({"issue": "26090"}, Path(tmp))
 
-            collected = json.loads((Path(tmp) / "data" / "collected_issue.json").read_text(encoding="utf-8"))
+        self.assertEqual(collect_issue.call_count, 1)
+        self.assertFalse(collect_issue.call_args.kwargs["skip_context_fetches"])
+        self.assertFalse(collect_issue.call_args.kwargs["sina_odds_only"])
+        self.assertIn("多个关键资料源大范围不可用", str(raised.exception))
+        self.assertIn("伤停信息", str(raised.exception))
+        self.assertIn("本次未生成分析报告", str(raised.exception))
+        write_report.assert_not_called()
+        archive_report.assert_not_called()
 
-        self.assertEqual(collect_issue.call_count, 2)
-        self.assertFalse(collect_issue.call_args_list[0].kwargs["skip_context_fetches"])
-        self.assertTrue(collect_issue.call_args_list[1].kwargs["skip_context_fetches"])
-        self.assertEqual(collected["metadata"]["analysis_mode"], "simple_fallback")
-        self.assertIn("自动降级", collected["metadata"]["analysis_mode_message"])
-        self.assertEqual(
-            collected["metadata"]["analysis_unavailable_sources"],
-            ["伤停信息", "历史交锋", "赛前情报", "赔率变化", "亚洲让球"],
+    def test_analysis_error_message_hides_internal_exception_details(self) -> None:
+        message = standalone_api.analysis_error_message(
+            RuntimeError("Traceback: secret.py line 42 INTERNAL_ERROR_CODE")
         )
-        fallback = collected["matches"][0]["sources"]["analysis_network_fallback"]
-        self.assertEqual(fallback["scope"], "match")
-        self.assertEqual(fallback["unavailable_sources"], collected["metadata"]["analysis_unavailable_sources"])
+
+        self.assertTrue(message.startswith("完整分析失败："))
+        self.assertNotIn("Traceback", message)
+        self.assertNotIn("secret.py", message)
+        self.assertNotIn("INTERNAL_ERROR_CODE", message)
+
+    def test_analysis_collection_error_is_converted_to_chinese_user_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with (
+                patch.object(standalone_api, "collect_issue", side_effect=TimeoutError("socket timeout 120")),
+                self.assertRaisesRegex(
+                    standalone_api.AnalysisUserError,
+                    "连接数据源超时，请检查网络后重试",
+                ),
+            ):
+                standalone_api.run_analysis({"issue": "26090"}, Path(tmp))
 
     def test_analysis_passes_ticket_budget_to_strategy(self) -> None:
         fake_plan = Mock()

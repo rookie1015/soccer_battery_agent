@@ -1052,7 +1052,9 @@ def _fetch_json(
     if path.exists():
         age = datetime.now().timestamp() - path.stat().st_mtime
         if age <= max_age_seconds:
-            return _read_json_object(path)
+            cached = _read_json_object(path)
+            if cached is not None:
+                return cached
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
     try:
         text = read_url_text(req, timeout=12, cancel_check=cancel_check)
@@ -1060,8 +1062,14 @@ def _fetch_json(
         if path.exists():
             return _read_json_object(path)
         return None
+    try:
+        payload = loads_json(text)
+    except (TypeError, ValueError):
+        # FotMob occasionally returns an empty or HTML body with a successful
+        # HTTP status. Treat it as a missing optional strength sample and do
+        # not poison the cache or abort the complete lottery analysis.
+        return _read_json_object(path) if path.exists() else None
     path.write_text(text, encoding="utf-8")
-    payload = loads_json(text)
     _remember_json_object(path, payload)
     return payload
 
@@ -1075,7 +1083,10 @@ def _read_json_object(path: Path) -> Any:
         if cached is not None and cached[:2] == signature:
             _JSON_OBJECT_CACHE.move_to_end(key)
             return cached[2]
-    payload = loads_json(path.read_text(encoding="utf-8", errors="replace"))
+    try:
+        payload = loads_json(path.read_text(encoding="utf-8", errors="replace"))
+    except (OSError, TypeError, ValueError):
+        return None
     _remember_json_object(path, payload, signature=signature)
     return payload
 

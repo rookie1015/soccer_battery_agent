@@ -6,6 +6,7 @@ from unittest.mock import patch
 from football_lottery_agent.strength_model import (
     _JSON_OBJECT_CACHE,
     _estimate_starting_eleven,
+    _fetch_json,
     _has_injury,
     _player_strength,
     _player_value,
@@ -47,6 +48,23 @@ class StrengthModelTests(unittest.TestCase):
         self.assertEqual(first, {"value": 7})
         self.assertIs(first, second)
         self.assertEqual(loads.call_count, 1)
+
+    def test_invalid_fresh_json_cache_is_refetched_without_aborting(self) -> None:
+        url = "https://www.fotmob.com/api/data/matchDetails?matchId=99"
+        with TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            import hashlib
+
+            path = cache / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
+            path.write_text("", encoding="utf-8")
+            _JSON_OBJECT_CACHE.clear()
+            with patch(
+                "football_lottery_agent.strength_model.read_url_text",
+                return_value='{"general":{"matchId":99}}',
+            ):
+                payload = _fetch_json(url, cache, 3600)
+
+        self.assertEqual(payload, {"general": {"matchId": 99}})
 
     def test_team_score_uses_aliases(self) -> None:
         self.assertEqual(_team_score("荷兰", "Netherlands"), 1.0)

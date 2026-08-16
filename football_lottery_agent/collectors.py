@@ -127,6 +127,7 @@ def collect_issue(
     foreign_odds_regions: str = "uk,eu",
     foreign_odds_bookmakers: str = "",
     foreign_odds_sports: str = "",
+    football_data_api_key: str | None = None,
     strength_model: bool = False,
     strength_team_ids: str | Path | None = None,
     strength_lookback: int = 20,
@@ -241,6 +242,30 @@ def collect_issue(
 
         return fetch_polymarket_signals_for_matches(raw_matches, cache_dir=cache)
 
+    def collect_free_auxiliary() -> Any:
+        from .auxiliary_sources import AuxiliaryResult, fetch_free_auxiliary_sources
+
+        if offline:
+            return AuxiliaryResult(
+                by_seq={},
+                audit={
+                    "role": "sina_auxiliary_verification",
+                    "issue": issue_id,
+                    "providers": {
+                        "500.com": {"status": "offline", "matched_matches": 0},
+                        "zgzcw": {"status": "offline", "matched_matches": 0},
+                        "football-data.org": {"status": "offline", "matched_matches": 0},
+                    },
+                },
+            )
+        return fetch_free_auxiliary_sources(
+            raw_matches,
+            issue_id,
+            cache,
+            football_data_api_key=football_data_api_key,
+            cancel_check=cancel_check,
+        )
+
     def measured(call: Any) -> tuple[Any, float]:
         started = time.perf_counter()
         value = call()
@@ -257,6 +282,7 @@ def collect_issue(
         "sina_details": collect_sina,
         "foreign_odds": collect_foreign_odds,
         "polymarket": collect_polymarket,
+        "free_auxiliary": collect_free_auxiliary,
     }
     context_results: dict[str, Any] = {}
     executor = ThreadPoolExecutor(max_workers=len(context_calls))
@@ -285,6 +311,7 @@ def collect_issue(
     sina_details = context_results["sina_details"]
     foreign_odds_by_seq = context_results["foreign_odds"]
     polymarket_by_seq = context_results["polymarket"]
+    auxiliary_result = context_results["free_auxiliary"]
     matches: list[dict[str, Any]] = []
     for item in raw_matches:
         check_cancelled()
@@ -312,8 +339,18 @@ def collect_issue(
         knockout_notes = _knockout_context_notes(knockout_context, item)
         polymarket = polymarket_by_seq.get(item.seq)
         polymarket_notes = _polymarket_notes(polymarket)
+        auxiliary_rows = auxiliary_result.by_seq.get(item.seq, ())
+        from .auxiliary_sources import auxiliary_notes, auxiliary_odds
+
+        auxiliary_fallback_odds = auxiliary_odds(auxiliary_rows)
+        auxiliary_verification_notes = auxiliary_notes(auxiliary_rows, detail.odds, item.kickoff)
         media_notes = _mainstream_media_notes(media_items)
-        has_real_odds = item.seq in odds_by_seq or foreign is not None or detail.odds is not None
+        has_real_odds = (
+            item.seq in odds_by_seq
+            or foreign is not None
+            or detail.odds is not None
+            or auxiliary_fallback_odds is not None
+        )
         notes = _build_notes(item, news, injury_news, history + history_notes, has_odds=has_real_odds)
         notes[3:3] = (
             injury_notes
@@ -321,13 +358,33 @@ def collect_issue(
             + knockout_notes
             + media_notes
             + foreign_notes
+            + auxiliary_verification_notes
             + polymarket_notes
             + strength_notes
         )
-        odds = odds_by_seq.get(item.seq) or (foreign.odds if foreign else None) or detail.odds or OddsRow(item.seq, 2.35, 3.15, 2.95)
+        fallback_row = (
+            OddsRow(item.seq, *auxiliary_fallback_odds)
+            if auxiliary_fallback_odds is not None
+            else None
+        )
+        odds = (
+            odds_by_seq.get(item.seq)
+            or (foreign.odds if foreign else None)
+            or detail.odds
+            or fallback_row
+            or OddsRow(item.seq, 2.35, 3.15, 2.95)
+        )
         odds_source = "csv"
         if item.seq not in odds_by_seq:
-            odds_source = "foreign_bookmakers" if foreign else ("sina_average_euro" if detail.odds else "default_placeholder")
+            odds_source = (
+                "foreign_bookmakers"
+                if foreign
+                else "sina_average_euro"
+                if detail.odds
+                else "free_auxiliary_average"
+                if fallback_row
+                else "default_placeholder"
+            )
         # Search snippets and media headlines are shown for context only. They
         # are not reliable enough to change probabilities through keyword hits.
         signals = infer_signals(item, [])
@@ -338,6 +395,11 @@ def collect_issue(
         signals = _apply_sina_detail_to_signals(signals, detail)
         strength_source = _strength_source(strength)
         selected_market = _selected_market_source(detail, foreign)
+        if odds_source == "free_auxiliary_average":
+            selected_market = {
+                "provider": "free_auxiliary_average",
+                "providers": list(dict.fromkeys(row.provider for row in auxiliary_rows if row.odds)),
+            }
         collection_audit = _collection_audit(
             mode="full" if not skip_context_fetches else "simple",
             odds_source=odds_source,
@@ -349,6 +411,12 @@ def collect_issue(
             polymarket=polymarket,
             market_source=selected_market,
         )
+        collection_audit["auxiliary_verification"] = {
+            "status": "available" if auxiliary_rows else "unmatched",
+            "providers": list(dict.fromkeys(row.provider for row in auxiliary_rows)),
+            "count": len(auxiliary_rows),
+            "role": "sina_auxiliary_verification",
+        }
 
         matches.append(
             {
@@ -371,6 +439,10 @@ def collect_issue(
                     "foreign_odds": foreign.raw if foreign else {},
                     "odds_market": selected_market,
                     "polymarket": polymarket.raw if polymarket else {},
+                    "auxiliary_verification": {
+                        "role": "sina_auxiliary_verification",
+                        "matches": [row.as_dict() for row in auxiliary_rows],
+                    },
                     "strength_model": strength_source,
                     "collection_audit": collection_audit,
                     "data_usage": _data_usage_summary(collection_audit, foreign is not None),
@@ -388,6 +460,7 @@ def collect_issue(
         **metadata,
         "analysis_mode": "full" if not skip_context_fetches else "simple",
         "foreign_odds_audit": foreign_odds_audit,
+        "free_auxiliary_sources_audit": auxiliary_result.audit,
         "snapshot_collected_at": datetime.now(timezone.utc).isoformat(),
         "snapshot_schema_version": "1",
         "collection_timings_seconds": timings,
@@ -1511,6 +1584,8 @@ def _data_usage_summary(audit: dict[str, Any], foreign_selected: bool) -> dict[s
     if (audit.get("totals") or {}).get("status") == "available":
         numerical.append("大小球")
     display_only = ["新闻标题", "主流媒体标题", "Polymarket"]
+    if (audit.get("auxiliary_verification") or {}).get("status") == "available":
+        display_only.append("免费辅助信源交叉核验")
     if foreign_selected:
         numerical.append("国外公司赔率")
     return {"numerical": numerical, "display_only": display_only}

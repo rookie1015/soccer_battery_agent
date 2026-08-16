@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from football_lottery_agent.standalone_api import (
+    analysis_error_message,
     run_analysis,
     run_delete_history,
     run_foreign_odds_usage,
@@ -19,7 +20,10 @@ def health() -> str:
 
 
 def analysis(payload_json: str, work_dir: str) -> str:
-    return _json(run_analysis(json.loads(payload_json), work_dir))
+    try:
+        return _json(run_analysis(json.loads(payload_json), work_dir))
+    except Exception as exc:
+        return _json({"ok": False, "error": analysis_error_message(exc)})
 
 
 def foreign_odds_usage(payload_json: str) -> str:
