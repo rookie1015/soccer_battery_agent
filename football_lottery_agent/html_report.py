@@ -254,7 +254,7 @@ def _review_row(row) -> str:
         <span class="meta">{escape(match.league)}</span>
       </td>
       <td><span class="score-final">{escape(row.result.score_text)}</span></td>
-      <td><span class="pick">{escape(OUTCOME_LABELS[row.result.outcome])}</span></td>
+      <td><span class="pick">{escape(row.result.outcome_label)}</span></td>
       <td>{_pick_badge(prediction)}</td>
       <td><span class="badge {outcome_class}">{"命中" if row.outcome_hit else "未中"}</span></td>
       <td>{_scoreline_tags(prediction)}</td>
@@ -293,7 +293,7 @@ def _major_miss_card(row) -> str:
     return f"""
     <article class="upset-card">
       <strong>{match.seq}. {escape(match.home)} vs {escape(match.away)}</strong>
-      <span>推荐 <b>{escape(prediction.pick_text)}</b>，实际 <b>{escape(row.result.score_text)}（{escape(OUTCOME_LABELS[row.result.outcome])}）</b></span>
+      <span>推荐 <b>{escape(prediction.pick_text)}</b>，实际 <b>{escape(row.result.score_text)}（{escape(row.result.outcome_label)}）</b></span>
       <small>赛前最高概率：{escape(OUTCOME_LABELS[top[0]])} {top[1]:.0%} · 置信度 {prediction.confidence:.1f}% · 风险 {escape(prediction.risk)}</small>
     </article>
     """

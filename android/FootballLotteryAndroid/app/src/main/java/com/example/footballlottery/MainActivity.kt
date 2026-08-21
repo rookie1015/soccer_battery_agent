@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -1706,24 +1707,35 @@ private fun RequestCard(
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
             )
-            Button(
-                onClick = {
-                    if (viewModel.isLoading) {
-                        viewModel.cancelAnalysis(localEngine)
-                    } else {
-                        viewModel.generateAnalysis(
-                            localEngine,
-                            appViewModel.theOddsApiKey,
-                            appViewModel.footballDataApiKey,
-                            appViewModel.feishuAutoSend,
-                            appViewModel.feishuWebhookUrl,
-                        )
-                    }
-                },
+            Row(
                 modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                LoadingPrefix(viewModel.isLoading)
-                Text(if (viewModel.isLoading) "取消分析" else "生成分析报告")
+                Button(
+                    onClick = {
+                        if (viewModel.isLoading) {
+                            viewModel.cancelAnalysis(localEngine)
+                        } else {
+                            viewModel.generateAnalysis(
+                                localEngine,
+                                appViewModel.theOddsApiKey,
+                                appViewModel.footballDataApiKey,
+                                appViewModel.feishuAutoSend,
+                                appViewModel.feishuWebhookUrl,
+                            )
+                        }
+                    },
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Text(if (viewModel.isLoading) "取消分析" else "生成分析报告")
+                }
+                if (viewModel.isLoading) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(22.dp),
+                        strokeWidth = 2.dp,
+                    )
+                }
             }
         }
     }
@@ -1920,9 +1932,9 @@ private fun SummaryCard(report: AnalysisReport) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
                 )
-                if (!isReview && purchaseCostText.isNotBlank()) {
+                if (purchaseCostText.isNotBlank()) {
                     Text(
-                        purchaseCostText,
+                        if (isReview) purchaseCostText.replace("购彩", "本单金额") else purchaseCostText,
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,

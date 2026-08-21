@@ -32,20 +32,31 @@ class MatchResult:
     home_goals: int
     away_goals: int
     score_exact: bool = True
+    unplayed: bool = False
 
     @property
     def score_text(self) -> str:
+        if self.unplayed:
+            return "*（比赛未进行）"
         if not self.score_exact:
-            return f"{OUTCOME_LABELS[self.outcome]}（仅彩果）"
+            return f"{self.outcome_label}（仅彩果）"
         return f"{self.home_goals}-{self.away_goals}"
 
     @property
     def outcome(self) -> str:
+        if self.unplayed:
+            return "*"
         if self.home_goals > self.away_goals:
             return "3"
         if self.home_goals == self.away_goals:
             return "1"
         return "0"
+
+    @property
+    def outcome_label(self) -> str:
+        if self.unplayed:
+            return "未进行（3/1/0均正确）"
+        return OUTCOME_LABELS[self.outcome]
 
 
 @dataclass(frozen=True)
@@ -121,7 +132,7 @@ class ReviewReport:
 
     @property
     def score_total(self) -> int:
-        return sum(1 for row in self.rows if row.result.score_exact)
+        return sum(1 for row in self.rows if row.result.score_exact and not row.result.unplayed)
 
     @property
     def diagnostic_counts(self) -> dict[str, int]:
@@ -252,6 +263,9 @@ def parse_sporttery_result_row(row: dict[str, object]) -> dict[int, MatchResult]
             if not outcome and not score:
                 continue
             seq = int(match.get("matchNum") or index)
+            if _is_unplayed_marker(outcome) or _is_unplayed_marker(score):
+                results[seq] = _unplayed_result(seq)
+                continue
             if _looks_like_score(score):
                 home_goals, away_goals = _parse_score(score)
                 result = MatchResult(seq=seq, home_goals=home_goals, away_goals=away_goals)
@@ -261,7 +275,8 @@ def parse_sporttery_result_row(row: dict[str, object]) -> dict[int, MatchResult]
             results[seq] = _result_from_outcome(seq, outcome)
         return results
 
-    outcomes = str(row.get("lotteryDrawResult") or "").split()
+    raw_outcomes = str(row.get("lotteryDrawResult") or "")
+    outcomes = re.findall(r"[310*＊]", raw_outcomes)
     return {seq: _result_from_outcome(seq, outcome) for seq, outcome in enumerate(outcomes[:14], start=1)}
 
 
@@ -280,10 +295,14 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
             MatchReview(
                 prediction=prediction,
                 result=result,
-                outcome_hit=result.outcome in prediction.picks,
-                analysis_outcome_hit=result.outcome in prediction.analysis_picks,
-                top_score_hit=result.score_exact and bool(score_texts and result.score_text == score_texts[0]),
-                score_top3_hit=result.score_exact and result.score_text in score_texts,
+                outcome_hit=result.unplayed or result.outcome in prediction.picks,
+                analysis_outcome_hit=result.unplayed or result.outcome in prediction.analysis_picks,
+                top_score_hit=(
+                    result.score_exact
+                    and not result.unplayed
+                    and bool(score_texts and result.score_text == score_texts[0])
+                ),
+                score_top3_hit=result.score_exact and not result.unplayed and result.score_text in score_texts,
                 bucket=bucket,
                 diagnostic_tags=_diagnostic_tags(prediction, result),
             )
@@ -329,7 +348,7 @@ def render_review_markdown(
     for row in report.rows:
         prediction = row.prediction
         match = prediction.match
-        actual = OUTCOME_LABELS[row.result.outcome]
+        actual = row.result.outcome_label
         outcome_mark = "命中" if row.outcome_hit else "未中"
         lines.append(
             f"| {match.seq} | {match.home} vs {match.away} | {row.result.score_text} | {actual} | "
@@ -347,7 +366,7 @@ def render_review_markdown(
             match = prediction.match
             lines.append(
                 f"- {match.seq}. {match.home} vs {match.away}：推荐 `{prediction.pick_text}`，"
-                f"实际 {row.result.score_text}（{OUTCOME_LABELS[row.result.outcome]}），"
+                f"实际 {row.result.score_text}（{row.result.outcome_label}），"
                 f"赛前置信度 {prediction.confidence:.1f}%，风险 {prediction.risk}。"
             )
     lines.append("")
@@ -367,6 +386,8 @@ def _is_major_miss(row: MatchReview) -> bool:
 
 
 def _diagnostic_tags(prediction: Prediction, result: MatchResult) -> tuple[str, ...]:
+    if result.unplayed:
+        return ()
     if result.outcome in prediction.picks:
         return ()
 
@@ -412,6 +433,8 @@ def write_review_report(
 def _parse_result_row(raw: dict[str, str]) -> MatchResult:
     seq = int((raw.get("seq") or "").strip())
     if raw.get("score"):
+        if _is_unplayed_marker(raw["score"]):
+            return _unplayed_result(seq)
         home_goals, away_goals = _parse_score(raw["score"])
         return MatchResult(seq=seq, home_goals=home_goals, away_goals=away_goals)
     if raw.get("outcome"):
@@ -452,12 +475,12 @@ def _issue_section(text: str, issue: str) -> str:
 
 
 def _extract_outcomes(section: str) -> list[str]:
-    candidates = re.findall(r"[310]{14}", section)
+    candidates = re.findall(r"[310*＊]{14}", section)
     if candidates:
-        return list(candidates[0])
-    spaced = re.findall(r"(?:^|[^\d])((?:[310]\s+){13}[310])(?:[^\d]|$)", section)
+        return ["*" if item == "＊" else item for item in candidates[0]]
+    spaced = re.findall(r"(?:^|[^\d])((?:[310*＊]\s+){13}[310*＊])(?:[^\d]|$)", section)
     if spaced:
-        return re.findall(r"[310]", spaced[0])
+        return ["*" if item == "＊" else item for item in re.findall(r"[310*＊]", spaced[0])]
     labels = re.findall(r"[胜平负]", section)
     if len(labels) >= 14:
         return [_normalize_outcome_label(label) for label in labels[:14]]
@@ -466,6 +489,8 @@ def _extract_outcomes(section: str) -> list[str]:
 
 def _normalize_outcome_label(value: str) -> str:
     cleaned = value.strip()
+    if _is_unplayed_marker(cleaned):
+        return "*"
     if cleaned in {"3", "胜", "主胜"}:
         return "3"
     if cleaned in {"1", "平", "平局"}:
@@ -477,11 +502,21 @@ def _normalize_outcome_label(value: str) -> str:
 
 def _result_from_outcome(seq: int, outcome: str) -> MatchResult:
     normalized = _normalize_outcome_label(outcome)
+    if normalized == "*":
+        return _unplayed_result(seq)
     if normalized == "3":
         return MatchResult(seq=seq, home_goals=1, away_goals=0, score_exact=False)
     if normalized == "1":
         return MatchResult(seq=seq, home_goals=0, away_goals=0, score_exact=False)
     return MatchResult(seq=seq, home_goals=0, away_goals=1, score_exact=False)
+
+
+def _is_unplayed_marker(value: str) -> bool:
+    return value.strip() in {"*", "＊"}
+
+
+def _unplayed_result(seq: int) -> MatchResult:
+    return MatchResult(seq=seq, home_goals=0, away_goals=0, score_exact=False, unplayed=True)
 
 
 def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:

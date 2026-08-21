@@ -726,7 +726,7 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
 
         seq = int(cells[0])
         home, away = _split_matchup(cells[1])
-        pick_text = cells[4]
+        analysis_pick_text, pick_text = _parse_review_selection(cells[4])
         if cells[7] == "任九保留":
             keep.append(seq)
         elif cells[7] == "任九剔除":
@@ -740,6 +740,12 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
                 "away": away,
                 "pick_text": pick_text,
                 "pick_labels": [OUTCOME_LABELS.get(pick, pick) for pick in pick_text.split("/") if pick],
+                "analysis_pick_text": analysis_pick_text,
+                "analysis_pick_labels": [
+                    OUTCOME_LABELS.get(pick, pick) for pick in analysis_pick_text.split("/") if pick
+                ],
+                "budget_adjusted": pick_text != analysis_pick_text,
+                "budget_forced_single": pick_text != analysis_pick_text and "/" not in pick_text,
                 "confidence": 0.0,
                 "risk": cells[7],
                 "probabilities": {"home": 0.0, "draw": 0.0, "away": 0.0},
@@ -776,6 +782,21 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
         "choose9_drop": drop,
         "predictions": predictions,
     }
+
+
+def _parse_review_selection(value: str) -> tuple[str, str]:
+    cleaned = value.strip()
+    adjusted = re.fullmatch(
+        r"模型\s*([310](?:\s*/\s*[310])*)\s*(?:→|->)\s*预算\s*([310](?:\s*/\s*[310])*)",
+        cleaned,
+    )
+    if adjusted:
+        analysis = re.sub(r"\s+", "", adjusted.group(1))
+        ticket = re.sub(r"\s+", "", adjusted.group(2))
+        return analysis, ticket
+    picks = re.findall(r"[310]", cleaned)
+    normalized = "/".join(picks)
+    return normalized, normalized
 
 
 def _parse_review_overview(markdown_text: str) -> dict[str, float]:
@@ -1104,7 +1125,7 @@ def _serialize_review_report(
             prediction = dict(prediction)
             prediction["final_score"] = row.result.score_text
             prediction["final_result"] = row.result.outcome
-            prediction["final_result_label"] = OUTCOME_LABELS[row.result.outcome]
+            prediction["final_result_label"] = row.result.outcome_label
             prediction["outcome_hit"] = row.outcome_hit
             prediction["analysis_outcome_hit"] = row.analysis_outcome_hit
             prediction["diagnostic_tags"] = list(row.diagnostic_tags)

@@ -45,6 +45,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(results[2].outcome, "1")
         self.assertEqual(results[3].outcome, "0")
 
+    def test_load_results_accepts_unplayed_star(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "results.csv"
+            path.write_text("seq,outcome\n1,*\n2,＊\n", encoding="utf-8")
+
+            results = load_results(path)
+
+        self.assertTrue(results[1].unplayed)
+        self.assertEqual(results[1].outcome, "*")
+        self.assertEqual(results[1].outcome_label, "未进行（3/1/0均正确）")
+        self.assertTrue(results[2].unplayed)
+
     def test_parse_sina_results_html_extracts_finished_scores(self) -> None:
         html = """
         <table class="sfcPubTable"><tbody>
@@ -131,6 +143,22 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(results[1].score_text, "主胜（仅彩果）")
         self.assertFalse(results[1].score_exact)
 
+    def test_parse_sporttery_result_row_recognizes_unplayed_star(self) -> None:
+        row = {
+            "lotteryDrawNum": "26087",
+            "lotteryDrawResult": "3 1 *",
+            "matchList": [
+                {"matchNum": 1, "result": "3", "czScore": "2:1"},
+                {"matchNum": 2, "result": "1", "czScore": "0:0"},
+                {"matchNum": 3, "result": "", "czScore": "*"},
+            ],
+        }
+
+        results = parse_sporttery_result_row(row)
+
+        self.assertTrue(results[3].unplayed)
+        self.assertEqual(results[3].score_text, "*（比赛未进行）")
+
     def test_build_review_counts_outcome_and_score_hits(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue)
@@ -166,6 +194,31 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review.top_score_hits, 0)
         self.assertEqual(review.score_top3_hits, 0)
         self.assertIn("比分 Top1 命中：0/0（N/A）", render_review_markdown(review))
+
+    def test_build_review_counts_unplayed_star_as_hit_for_any_pick(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        plan = build_ticket_plan(issue)
+        results = {
+            prediction.match.seq: _result_for_prediction(prediction)
+            for prediction in plan.predictions
+        }
+        target = plan.predictions[0]
+        results[target.match.seq] = MatchResult(
+            seq=target.match.seq,
+            home_goals=0,
+            away_goals=0,
+            unplayed=True,
+        )
+
+        review = build_review(plan, results)
+        row = next(item for item in review.rows if item.prediction.match.seq == target.match.seq)
+
+        self.assertTrue(row.outcome_hit)
+        self.assertTrue(row.analysis_outcome_hit)
+        self.assertFalse(row.top_score_hit)
+        self.assertFalse(row.score_top3_hit)
+        self.assertEqual(row.diagnostic_tags, ())
+        self.assertIn("未进行（3/1/0均正确）", render_review_markdown(review))
 
     def test_build_review_flags_major_miss(self) -> None:
         issue = load_issue("data/sample_issue.json")

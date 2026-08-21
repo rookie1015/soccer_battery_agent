@@ -747,7 +747,7 @@ class StandaloneApiTests(unittest.TestCase):
 
 | 序号 | 对阵 | 最终比分 | 彩果 | 推荐 | 胜平负 | 比分预测 | 任九 | 错因标签 | 赛后外部线索 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 甲队 vs 乙队 | 1-0 | 主胜 | 3 | 命中 | 1-0 13%，1-1 12% | 任九保留 | - | - |
+| 1 | 甲队 vs 乙队 | 1-0 | 主胜 | 模型 3/1/0 → 预算 3/0 | 命中 | 1-0 13%，1-1 12% | 任九保留 | - | - |
 | 2 | 丙队 vs 丁队 | 0-1 | 客胜 | 3 | 未中 | 1-0 10%，0-1 9% | 任九剔除 | 平局漏判、单选覆盖不足 | 关键伤停或临场阵容变化 |
 """
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,6 +768,9 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(parsed["predictions"][1]["post_match_evidence"][0]["label"], "关键伤停或临场阵容变化")
         self.assertTrue(parsed["predictions"][0]["outcome_hit"])
         self.assertEqual(parsed["predictions"][0]["final_result_label"], "主胜")
+        self.assertEqual(parsed["predictions"][0]["analysis_pick_text"], "3/1/0")
+        self.assertEqual(parsed["predictions"][0]["pick_text"], "3/0")
+        self.assertTrue(parsed["predictions"][0]["budget_adjusted"])
 
 
 if __name__ == "__main__":
