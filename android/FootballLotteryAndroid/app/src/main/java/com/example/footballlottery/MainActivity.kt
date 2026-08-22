@@ -1564,7 +1564,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.3.2（8） · 多平独立线路组合",
+                        "App 版本 0.3.3（9） · 多平线路历史修复",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,

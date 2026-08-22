@@ -6,7 +6,7 @@
 
 ## 当前版本
 
-- Android：`0.3.2`（versionCode `8`）
+- Android：`0.3.3`（versionCode `9`）
 - 更新日期：`2026-08-22`
 - Python：`3.10+`
 - 自动测试：`210` 项
@@ -57,7 +57,7 @@ android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-App 版本 0.3.2（8） · 多平独立线路组合
+App 版本 0.3.3（9） · 多平线路历史修复
 ```
 
 ## 数据来源

@@ -688,6 +688,12 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(first["analysis_pick_text"], plan.predictions[0].analysis_pick_text)
         self.assertEqual(first["pick_text"], plan.predictions[0].pick_text)
         self.assertEqual(first["budget_adjusted"], plan.predictions[0].budget_adjusted)
+        self.assertEqual(len(parsed["predictions"]), 14)
+        self.assertEqual(parsed["budget"]["total_cost_yuan"], 128)
+        self.assertEqual(parsed["metrics"]["line_portfolio_count"], 64)
+        self.assertEqual(parsed["line_portfolio"]["line_count"], 64)
+        self.assertEqual(len(parsed["line_portfolio"]["lines"]), 64)
+        self.assertTrue(parsed["line_portfolio"]["draw_coverages"])
 
     def test_history_parses_purchase_deadline_from_new_markdown(self) -> None:
         markdown_text = _analysis_markdown("26095", "3", tuple(range(1, 10))).replace(

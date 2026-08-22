@@ -541,8 +541,9 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
     kickoff_by_seq = _parse_kickoffs(markdown_text)
     reasons_by_seq = _parse_analysis_reasons(markdown_text)
     predictions = []
+    analysis_table_text = markdown_text.split("## 14场逐场建议", 1)[1].split("\n## ", 1)[0]
 
-    for line in markdown_text.splitlines():
+    for line in analysis_table_text.splitlines():
         if not line.startswith("| "):
             continue
         if "---" in line or "序号" in line:
@@ -607,6 +608,12 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
     tactical_draws = sum(1 for prediction in predictions if prediction["tactical_draw"])
     avg_confidence = sum(float(prediction["confidence"]) for prediction in predictions) / len(predictions)
     metadata = _parse_analysis_metadata(markdown_text)
+    line_portfolio = _parse_line_portfolio_markdown(markdown_text, predictions)
+    line_count = int(line_portfolio.get("line_count") or 0) if line_portfolio else 0
+    draw_candidate_count = (
+        len(line_portfolio.get("draw_coverages") or []) if line_portfolio else 0
+    )
+    budget = _parse_analysis_budget(markdown_text, line_portfolio)
     return {
         "issue": issue,
         "purchase_deadline": metadata.get("purchase_deadline", ""),
@@ -621,12 +628,117 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
             "ticket_single_count": ticket_singles,
             "budget_forced_single_count": forced_singles,
             "tactical_draw_count": tactical_draws,
+            "draw_hedge_count": 0,
+            "line_portfolio_count": line_count,
+            "draw_candidate_count": draw_candidate_count,
             "low_risk_count": low_risk,
             "average_confidence": round(avg_confidence, 1),
         },
+        "budget": budget,
+        "draw_hedge": None,
+        "line_portfolio": line_portfolio,
         "choose9_keep": keep,
         "choose9_drop": drop,
         "predictions": predictions,
+    }
+
+
+def _parse_analysis_budget(
+    markdown_text: str,
+    line_portfolio: dict[str, object] | None,
+) -> dict[str, int]:
+    if line_portfolio:
+        allocated = int(line_portfolio.get("allocated_budget_yuan") or 0)
+        cost = int(line_portfolio.get("cost_yuan") or 0)
+        return {
+            "limit_yuan": allocated,
+            "main_allocated_yuan": allocated,
+            "main_cost_yuan": cost,
+            "hedge_allocated_yuan": 0,
+            "hedge_cost_yuan": 0,
+            "total_cost_yuan": cost,
+        }
+    total_match = re.search(r"^- 组合总成本：(\d+)/(\d+) 元。?$", markdown_text, re.MULTILINE)
+    cost = int(total_match.group(1)) if total_match else 0
+    limit = int(total_match.group(2)) if total_match else cost
+    return {
+        "limit_yuan": limit,
+        "main_allocated_yuan": limit,
+        "main_cost_yuan": cost,
+        "hedge_allocated_yuan": 0,
+        "hedge_cost_yuan": 0,
+        "total_cost_yuan": cost,
+    }
+
+
+def _parse_line_portfolio_markdown(
+    markdown_text: str,
+    predictions: list[dict[str, object]],
+) -> dict[str, object] | None:
+    summary = re.search(
+        r"^- 独立线路：(\d+) 注，实际成本 (\d+)/(\d+) 元。?$",
+        markdown_text,
+        re.MULTILINE,
+    )
+    if not summary:
+        return None
+    line_count = int(summary.group(1))
+    cost = int(summary.group(2))
+    allocated = int(summary.group(3))
+    combination = re.search(
+        r"^- 多平组合：(\d+) 注至少包含两个候选平局；任意两场候选同时为平至少 (\d+) 注。?$",
+        markdown_text,
+        re.MULTILINE,
+    )
+    matches = {
+        int(prediction["seq"]): (str(prediction["home"]), str(prediction["away"]))
+        for prediction in predictions
+    }
+    coverages: list[dict[str, object]] = []
+    if "## 平局线路配额" in markdown_text:
+        coverage_text = markdown_text.split("## 平局线路配额", 1)[1].split("\n## ", 1)[0]
+        for line in coverage_text.splitlines():
+            if not line.startswith("| ") or "---" in line or "序号" in line:
+                continue
+            cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+            if len(cells) < 6 or not cells[0].isdigit():
+                continue
+            seq = int(cells[0])
+            home, away = matches.get(seq, _split_matchup(cells[1]))
+            coverages.append(
+                {
+                    "seq": seq,
+                    "home": home,
+                    "away": away,
+                    "probability": _parse_percent(cells[2]),
+                    "target_lines": int(cells[3]),
+                    "actual_lines": int(cells[4]),
+                    "actual_share": _parse_percent(cells[5]),
+                }
+            )
+    lines: list[dict[str, object]] = []
+    if "## 完整投注线路" in markdown_text:
+        lines_text = markdown_text.split("## 完整投注线路", 1)[1].split("\n## ", 1)[0]
+        for match in re.finditer(r"^(\d+)\. `([310](?:-[310]){13})`$", lines_text, re.MULTILINE):
+            outcomes = match.group(2).split("-")
+            lines.append(
+                {
+                    "number": int(match.group(1)),
+                    "pick_text": match.group(2),
+                    "outcomes": outcomes,
+                    "joint_probability": 0.0,
+                }
+            )
+    if len(lines) != line_count:
+        return None
+    return {
+        "line_count": line_count,
+        "allocated_budget_yuan": allocated,
+        "cost_yuan": cost,
+        "multi_draw_lines": int(combination.group(1)) if combination else 0,
+        "minimum_draw_pair_lines": int(combination.group(2)) if combination else 0,
+        "draw_coverages": coverages,
+        "lines": lines,
     }
 
 
