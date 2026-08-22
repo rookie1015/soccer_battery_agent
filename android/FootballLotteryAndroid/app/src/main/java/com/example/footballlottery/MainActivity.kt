@@ -1564,7 +1564,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.3.3（9） · 多平线路历史修复",
+                        "App 版本 0.3.4（10） · 精简预算组合展示",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1966,7 +1966,6 @@ private fun HeaderCard(
 @Composable
 private fun SummaryCard(report: AnalysisReport) {
     val isReview = report.purchaseDeadlineSource == "复盘报告"
-    var showPortfolioLines by remember(report.issue, isReview) { mutableStateOf(false) }
     val keepSet = report.choose9Keep.toSet()
     val choose9Total = report.choose9Keep.size
     val choose9Hits = report.predictions.count { prediction ->
@@ -2053,7 +2052,7 @@ private fun SummaryCard(report: AnalysisReport) {
             }
             report.linePortfolio?.let { portfolio ->
                 Text(
-                    text = "多平独立线路：${portfolio.lineCount} 注，共 ${portfolio.costYuan} 元；" +
+                    text = "预算组合：${portfolio.lineCount} 注，共 ${portfolio.costYuan} 元；" +
                         "${portfolio.multiDrawLines} 注包含至少两个候选平局，任意两场候选同时为平至少 " +
                         "${portfolio.minimumDrawPairLines} 注。",
                     color = Color(0xFFB54708),
@@ -2072,16 +2071,6 @@ private fun SummaryCard(report: AnalysisReport) {
                         text = "线路复盘：最佳一注 ${portfolio.bestLineHits}/14；实际 ${portfolio.actualDrawTotal} 场平局，" +
                             "${portfolio.actualDrawCombinationLines} 注同时覆盖全部实际平局。",
                         color = Color(0xFF667085),
-                        style = MaterialTheme.typography.bodySmall,
-                    )
-                }
-                TextButton(onClick = { showPortfolioLines = !showPortfolioLines }) {
-                    Text(if (showPortfolioLines) "收起全部线路" else "查看全部 ${portfolio.lineCount} 条线路")
-                }
-                if (showPortfolioLines) {
-                    Text(
-                        text = portfolio.lines.joinToString("\n"),
-                        color = Color(0xFF344054),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
@@ -2589,10 +2578,8 @@ private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
     appendLine("建议剔除：${report.choose9Drop.joinToString("、")}")
     appendLine()
     report.linePortfolio?.let { portfolio ->
-        appendLine("多平独立线路：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")
+        appendLine("预算组合：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")
         appendLine("平局配额：${portfolio.drawCoverages.joinToString("；") { "${it.seq}场${it.actualLines}注" }}")
-        appendLine("完整线路")
-        portfolio.lines.forEach { appendLine(it) }
     } ?: run {
         appendLine("14 场出票建议")
         report.predictions.forEach { prediction ->
