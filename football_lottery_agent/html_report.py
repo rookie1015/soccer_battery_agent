@@ -24,7 +24,6 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 
 def render_analysis_html(plan: TicketPlan) -> str:
     singles = sum(1 for pred in plan.predictions if len(pred.analysis_picks) == 1)
-    forced_singles = sum(1 for pred in plan.predictions if pred.budget_forced_single)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
@@ -32,8 +31,16 @@ def render_analysis_html(plan: TicketPlan) -> str:
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("模型单选", str(singles), "预算压缩前"),
-            _metric_card("强制单选", str(forced_singles), "仅由预算压缩产生"),
-            _metric_card("平局对冲", "1" if plan.draw_hedge else "0", "独立预算分支"),
+            _metric_card(
+                "独立线路",
+                str(plan.line_portfolio.line_count if plan.line_portfolio else 0),
+                "每行一注完整14场",
+            ),
+            _metric_card(
+                "平局候选",
+                str(len(plan.line_portfolio.draw_coverages) if plan.line_portfolio else 0),
+                "全部按概率分配线路",
+            ),
             _metric_card("组合成本", f"{plan.total_cost_yuan}元", f"上限 {plan.max_ticket_cost_yuan}元"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
@@ -55,6 +62,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
         </section>
         <div class="tab-panel active" id="outcome-panel">
           <section class="metrics">{cards}</section>
+          {_line_portfolio_section(plan)}
           {_draw_hedge_section(plan)}
           <section class="split">
             <div class="panel">
@@ -79,6 +87,43 @@ def render_analysis_html(plan: TicketPlan) -> str:
         </div>
         """,
     )
+
+
+def _line_portfolio_section(plan: TicketPlan) -> str:
+    portfolio = plan.line_portfolio
+    if portfolio is None:
+        return ""
+    matches = {prediction.match.seq: prediction.match for prediction in plan.predictions}
+    coverage_rows = "".join(
+        f"<tr><td>{coverage.seq}</td><td>{escape(matches[coverage.seq].home)} vs "
+        f"{escape(matches[coverage.seq].away)}</td><td>{coverage.probability:.1%}</td>"
+        f"<td>{coverage.target_lines}</td><td>{coverage.actual_lines}</td>"
+        f"<td>{coverage.actual_lines / max(portfolio.line_count, 1):.1%}</td></tr>"
+        for coverage in portfolio.draw_coverages
+    )
+    line_items = "".join(
+        f"<li><code>{escape(ticket_line.pick_text)}</code></li>"
+        for ticket_line in portfolio.lines
+    )
+    return f"""
+    <section class="panel">
+      <div class="section-title">
+        <h2>预算内多平线路组合</h2>
+        <span>{portfolio.line_count} 注 · {portfolio.cost_yuan}/{portfolio.allocated_budget_yuan} 元</span>
+      </div>
+      <p class="subtle">模型保留的每一个平局都按概率获得线路配额；{portfolio.multi_draw_lines} 注包含至少两个候选平局，任意两场候选同时为平至少 {portfolio.minimum_draw_pair_lines} 注。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>#</th><th>对阵</th><th>平局概率</th><th>目标注数</th><th>实际注数</th><th>覆盖比例</th></tr></thead>
+          <tbody>{coverage_rows}</tbody>
+        </table>
+      </div>
+      <details class="portfolio-lines prediction-fold">
+        <summary><span class="match-name"><strong>查看全部 {portfolio.line_count} 条投注线路</strong></span></summary>
+        <div><ol>{line_items}</ol></div>
+      </details>
+    </section>
+    """
 
 
 def _draw_hedge_section(plan: TicketPlan) -> str:
@@ -141,6 +186,15 @@ def render_review_html(report: ReviewReport) -> str:
           <p class="subtle">分支覆盖 {report.draw_hedge_outcome_hits}/{report.total}；整支组合{'命中' if report.draw_hedge_full_coverage else '未中'}。</p>
         </section>
         """
+    portfolio_review = ""
+    if report.plan.line_portfolio:
+        portfolio_review = f"""
+        <section class="panel">
+          <div class="section-title"><h2>独立线路复盘</h2><span>{report.plan.line_portfolio.line_count} 注</span></div>
+          <p><strong>最佳一注命中 {report.line_portfolio_best_hits}/{report.total}；整注{'命中' if report.line_portfolio_hit else '未中'}。</strong></p>
+          <p class="subtle">本期实际出现 {report.actual_draw_total} 场平局，有 {report.actual_draw_combination_lines} 注同时覆盖全部实际平局。</p>
+        </section>
+        """
     return _page(
         title=f"足球彩票复盘报告 {escape(report.plan.issue.issue)}",
         body=f"""
@@ -152,6 +206,7 @@ def render_review_html(report: ReviewReport) -> str:
           </div>
         </section>
         <section class="metrics rates">{cards}</section>
+        {portfolio_review}
         {hedge_review}
         {major_misses}
         <section class="panel">

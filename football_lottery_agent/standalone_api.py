@@ -16,7 +16,16 @@ from .history import archive_report, delete_history_entries, load_history_entrie
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
-from .models import DrawHedgePlan, Match, Odds, Signals, TicketPlan
+from .models import (
+    DrawHedgePlan,
+    DrawLineCoverage,
+    LinePortfolioPlan,
+    Match,
+    Odds,
+    Signals,
+    TicketLine,
+    TicketPlan,
+)
 from .notifier import send_text
 from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
@@ -1094,6 +1103,7 @@ def _restore_analysis_recommendations(
         )
     budget = report.get("budget") if isinstance(report.get("budget"), dict) else {}
     restored_hedge = _restore_draw_hedge(plan, report.get("draw_hedge"))
+    restored_portfolio = _restore_line_portfolio(report.get("line_portfolio"))
     return TicketPlan(
         issue=plan.issue,
         predictions=restored_predictions,
@@ -1105,7 +1115,48 @@ def _restore_analysis_recommendations(
         ),
         main_cost_yuan=int(budget.get("main_cost_yuan") or plan.main_cost_yuan),
         draw_hedge=restored_hedge,
+        line_portfolio=restored_portfolio,
     )
+
+
+def _restore_line_portfolio(value: object) -> LinePortfolioPlan | None:
+    if not isinstance(value, dict):
+        return None
+    raw_lines = value.get("lines")
+    raw_coverages = value.get("draw_coverages")
+    if not isinstance(raw_lines, list) or not isinstance(raw_coverages, list):
+        return None
+    try:
+        lines = tuple(
+            TicketLine(
+                outcomes=tuple(str(outcome) for outcome in item["outcomes"]),
+                joint_probability=float(item.get("joint_probability") or 0.0),
+            )
+            for item in raw_lines
+            if isinstance(item, dict) and isinstance(item.get("outcomes"), list)
+        )
+        coverages = tuple(
+            DrawLineCoverage(
+                seq=int(item["seq"]),
+                probability=float(item.get("probability") or 0.0) / 100.0,
+                target_lines=int(item.get("target_lines") or 0),
+                actual_lines=int(item.get("actual_lines") or 0),
+            )
+            for item in raw_coverages
+            if isinstance(item, dict)
+        )
+        if not lines or any(len(line.outcomes) != 14 for line in lines):
+            return None
+        return LinePortfolioPlan(
+            lines=lines,
+            draw_coverages=coverages,
+            allocated_budget_yuan=int(value.get("allocated_budget_yuan") or 0),
+            cost_yuan=int(value.get("cost_yuan") or 0),
+            multi_draw_lines=int(value.get("multi_draw_lines") or 0),
+            minimum_draw_pair_lines=int(value.get("minimum_draw_pair_lines") or 0),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _restore_draw_hedge(plan: TicketPlan, value: object) -> DrawHedgePlan | None:
@@ -1199,6 +1250,9 @@ def _serialize_review_report(
         ),
         "budget_forced_single_count": review.budget_caused_misses,
         "draw_hedge_count": int(review.plan.draw_hedge is not None),
+        "line_portfolio_count": review.plan.line_portfolio.line_count if review.plan.line_portfolio else 0,
+        "line_portfolio_best_hits": review.line_portfolio_best_hits,
+        "actual_draw_combination_lines": review.actual_draw_combination_lines,
         "low_risk_count": review.outcome_hits,
         "average_confidence": round(review.outcome_hits / review.total * 100, 1) if review.total else 0.0,
     }
@@ -1209,6 +1263,14 @@ def _serialize_review_report(
             "outcome_hits": review.draw_hedge_outcome_hits,
             "outcome_total": review.total,
             "full_coverage": review.draw_hedge_full_coverage,
+        }
+    if isinstance(report.get("line_portfolio"), dict):
+        report["line_portfolio"] = {
+            **report["line_portfolio"],
+            "portfolio_hit": review.line_portfolio_hit,
+            "best_line_hits": review.line_portfolio_best_hits,
+            "actual_draw_total": review.actual_draw_total,
+            "actual_draw_combination_lines": review.actual_draw_combination_lines,
         }
     report["review_diagnostics"] = diagnostics or {
         "issue_miss_count": review.total - review.outcome_hits,

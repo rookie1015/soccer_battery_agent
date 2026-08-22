@@ -10,6 +10,7 @@ from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import (
     _apply_tactical_draw_strategy,
     _build_budget_portfolio,
+    _build_line_portfolio,
     _downgrade_prediction,
     _fit_predictions_to_budget,
     _pick_coverage_probability,
@@ -27,7 +28,7 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(len(plan.choose9_keep), 9)
         self.assertEqual(len(plan.choose9_drop), 5)
         self.assertTrue(set(plan.choose9_keep).isdisjoint(plan.choose9_drop))
-        self.assertLessEqual(ticket_cost_yuan(plan.predictions), 2000)
+        self.assertLessEqual(plan.total_cost_yuan, 2000)
         self.assertTrue(all(prediction.reasons[0].startswith("选择依据：") for prediction in plan.predictions))
         self.assertFalse(any(prediction.tactical_draw for prediction in plan.predictions))
         self.assertLessEqual(plan.total_cost_yuan, plan.max_ticket_cost_yuan)
@@ -82,6 +83,51 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(hedge.allocated_budget_yuan, 2)
         self.assertLessEqual(ticket_cost_yuan(main) + hedge.cost_yuan, 10)
 
+    def test_line_portfolio_covers_every_model_draw_with_distinct_multi_draw_lines(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=500)
+
+        portfolio = plan.line_portfolio
+        self.assertIsNotNone(portfolio)
+        assert portfolio is not None
+        self.assertEqual(portfolio.line_count, 250)
+        self.assertEqual(portfolio.cost_yuan, 500)
+        self.assertEqual(len({line.outcomes for line in portfolio.lines}), 250)
+        self.assertTrue(portfolio.draw_coverages)
+        self.assertTrue(
+            all(coverage.actual_lines >= coverage.target_lines > 0 for coverage in portfolio.draw_coverages)
+        )
+        self.assertGreater(portfolio.multi_draw_lines, 0)
+        self.assertGreater(portfolio.minimum_draw_pair_lines, 0)
+        for line in portfolio.lines:
+            self.assertEqual(len(line.outcomes), 14)
+            self.assertTrue(
+                all(
+                    outcome in prediction.analysis_picks
+                    for outcome, prediction in zip(line.outcomes, plan.predictions)
+                )
+            )
+
+    def test_line_portfolio_preserves_draw_quotas_in_small_combination_space(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2)
+        choice_sizes = (2, 2, 2, 1, 2, 2, 2, 1, 3, 2, 1, 1, 2, 2)
+        predictions = tuple(
+            replace(
+                prediction,
+                probabilities={"3": 0.36, "1": 0.34, "0": 0.30},
+                picks=("3", "1", "0")[:size],
+                original_picks=("3", "1", "0")[:size],
+            )
+            for prediction, size in zip(base.predictions, choice_sizes)
+        )
+
+        portfolio = _build_line_portfolio(predictions, max_ticket_cost_yuan=500)
+
+        self.assertEqual(portfolio.line_count, 250)
+        self.assertEqual(len({line.outcomes for line in portfolio.lines}), 250)
+        self.assertTrue(
+            all(coverage.actual_lines >= coverage.target_lines for coverage in portfolio.draw_coverages)
+        )
+
     def test_three_way_pick_explains_why_no_outcome_is_excluded(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))
         prediction = next(item for item in plan.predictions if item.picks == ("3", "1", "0"))
@@ -132,7 +178,8 @@ class StrategyTests(unittest.TestCase):
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
 
-        self.assertLessEqual(ticket_cost_yuan(plan.predictions), 128)
+        self.assertLessEqual(plan.total_cost_yuan, 128)
+        self.assertEqual(plan.line_portfolio.line_count, 64)
 
     def test_choose9_keeps_highest_recommended_outcome_coverage(self) -> None:
         issue = load_issue("data/sample_issue.json")

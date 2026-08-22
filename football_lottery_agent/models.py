@@ -160,6 +160,38 @@ class DrawHedgePlan:
 
 
 @dataclass(frozen=True)
+class TicketLine:
+    outcomes: tuple[Outcome, ...]
+    joint_probability: float
+
+    @property
+    def pick_text(self) -> str:
+        return "-".join(self.outcomes)
+
+
+@dataclass(frozen=True)
+class DrawLineCoverage:
+    seq: int
+    probability: float
+    target_lines: int
+    actual_lines: int
+
+
+@dataclass(frozen=True)
+class LinePortfolioPlan:
+    lines: tuple[TicketLine, ...]
+    draw_coverages: tuple[DrawLineCoverage, ...]
+    allocated_budget_yuan: int
+    cost_yuan: int
+    multi_draw_lines: int
+    minimum_draw_pair_lines: int
+
+    @property
+    def line_count(self) -> int:
+        return len(self.lines)
+
+
+@dataclass(frozen=True)
 class TicketPlan:
     issue: Issue
     predictions: tuple[Prediction, ...]
@@ -169,9 +201,12 @@ class TicketPlan:
     main_allocated_budget_yuan: int = 0
     main_cost_yuan: int = 0
     draw_hedge: DrawHedgePlan | None = None
+    line_portfolio: LinePortfolioPlan | None = None
 
     @property
     def total_cost_yuan(self) -> int:
+        if self.line_portfolio is not None:
+            return self.line_portfolio.cost_yuan
         return self.main_cost_yuan + (self.draw_hedge.cost_yuan if self.draw_hedge else 0)
 
 

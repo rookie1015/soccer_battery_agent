@@ -149,6 +149,49 @@ class ReviewReport:
         return self.draw_hedge_outcome_hits == self.total
 
     @property
+    def line_portfolio_hit(self) -> bool | None:
+        portfolio = self.plan.line_portfolio
+        if portfolio is None:
+            return None
+        return any(self._line_hits(line.outcomes) == self.total for line in portfolio.lines)
+
+    @property
+    def line_portfolio_best_hits(self) -> int:
+        portfolio = self.plan.line_portfolio
+        if portfolio is None:
+            return 0
+        return max((self._line_hits(line.outcomes) for line in portfolio.lines), default=0)
+
+    @property
+    def actual_draw_total(self) -> int:
+        return sum(1 for row in self.rows if not row.result.unplayed and row.result.outcome == "1")
+
+    @property
+    def actual_draw_combination_lines(self) -> int:
+        portfolio = self.plan.line_portfolio
+        if portfolio is None:
+            return 0
+        draw_indexes = tuple(
+            index
+            for index, row in enumerate(self.rows)
+            if not row.result.unplayed and row.result.outcome == "1"
+        )
+        if not draw_indexes:
+            return portfolio.line_count
+        return sum(
+            1
+            for line in portfolio.lines
+            if all(line.outcomes[index] == "1" for index in draw_indexes)
+        )
+
+    def _line_hits(self, outcomes: tuple[str, ...]) -> int:
+        return sum(
+            1
+            for outcome, row in zip(outcomes, self.rows)
+            if row.result.unplayed or row.result.outcome == outcome
+        )
+
+    @property
     def top_score_hits(self) -> int:
         return sum(1 for row in self.rows if row.top_score_hit)
 
@@ -395,6 +438,15 @@ def render_review_markdown(
         lines.append(
             f"- 平局对冲：候选单平{candidate_mark}；分支覆盖 "
             f"{report.draw_hedge_outcome_hits}/{report.total}，整支{full_mark}。"
+        )
+    if report.plan.line_portfolio:
+        lines.append(
+            f"- 独立线路：最佳一注命中 {report.line_portfolio_best_hits}/{report.total}；"
+            f"整注{'命中' if report.line_portfolio_hit else '未中'}。"
+        )
+        lines.append(
+            f"- 实际平局组合：本期 {report.actual_draw_total} 场平局，"
+            f"有 {report.actual_draw_combination_lines} 注同时覆盖全部实际平局。"
         )
     lines.append(f"- 比分 Top1 命中：{report.top_score_hits}/{report.score_total}（{_rate(report.top_score_hits, report.score_total)}）")
     lines.append(f"- 比分 Top3 命中：{report.score_top3_hits}/{report.score_total}（{_rate(report.score_top3_hits, report.score_total)}）")

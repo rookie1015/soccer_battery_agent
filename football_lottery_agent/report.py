@@ -52,10 +52,22 @@ def render_markdown(plan: TicketPlan) -> str:
         lines.append("")
     lines.append("## 预算组合")
     lines.append("")
-    lines.append(
-        f"- 主票：分配 {plan.main_allocated_budget_yuan} 元，实际 {plan.main_cost_yuan} 元。"
-    )
-    if plan.draw_hedge:
+    if plan.line_portfolio:
+        portfolio = plan.line_portfolio
+        lines.append(
+            f"- 独立线路：{portfolio.line_count} 注，实际成本 "
+            f"{portfolio.cost_yuan}/{portfolio.allocated_budget_yuan} 元。"
+        )
+        lines.append(
+            f"- 多平组合：{portfolio.multi_draw_lines} 注至少包含两个候选平局；"
+            f"任意两场候选同时为平至少 {portfolio.minimum_draw_pair_lines} 注。"
+        )
+        lines.append("- 规则：模型建议中保留的每一个平局都按概率获得线路配额，不再只选一场对冲。")
+    else:
+        lines.append(
+            f"- 主票：分配 {plan.main_allocated_budget_yuan} 元，实际 {plan.main_cost_yuan} 元。"
+        )
+    if plan.draw_hedge and not plan.line_portfolio:
         hedge = plan.draw_hedge
         candidate = next(
             prediction for prediction in hedge.predictions if prediction.match.seq == hedge.candidate_seq
@@ -69,7 +81,7 @@ def render_markdown(plan: TicketPlan) -> str:
         lines.append(f"- 对冲分支票面：`{selections}`")
         lines.append(f"- 对冲依据：{'；'.join(hedge.evidence)}。")
         lines.append("- 风险说明：对冲分支不是稳胆，与主票共同计算总预算。")
-    else:
+    elif not plan.line_portfolio:
         lines.append("- 平局对冲：本期没有通过门槛且被主票删除的候选，不强行设置单平。")
     lines.append(
         f"- 组合总成本：{plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。"
@@ -93,6 +105,28 @@ def render_markdown(plan: TicketPlan) -> str:
         )
 
     lines.append("")
+    if plan.line_portfolio:
+        portfolio = plan.line_portfolio
+        lines.append("## 平局线路配额")
+        lines.append("")
+        lines.append("| 序号 | 对阵 | 模型平局概率 | 目标注数 | 实际注数 | 覆盖比例 |")
+        lines.append("| --- | --- | ---: | ---: | ---: | ---: |")
+        match_by_seq = {prediction.match.seq: prediction.match for prediction in plan.predictions}
+        for coverage in portfolio.draw_coverages:
+            match = match_by_seq[coverage.seq]
+            lines.append(
+                f"| {coverage.seq} | {match.home} vs {match.away} | {coverage.probability:.1%} | "
+                f"{coverage.target_lines} | {coverage.actual_lines} | "
+                f"{coverage.actual_lines / max(portfolio.line_count, 1):.1%} |"
+            )
+        lines.append("")
+        lines.append("## 完整投注线路")
+        lines.append("")
+        lines.append("> 每行是一注完整14场结果，顺序对应第1至第14场。")
+        lines.append("")
+        for number, ticket_line in enumerate(portfolio.lines, start=1):
+            lines.append(f"{number}. `{ticket_line.pick_text}`")
+        lines.append("")
     lines.append("## 详细理由")
     lines.append("")
     for pred in plan.predictions:

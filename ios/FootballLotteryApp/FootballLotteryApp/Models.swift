@@ -67,6 +67,7 @@ struct AnalysisReport: Decodable, Identifiable {
     let purchaseDeadlineSource: String
     let saleBeginTime: String
     let drawHedge: DrawHedgeReport?
+    let linePortfolio: LinePortfolioReport?
     let metrics: ReportMetrics
     let choose9Keep: [Int]
     let choose9Drop: [Int]
@@ -78,10 +79,56 @@ struct AnalysisReport: Decodable, Identifiable {
         case purchaseDeadlineSource = "purchase_deadline_source"
         case saleBeginTime = "sale_begin_time"
         case drawHedge = "draw_hedge"
+        case linePortfolio = "line_portfolio"
         case metrics
         case choose9Keep = "choose9_keep"
         case choose9Drop = "choose9_drop"
         case predictions
+    }
+}
+
+struct LinePortfolioReport: Decodable {
+    let lineCount: Int
+    let costYuan: Int
+    let multiDrawLines: Int
+    let minimumDrawPairLines: Int
+    let drawCoverages: [DrawCoverageReport]
+    let lines: [PortfolioLineReport]
+
+    enum CodingKeys: String, CodingKey {
+        case lineCount = "line_count"
+        case costYuan = "cost_yuan"
+        case multiDrawLines = "multi_draw_lines"
+        case minimumDrawPairLines = "minimum_draw_pair_lines"
+        case drawCoverages = "draw_coverages"
+        case lines
+    }
+}
+
+struct DrawCoverageReport: Decodable, Identifiable {
+    var id: Int { seq }
+    let seq: Int
+    let home: String
+    let away: String
+    let probability: Double
+    let targetLines: Int
+    let actualLines: Int
+
+    enum CodingKeys: String, CodingKey {
+        case seq, home, away, probability
+        case targetLines = "target_lines"
+        case actualLines = "actual_lines"
+    }
+}
+
+struct PortfolioLineReport: Decodable, Identifiable {
+    var id: Int { number }
+    let number: Int
+    let pickText: String
+
+    enum CodingKeys: String, CodingKey {
+        case number
+        case pickText = "pick_text"
     }
 }
 
@@ -125,6 +172,8 @@ struct ReportMetrics: Decodable {
     let budgetForcedSingleCount: Int?
     let tacticalDrawCount: Int?
     let drawHedgeCount: Int?
+    let linePortfolioCount: Int?
+    let drawCandidateCount: Int?
     let lowRiskCount: Int
     let averageConfidence: Double
 
@@ -135,6 +184,8 @@ struct ReportMetrics: Decodable {
         case budgetForcedSingleCount = "budget_forced_single_count"
         case tacticalDrawCount = "tactical_draw_count"
         case drawHedgeCount = "draw_hedge_count"
+        case linePortfolioCount = "line_portfolio_count"
+        case drawCandidateCount = "draw_candidate_count"
         case lowRiskCount = "low_risk_count"
         case averageConfidence = "average_confidence"
     }

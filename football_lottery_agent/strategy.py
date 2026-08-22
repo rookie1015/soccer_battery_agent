@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from math import log
+from heapq import heappop, heappush
+from itertools import product
+from math import exp, log
+from random import Random
 
-from .models import DrawHedgePlan, Issue, Prediction, TicketPlan
+from .models import (
+    DrawHedgePlan,
+    DrawLineCoverage,
+    Issue,
+    LinePortfolioPlan,
+    Prediction,
+    TicketLine,
+    TicketPlan,
+)
 from .predictor import (
     SELECTION_OUTCOME_LABELS,
     SELECTION_REASON_PREFIX,
@@ -41,22 +52,290 @@ def build_ticket_plan(
         evidence_aware_secondary=evidence_aware_secondary,
         selection_policy=selection_policy,
     )
-    predictions, main_budget, draw_hedge = _build_budget_portfolio(
+    line_portfolio = _build_line_portfolio(
         raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
-    choose9_keep, choose9_drop = _select_choose9(predictions)
+    choose9_keep, choose9_drop = _select_choose9(raw_predictions)
 
     return TicketPlan(
         issue=issue,
-        predictions=predictions,
+        predictions=raw_predictions,
         choose9_keep=choose9_keep,
         choose9_drop=choose9_drop,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
-        main_allocated_budget_yuan=main_budget,
-        main_cost_yuan=ticket_cost_yuan(predictions),
-        draw_hedge=draw_hedge,
+        main_allocated_budget_yuan=max_ticket_cost_yuan,
+        main_cost_yuan=line_portfolio.cost_yuan,
+        draw_hedge=None,
+        line_portfolio=line_portfolio,
     )
+
+
+def _build_line_portfolio(
+    predictions: tuple[Prediction, ...],
+    *,
+    max_ticket_cost_yuan: int,
+) -> LinePortfolioPlan:
+    """Create distinct full-ticket lines with draw marginals preserved.
+
+    Every draw retained by the model selection receives a line quota derived
+    from its probability.  Quota lines are selected first and may cover
+    several draw candidates at once; the remaining budget is filled with the
+    highest-probability distinct candidates.  When every possible distinct
+    line is purchased, the quota is capped at that finite combination space.
+    """
+    requested_lines = max(1, max_ticket_cost_yuan // STAKE_PER_LINE_YUAN)
+    choice_sets = tuple(_line_choices(prediction) for prediction in predictions)
+    total_combinations = 1
+    for choices in choice_sets:
+        total_combinations *= len(choices)
+    line_limit = min(requested_lines, total_combinations)
+
+    draw_targets: dict[int, int] = {}
+    draw_probabilities: dict[int, float] = {}
+    for index, (prediction, choices) in enumerate(zip(predictions, choice_sets)):
+        counts = _allocate_line_counts(prediction, choices, line_limit)
+        if "1" in choices:
+            draw_targets[index] = counts.get("1", 0)
+            draw_probabilities[index] = prediction.probabilities.get("1", 0.0)
+
+    candidates = _portfolio_candidate_lines(
+        predictions,
+        choice_sets,
+        draw_targets,
+        line_limit=line_limit,
+        total_combinations=total_combinations,
+    )
+    if line_limit == total_combinations:
+        selected = set(candidates)
+        full_coverage = _draw_line_counts(selected, draw_targets)
+        draw_targets = {
+            index: full_coverage[index]
+            for index in draw_targets
+        }
+    else:
+        selected = _select_quota_lines(
+            candidates,
+            predictions,
+            draw_targets,
+            line_limit=line_limit,
+        )
+    ordered = sorted(selected, key=lambda line: _line_log_probability(line, predictions), reverse=True)
+    ordered = ordered[:line_limit]
+    final_coverage = _draw_line_counts(ordered, draw_targets)
+    candidate_indexes = tuple(index for index, target in draw_targets.items() if target > 0)
+    pair_counts = [
+        sum(1 for line in ordered if line[left] == "1" and line[right] == "1")
+        for offset, left in enumerate(candidate_indexes)
+        for right in candidate_indexes[offset + 1 :]
+    ]
+    draw_coverages = tuple(
+        DrawLineCoverage(
+            seq=predictions[index].match.seq,
+            probability=round(draw_probabilities[index], 4),
+            target_lines=target,
+            actual_lines=final_coverage.get(index, 0),
+        )
+        for index, target in draw_targets.items()
+        if target > 0
+    )
+    ticket_lines = tuple(
+        TicketLine(
+            outcomes=line,
+            joint_probability=round(exp(_line_log_probability(line, predictions)), 12),
+        )
+        for line in ordered
+    )
+    return LinePortfolioPlan(
+        lines=ticket_lines,
+        draw_coverages=draw_coverages,
+        allocated_budget_yuan=max_ticket_cost_yuan,
+        cost_yuan=len(ticket_lines) * STAKE_PER_LINE_YUAN,
+        multi_draw_lines=sum(
+            1 for line in ordered if sum(line[index] == "1" for index in candidate_indexes) >= 2
+        ),
+        minimum_draw_pair_lines=min(pair_counts) if pair_counts else 0,
+    )
+
+
+def _portfolio_candidate_lines(
+    predictions: tuple[Prediction, ...],
+    choice_sets: tuple[tuple[str, ...], ...],
+    draw_targets: dict[int, int],
+    *,
+    line_limit: int,
+    total_combinations: int,
+) -> set[tuple[str, ...]]:
+    if total_combinations <= 20_000:
+        return set(product(*choice_sets))
+
+    candidates = {
+        line
+        for line, _ in _top_probability_lines(
+            predictions,
+            choice_sets,
+            limit=min(500, total_combinations),
+        )
+    }
+    rng = Random(310_032 + line_limit * 101 + total_combinations)
+
+    def random_line(forced_draw_index: int | None = None) -> tuple[str, ...]:
+        return tuple(
+            "1" if index == forced_draw_index else rng.choice(choices)
+            for index, choices in enumerate(choice_sets)
+        )
+
+    general_target = min(total_combinations, max(line_limit * 3, 2_000))
+    attempts = 0
+    while len(candidates) < general_target and attempts < general_target * 20:
+        candidates.add(random_line())
+        attempts += 1
+
+    for index, target in draw_targets.items():
+        required_candidates = min(total_combinations, max(target * 2, line_limit // 2, 100))
+        available = sum(1 for line in candidates if line[index] == "1")
+        attempts = 0
+        while available < required_candidates and attempts < required_candidates * 40:
+            line = random_line(index)
+            before = len(candidates)
+            candidates.add(line)
+            if len(candidates) > before:
+                available += 1
+            attempts += 1
+    return candidates
+
+
+def _select_quota_lines(
+    candidates: set[tuple[str, ...]],
+    predictions: tuple[Prediction, ...],
+    draw_targets: dict[int, int],
+    *,
+    line_limit: int,
+) -> set[tuple[str, ...]]:
+    draw_indexes = tuple(draw_targets)
+    indexed = [
+        (
+            line,
+            _line_log_probability(line, predictions),
+            sum(1 << bit for bit, index in enumerate(draw_indexes) if line[index] == "1"),
+        )
+        for line in candidates
+    ]
+    indexed.sort(key=lambda item: item[1], reverse=True)
+    selected: set[tuple[str, ...]] = set()
+    coverage = {index: 0 for index in draw_indexes}
+
+    while any(coverage[index] < draw_targets[index] for index in draw_indexes):
+        deficit_mask = sum(
+            1 << bit
+            for bit, index in enumerate(draw_indexes)
+            if coverage[index] < draw_targets[index]
+        )
+        best: tuple[tuple[str, ...], float, int] | None = None
+        best_key = (-1, float("-inf"))
+        for item in indexed:
+            line, score, mask = item
+            if line in selected:
+                continue
+            key = ((mask & deficit_mask).bit_count(), score)
+            if key > best_key:
+                best = item
+                best_key = key
+        if best is None or best_key[0] == 0 or len(selected) >= line_limit:
+            raise ValueError("无法在唯一线路上限内满足全部平局配额。")
+        line, _, _ = best
+        selected.add(line)
+        for index in draw_indexes:
+            coverage[index] += int(line[index] == "1")
+
+    for line, _, _ in indexed:
+        if len(selected) >= line_limit:
+            break
+        selected.add(line)
+    if len(selected) != line_limit:
+        raise ValueError("候选线路不足，无法填满预算线路组合。")
+    return selected
+
+
+def _line_choices(prediction: Prediction) -> tuple[str, ...]:
+    choices = prediction.analysis_picks or prediction.picks
+    return tuple(
+        sorted(set(choices), key=lambda outcome: prediction.probabilities.get(outcome, 0.0), reverse=True)
+    )
+
+
+def _allocate_line_counts(
+    prediction: Prediction,
+    choices: tuple[str, ...],
+    line_count: int,
+) -> dict[str, int]:
+    total = sum(prediction.probabilities.get(outcome, 0.0) for outcome in choices)
+    weights = {
+        outcome: prediction.probabilities.get(outcome, 0.0) / max(total, 1e-12)
+        for outcome in choices
+    }
+    exact = {outcome: weights[outcome] * line_count for outcome in choices}
+    counts = {outcome: int(exact[outcome]) for outcome in choices}
+    remaining = line_count - sum(counts.values())
+    ranked = sorted(
+        choices,
+        key=lambda outcome: (exact[outcome] - counts[outcome], weights[outcome], outcome),
+        reverse=True,
+    )
+    for outcome in ranked[:remaining]:
+        counts[outcome] += 1
+    return counts
+
+
+def _top_probability_lines(
+    predictions: tuple[Prediction, ...],
+    choice_sets: tuple[tuple[str, ...], ...],
+    *,
+    limit: int,
+) -> list[tuple[tuple[str, ...], float]]:
+    start = tuple(0 for _ in choice_sets)
+    start_line = tuple(choices[0] for choices in choice_sets)
+    heap: list[tuple[float, tuple[int, ...]]] = [
+        (-_line_log_probability(start_line, predictions), start)
+    ]
+    visited = {start}
+    result: list[tuple[tuple[str, ...], float]] = []
+    while heap and len(result) < limit:
+        negative_score, indexes = heappop(heap)
+        line = tuple(choices[index] for choices, index in zip(choice_sets, indexes))
+        result.append((line, -negative_score))
+        for dimension, choices in enumerate(choice_sets):
+            if indexes[dimension] + 1 >= len(choices):
+                continue
+            neighbor = list(indexes)
+            neighbor[dimension] += 1
+            state = tuple(neighbor)
+            if state in visited:
+                continue
+            visited.add(state)
+            neighbor_line = tuple(
+                dimension_choices[index]
+                for dimension_choices, index in zip(choice_sets, state)
+            )
+            heappush(heap, (-_line_log_probability(neighbor_line, predictions), state))
+    return result
+
+
+def _line_log_probability(line: tuple[str, ...], predictions: tuple[Prediction, ...]) -> float:
+    return sum(
+        log(max(prediction.probabilities.get(outcome, 0.0), 1e-12))
+        for prediction, outcome in zip(predictions, line)
+    )
+
+
+def _draw_line_counts(
+    lines: object,
+    draw_targets: dict[int, int],
+) -> dict[int, int]:
+    return {
+        index: sum(1 for line in lines if line[index] == "1")
+        for index in draw_targets
+    }
 
 
 def _build_budget_portfolio(

@@ -115,12 +115,35 @@ data class AnalysisReport(
     val analysisModeMessage: String,
     val foreignOddsStatus: ForeignOddsStatus?,
     val drawHedge: DrawHedgeReport?,
+    val linePortfolio: LinePortfolioReport?,
     val metrics: ReportMetrics,
     val choose9Keep: List<Int>,
     val choose9Drop: List<Int>,
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
     val modelCalibration: ModelCalibration?,
+)
+
+data class LinePortfolioReport(
+    val lineCount: Int,
+    val costYuan: Int,
+    val multiDrawLines: Int,
+    val minimumDrawPairLines: Int,
+    val drawCoverages: List<DrawCoverageReport>,
+    val lines: List<String>,
+    val portfolioHit: Boolean?,
+    val bestLineHits: Int,
+    val actualDrawTotal: Int,
+    val actualDrawCombinationLines: Int,
+)
+
+data class DrawCoverageReport(
+    val seq: Int,
+    val home: String,
+    val away: String,
+    val probability: Double,
+    val targetLines: Int,
+    val actualLines: Int,
 )
 
 data class DrawHedgeReport(
@@ -177,6 +200,8 @@ data class ReportMetrics(
     val budgetForcedSingleCount: Int,
     val tacticalDrawCount: Int,
     val drawHedgeCount: Int,
+    val linePortfolioCount: Int,
+    val drawCandidateCount: Int,
     val lowRiskCount: Int,
     val averageConfidence: Double,
 )
@@ -944,6 +969,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
             drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
+            linePortfolio = parseLinePortfolio(json.optJSONObject("line_portfolio")),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
@@ -951,6 +977,8 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 tacticalDrawCount = metrics.optInt("tactical_draw_count"),
                 drawHedgeCount = metrics.optInt("draw_hedge_count"),
+                linePortfolioCount = metrics.optInt("line_portfolio_count"),
+                drawCandidateCount = metrics.optInt("draw_candidate_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1173,6 +1201,7 @@ class FootballLotteryApi(private val baseUrl: String) {
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
             drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
+            linePortfolio = parseLinePortfolio(json.optJSONObject("line_portfolio")),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
@@ -1180,6 +1209,8 @@ class FootballLotteryApi(private val baseUrl: String) {
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 tacticalDrawCount = metrics.optInt("tactical_draw_count"),
                 drawHedgeCount = metrics.optInt("draw_hedge_count"),
+                linePortfolioCount = metrics.optInt("line_portfolio_count"),
+                drawCandidateCount = metrics.optInt("draw_candidate_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1533,7 +1564,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.3.1（7） · 预算内主票与平局对冲",
+                        "App 版本 0.3.2（8） · 多平独立线路组合",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1935,6 +1966,7 @@ private fun HeaderCard(
 @Composable
 private fun SummaryCard(report: AnalysisReport) {
     val isReview = report.purchaseDeadlineSource == "复盘报告"
+    var showPortfolioLines by remember(report.issue, isReview) { mutableStateOf(false) }
     val keepSet = report.choose9Keep.toSet()
     val choose9Total = report.choose9Keep.size
     val choose9Hits = report.predictions.count { prediction ->
@@ -2017,6 +2049,41 @@ private fun SummaryCard(report: AnalysisReport) {
                             style = MaterialTheme.typography.bodySmall,
                         )
                     }
+                }
+            }
+            report.linePortfolio?.let { portfolio ->
+                Text(
+                    text = "多平独立线路：${portfolio.lineCount} 注，共 ${portfolio.costYuan} 元；" +
+                        "${portfolio.multiDrawLines} 注包含至少两个候选平局，任意两场候选同时为平至少 " +
+                        "${portfolio.minimumDrawPairLines} 注。",
+                    color = Color(0xFFB54708),
+                    style = MaterialTheme.typography.bodySmall,
+                    fontWeight = FontWeight.Bold,
+                )
+                Text(
+                    text = "平局配额：" + portfolio.drawCoverages.joinToString("；") { coverage ->
+                        "${coverage.seq}场 ${coverage.actualLines}注(${"%.1f".format(coverage.probability)}%)"
+                    },
+                    color = Color(0xFF667085),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                if (isReview) {
+                    Text(
+                        text = "线路复盘：最佳一注 ${portfolio.bestLineHits}/14；实际 ${portfolio.actualDrawTotal} 场平局，" +
+                            "${portfolio.actualDrawCombinationLines} 注同时覆盖全部实际平局。",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
+                TextButton(onClick = { showPortfolioLines = !showPortfolioLines }) {
+                    Text(if (showPortfolioLines) "收起全部线路" else "查看全部 ${portfolio.lineCount} 条线路")
+                }
+                if (showPortfolioLines) {
+                    Text(
+                        text = portfolio.lines.joinToString("\n"),
+                        color = Color(0xFF344054),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
                 }
             }
             if (isReview) {
@@ -2502,6 +2569,9 @@ private fun resultText(prediction: MatchPrediction): String {
 }
 
 private fun purchaseCostText(report: AnalysisReport): String {
+    report.linePortfolio?.let { portfolio ->
+        return "购彩 ¥${"%,d".format(portfolio.costYuan)}"
+    }
     val units = report.predictions.fold(1L) { total, prediction ->
         total * recommendedChoiceCount(prediction).toLong()
     }
@@ -2518,10 +2588,17 @@ private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
     appendLine("任选九保留：${report.choose9Keep.joinToString("、")}")
     appendLine("建议剔除：${report.choose9Drop.joinToString("、")}")
     appendLine()
-    appendLine("14 场出票建议")
-    report.predictions.forEach { prediction ->
-        val selection = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }.joinToString("/")
-        appendLine("${prediction.seq}. ${prediction.home} vs ${prediction.away}：$selection（${prediction.pickText}）")
+    report.linePortfolio?.let { portfolio ->
+        appendLine("多平独立线路：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")
+        appendLine("平局配额：${portfolio.drawCoverages.joinToString("；") { "${it.seq}场${it.actualLines}注" }}")
+        appendLine("完整线路")
+        portfolio.lines.forEach { appendLine(it) }
+    } ?: run {
+        appendLine("14 场出票建议")
+        report.predictions.forEach { prediction ->
+            val selection = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }.joinToString("/")
+            appendLine("${prediction.seq}. ${prediction.home} vs ${prediction.away}：$selection（${prediction.pickText}）")
+        }
     }
     appendLine()
     append("仅供信息分析和娱乐参考，请理性购彩。")
@@ -2736,6 +2813,37 @@ private fun parseDrawHedge(json: JSONObject?): DrawHedgeReport? {
         selections = json.optJSONArray("selections").orEmptyArray().mapObjects { item ->
             "${item.optInt("seq")}:${item.optString("pick_text")}"
         },
+    )
+}
+
+private fun parseLinePortfolio(json: JSONObject?): LinePortfolioReport? {
+    json ?: return null
+    return LinePortfolioReport(
+        lineCount = json.optInt("line_count"),
+        costYuan = json.optInt("cost_yuan"),
+        multiDrawLines = json.optInt("multi_draw_lines"),
+        minimumDrawPairLines = json.optInt("minimum_draw_pair_lines"),
+        drawCoverages = json.optJSONArray("draw_coverages").orEmptyArray().mapObjects { item ->
+            DrawCoverageReport(
+                seq = item.optInt("seq"),
+                home = item.optString("home"),
+                away = item.optString("away"),
+                probability = item.optDouble("probability"),
+                targetLines = item.optInt("target_lines"),
+                actualLines = item.optInt("actual_lines"),
+            )
+        },
+        lines = json.optJSONArray("lines").orEmptyArray().mapObjects { item ->
+            "${item.optInt("number")}. ${item.optString("pick_text")}"
+        },
+        portfolioHit = if (json.has("portfolio_hit") && !json.isNull("portfolio_hit")) {
+            json.optBoolean("portfolio_hit")
+        } else {
+            null
+        },
+        bestLineHits = json.optInt("best_line_hits"),
+        actualDrawTotal = json.optInt("actual_draw_total"),
+        actualDrawCombinationLines = json.optInt("actual_draw_combination_lines"),
     )
 }
 

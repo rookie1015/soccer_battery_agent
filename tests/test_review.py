@@ -227,7 +227,9 @@ class ReviewTests(unittest.TestCase):
             prediction.match.seq: _result_for_prediction(prediction)
             for prediction in plan.predictions
         }
-        first_single = next(prediction for prediction in plan.predictions if len(prediction.picks) == 1)
+        first = plan.predictions[0]
+        first_single = replace(first, picks=(first.picks[0],), original_picks=(first.picks[0],))
+        plan = replace(plan, predictions=(first_single, *plan.predictions[1:]))
         results[first_single.match.seq] = MatchResult(
             seq=first_single.match.seq,
             home_goals=0,
@@ -242,7 +244,9 @@ class ReviewTests(unittest.TestCase):
     def test_build_review_labels_a_draw_omission(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue)
-        target = next(prediction for prediction in plan.predictions if "1" not in prediction.picks)
+        first = plan.predictions[0]
+        target = replace(first, picks=tuple(pick for pick in first.picks if pick != "1"))
+        plan = replace(plan, predictions=(target, *plan.predictions[1:]))
         results = {
             prediction.match.seq: _result_for_prediction(prediction)
             for prediction in plan.predictions
@@ -295,18 +299,18 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review.budget_draw_caused_misses, 1)
         self.assertIn("其中预算删平导致漏判：1 场", render_review_markdown(review))
 
-    def test_review_records_draw_hedge_candidate_and_branch_coverage(self) -> None:
+    def test_review_records_line_portfolio_hit_and_draw_combination_coverage(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))
-        self.assertIsNotNone(plan.draw_hedge)
-        assert plan.draw_hedge is not None
+        self.assertIsNotNone(plan.line_portfolio)
+        assert plan.line_portfolio is not None
         result_by_outcome = {
             "3": (1, 0),
             "1": (0, 0),
             "0": (0, 1),
         }
         results = {}
-        for prediction in plan.draw_hedge.predictions:
-            outcome = prediction.picks[0]
+        winning_line = plan.line_portfolio.lines[0]
+        for prediction, outcome in zip(plan.predictions, winning_line.outcomes):
             home_goals, away_goals = result_by_outcome[outcome]
             results[prediction.match.seq] = MatchResult(
                 seq=prediction.match.seq,
@@ -316,10 +320,10 @@ class ReviewTests(unittest.TestCase):
 
         review = build_review(plan, results)
 
-        self.assertTrue(review.draw_hedge_candidate_hit)
-        self.assertTrue(review.draw_hedge_full_coverage)
-        self.assertEqual(review.draw_hedge_outcome_hits, 14)
-        self.assertIn("平局对冲：候选单平命中", render_review_markdown(review))
+        self.assertTrue(review.line_portfolio_hit)
+        self.assertEqual(review.line_portfolio_best_hits, 14)
+        self.assertGreater(review.actual_draw_combination_lines, 0)
+        self.assertIn("独立线路：最佳一注命中 14/14", render_review_markdown(review))
 
 
 def _result_for_prediction(prediction):

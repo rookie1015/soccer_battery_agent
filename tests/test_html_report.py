@@ -15,8 +15,8 @@ class HtmlReportTests(unittest.TestCase):
 
         self.assertIn("Analysis Dashboard", html)
         self.assertIn("逐场胜平负分析", html)
-        self.assertIn("平局对冲分支", html)
-        self.assertIn("独立于主票，不是稳胆", html)
+        self.assertIn("预算内多平线路组合", html)
+        self.assertIn("查看全部 1000 条投注线路", html)
         self.assertIn('id="outcome-panel"', html)
         self.assertIn("class=\"prob\"", html)
         self.assertIn("置信度", html)
@@ -72,7 +72,9 @@ class HtmlReportTests(unittest.TestCase):
             )
             for prediction in plan.predictions
         }
-        first_single = next(prediction for prediction in plan.predictions if len(prediction.picks) == 1)
+        first = plan.predictions[0]
+        first_single = replace(first, picks=(first.picks[0],), original_picks=(first.picks[0],))
+        plan = replace(plan, predictions=(first_single, *plan.predictions[1:]))
         results[first_single.match.seq] = MatchResult(seq=first_single.match.seq, home_goals=0, away_goals=1)
         review = build_review(plan, results)
 

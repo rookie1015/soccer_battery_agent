@@ -20,7 +20,7 @@ struct ReportSummaryView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 MetricTile(title: "比赛", value: "\(report.metrics.matchCount)", tint: .blue)
                 MetricTile(title: "模型单选", value: "\(report.metrics.singleCount)", tint: .indigo)
-                MetricTile(title: "平局对冲", value: "\(report.metrics.drawHedgeCount ?? 0)", tint: .orange)
+                MetricTile(title: "独立线路", value: "\(report.metrics.linePortfolioCount ?? 0)", tint: .orange)
                 MetricTile(title: "低风险", value: "\(report.metrics.lowRiskCount)", tint: .green)
                 MetricTile(title: "平均置信", value: "\(report.metrics.averageConfidence, specifier: "%.1f")%", tint: .orange)
             }
@@ -34,6 +34,20 @@ struct ReportSummaryView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("票面：" + hedge.selections.map { "\($0.seq):\($0.pickText)" }.joined(separator: " · "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            if let portfolio = report.linePortfolio {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("多平独立线路 · \(portfolio.lineCount) 注 / \(portfolio.costYuan) 元")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    Text("\(portfolio.multiDrawLines) 注包含至少两个候选平局；任意两场候选同时为平至少 \(portfolio.minimumDrawPairLines) 注。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("平局配额：" + portfolio.drawCoverages.map { "\($0.seq)场 \($0.actualLines)注" }.joined(separator: "；"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
