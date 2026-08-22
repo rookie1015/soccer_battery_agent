@@ -141,11 +141,38 @@ class Prediction:
 
 
 @dataclass(frozen=True)
+class DrawHedgePlan:
+    """A separate rectangular branch which fixes one fixture as a draw.
+
+    Keeping this branch separate from ``TicketPlan.predictions`` makes the
+    combined ticket a non-rectangular portfolio.  The main ticket can retain
+    its preferred non-draw lines while this smaller branch restores one draw
+    removed by budget compression.
+    """
+
+    candidate_seq: int
+    predictions: tuple[Prediction, ...]
+    allocated_budget_yuan: int
+    line_count: int
+    cost_yuan: int
+    score: float
+    evidence: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class TicketPlan:
     issue: Issue
     predictions: tuple[Prediction, ...]
     choose9_keep: tuple[int, ...]
     choose9_drop: tuple[int, ...]
+    max_ticket_cost_yuan: int = 0
+    main_allocated_budget_yuan: int = 0
+    main_cost_yuan: int = 0
+    draw_hedge: DrawHedgePlan | None = None
+
+    @property
+    def total_cost_yuan(self) -> int:
+        return self.main_cost_yuan + (self.draw_hedge.cost_yuan if self.draw_hedge else 0)
 
 
 def _clamp01(value: float) -> float:

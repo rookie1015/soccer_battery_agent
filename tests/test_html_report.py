@@ -15,6 +15,8 @@ class HtmlReportTests(unittest.TestCase):
 
         self.assertIn("Analysis Dashboard", html)
         self.assertIn("逐场胜平负分析", html)
+        self.assertIn("平局对冲分支", html)
+        self.assertIn("独立于主票，不是稳胆", html)
         self.assertIn('id="outcome-panel"', html)
         self.assertIn("class=\"prob\"", html)
         self.assertIn("置信度", html)

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from .models import Prediction, TicketPlan
+from .models import DrawHedgePlan, Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
 
 
 def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False) -> dict[str, object]:
     predictions = list(plan.predictions)
+    draw_hedge = getattr(plan, "draw_hedge", None)
+    draw_hedge = draw_hedge if isinstance(draw_hedge, DrawHedgePlan) else None
+    main_cost_yuan = _int_plan_attr(plan, "main_cost_yuan")
     foreign_odds_status = plan.issue.metadata.get("foreign_odds_audit")
     if not isinstance(foreign_odds_status, dict) or not foreign_odds_status.get("requested"):
         foreign_odds_status = None
@@ -25,6 +28,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "ticket_single_count": ticket_singles,
         "budget_forced_single_count": forced_singles,
         "tactical_draw_count": tactical_draws,
+        "draw_hedge_count": int(draw_hedge is not None),
         "average_confidence": round(avg_confidence, 1),
     }
     if include_review_fields:
@@ -37,11 +41,56 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "analysis_mode": plan.issue.metadata.get("analysis_mode", "full"),
         "analysis_mode_message": plan.issue.metadata.get("analysis_mode_message", ""),
         "foreign_odds_status": foreign_odds_status,
+        "budget": {
+            "limit_yuan": _int_plan_attr(plan, "max_ticket_cost_yuan"),
+            "main_allocated_yuan": _int_plan_attr(plan, "main_allocated_budget_yuan"),
+            "main_cost_yuan": _int_plan_attr(plan, "main_cost_yuan"),
+            "hedge_allocated_yuan": draw_hedge.allocated_budget_yuan if draw_hedge else 0,
+            "hedge_cost_yuan": draw_hedge.cost_yuan if draw_hedge else 0,
+            "total_cost_yuan": main_cost_yuan + (draw_hedge.cost_yuan if draw_hedge else 0),
+        },
+        "draw_hedge": _serialize_draw_hedge(plan),
         "metrics": metrics,
         "choose9_keep": list(plan.choose9_keep),
         "choose9_drop": list(plan.choose9_drop),
         "predictions": [_serialize_prediction(prediction, include_review_fields) for prediction in predictions],
     }
+
+
+def _serialize_draw_hedge(plan: TicketPlan) -> dict[str, object] | None:
+    hedge = getattr(plan, "draw_hedge", None)
+    if not isinstance(hedge, DrawHedgePlan):
+        return None
+    candidate = next(
+        prediction for prediction in hedge.predictions if prediction.match.seq == hedge.candidate_seq
+    )
+    return {
+        "candidate_seq": hedge.candidate_seq,
+        "home": candidate.match.home,
+        "away": candidate.match.away,
+        "fixed_pick": "1",
+        "fixed_pick_label": OUTCOME_LABELS["1"],
+        "allocated_budget_yuan": hedge.allocated_budget_yuan,
+        "line_count": hedge.line_count,
+        "cost_yuan": hedge.cost_yuan,
+        "main_cost_yuan": plan.main_cost_yuan,
+        "total_cost_yuan": plan.total_cost_yuan,
+        "score": round(hedge.score * 100, 1),
+        "evidence": list(hedge.evidence),
+        "selections": [
+            {
+                "seq": prediction.match.seq,
+                "pick_text": prediction.pick_text,
+                "pick_labels": [OUTCOME_LABELS[pick] for pick in prediction.picks],
+            }
+            for prediction in hedge.predictions
+        ],
+    }
+
+
+def _int_plan_attr(plan: TicketPlan, name: str) -> int:
+    value = getattr(plan, name, 0)
+    return value if isinstance(value, int) else 0
 
 
 def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -> dict[str, object]:

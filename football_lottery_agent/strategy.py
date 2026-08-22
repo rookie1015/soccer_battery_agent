@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from math import log
 
-from .models import Issue, Prediction, TicketPlan
+from .models import DrawHedgePlan, Issue, Prediction, TicketPlan
 from .predictor import (
     SELECTION_OUTCOME_LABELS,
     SELECTION_REASON_PREFIX,
@@ -21,6 +21,11 @@ TACTICAL_DRAW_MIN_PROBABILITY = 0.29
 TACTICAL_DRAW_MAX_TOP_GAP = 0.06
 TACTICAL_DRAW_MIN_MATH_PROBABILITY = 0.30
 TACTICAL_DRAW_MIN_MATH_QUALITY = 0.50
+DRAW_HEDGE_BUDGET_SHARE = 0.20
+DRAW_HEDGE_MIN_TOTAL_BUDGET_YUAN = 10
+DRAW_HEDGE_MIN_PROBABILITY = 0.27
+DRAW_HEDGE_MIN_MARKET_PROBABILITY = 0.25
+DRAW_HEDGE_MAX_TOP_GAP = 0.12
 
 
 def build_ticket_plan(
@@ -30,15 +35,14 @@ def build_ticket_plan(
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> TicketPlan:
-    predictions = _fit_predictions_to_budget(
-        _apply_tactical_draw_strategy(
-            predict_issue(
-                issue.matches,
-                model_weights=model_weights,
-                evidence_aware_secondary=evidence_aware_secondary,
-                selection_policy=selection_policy,
-            )
-        ),
+    raw_predictions = predict_issue(
+        issue.matches,
+        model_weights=model_weights,
+        evidence_aware_secondary=evidence_aware_secondary,
+        selection_policy=selection_policy,
+    )
+    predictions, main_budget, draw_hedge = _build_budget_portfolio(
+        raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
     choose9_keep, choose9_drop = _select_choose9(predictions)
@@ -48,7 +52,177 @@ def build_ticket_plan(
         predictions=predictions,
         choose9_keep=choose9_keep,
         choose9_drop=choose9_drop,
+        max_ticket_cost_yuan=max_ticket_cost_yuan,
+        main_allocated_budget_yuan=main_budget,
+        main_cost_yuan=ticket_cost_yuan(predictions),
+        draw_hedge=draw_hedge,
     )
+
+
+def _build_budget_portfolio(
+    predictions: tuple[Prediction, ...],
+    *,
+    max_ticket_cost_yuan: int,
+) -> tuple[tuple[Prediction, ...], int, DrawHedgePlan | None]:
+    """Build a main ticket plus an optional budget-capped draw hedge.
+
+    The old strategy replaced an entire fixture with a draw single before the
+    budget optimiser ran.  Here the main ticket is kept intact as one branch,
+    while at most 20% of the total budget is used by a second branch which
+    fixes one draw that the main branch had to remove.
+    """
+    full_budget_main = _fit_predictions_to_budget(
+        predictions,
+        max_ticket_cost_yuan=max_ticket_cost_yuan,
+    )
+    if max_ticket_cost_yuan < DRAW_HEDGE_MIN_TOTAL_BUDGET_YUAN:
+        return full_budget_main, max_ticket_cost_yuan, None
+    if not _draw_hedge_candidates(full_budget_main):
+        return full_budget_main, max_ticket_cost_yuan, None
+
+    hedge_budget = int(max_ticket_cost_yuan * DRAW_HEDGE_BUDGET_SHARE)
+    hedge_budget -= hedge_budget % STAKE_PER_LINE_YUAN
+    hedge_budget = max(STAKE_PER_LINE_YUAN, hedge_budget)
+    main_budget = max_ticket_cost_yuan - hedge_budget
+    main_predictions = _fit_predictions_to_budget(predictions, max_ticket_cost_yuan=main_budget)
+    candidates = _draw_hedge_candidates(main_predictions)
+    if not candidates:
+        return full_budget_main, max_ticket_cost_yuan, None
+
+    selected_score, _, selected, evidence = max(candidates, key=lambda item: (item[0], -item[1]))
+    branch_seed = tuple(
+        _fix_draw_hedge_candidate(prediction, evidence)
+        if prediction.match.seq == selected.match.seq
+        else prediction
+        for prediction in predictions
+    )
+    branch_predictions = _fit_predictions_to_budget(
+        branch_seed,
+        max_ticket_cost_yuan=hedge_budget,
+    )
+    line_count = ticket_units(branch_predictions)
+    draw_hedge = DrawHedgePlan(
+        candidate_seq=selected.match.seq,
+        predictions=branch_predictions,
+        allocated_budget_yuan=hedge_budget,
+        line_count=line_count,
+        cost_yuan=line_count * STAKE_PER_LINE_YUAN,
+        score=round(selected_score, 4),
+        evidence=evidence,
+    )
+    return main_predictions, main_budget, draw_hedge
+
+
+def _draw_hedge_candidates(
+    predictions: tuple[Prediction, ...],
+) -> list[tuple[float, int, Prediction, tuple[str, ...]]]:
+    return [
+        (score, prediction.match.seq, prediction, evidence)
+        for prediction in predictions
+        for score, evidence in [_draw_hedge_assessment(prediction)]
+        if score is not None
+    ]
+
+
+def _draw_hedge_assessment(prediction: Prediction) -> tuple[float | None, tuple[str, ...]]:
+    """Score a draw only after the main ticket has removed it.
+
+    Market probability is the anchor.  Goal-model and contextual data can
+    support the candidate, but implausible derived totals are ignored instead
+    of being treated as extra independent evidence.
+    """
+    if "1" not in prediction.analysis_picks or "1" in prediction.picks:
+        return None, ()
+    market = prediction.market_probabilities
+    if not market:
+        return None, ()
+
+    draw_probability = prediction.probabilities.get("1", 0.0)
+    market_draw = market.get("1", 0.0)
+    top_gap = max(prediction.probabilities.values()) - draw_probability
+    if (
+        draw_probability < DRAW_HEDGE_MIN_PROBABILITY
+        or market_draw < DRAW_HEDGE_MIN_MARKET_PROBABILITY
+        or top_gap > DRAW_HEDGE_MAX_TOP_GAP
+        or draw_probability < market_draw - 0.02
+    ):
+        return None, ()
+
+    math_draw = prediction.dixon_coles_probabilities.get("1", 0.0)
+    math_quality = prediction.dixon_coles_quality_score
+    if math_quality >= 0.50 and math_draw and math_draw < market_draw - 0.04:
+        return None, ()
+
+    market_support, market_text = _tactical_market_draw_support(prediction)
+    information_support, information_text = _draw_hedge_information_support(prediction)
+    math_support = math_quality >= 0.25 and math_draw >= market_draw - 0.01
+    if not market_support and not information_support and not math_support:
+        return None, ()
+
+    evidence = [f"模型平局 {draw_probability:.1%}，市场平局 {market_draw:.1%}"]
+    if math_support:
+        evidence.append(f"数学平局 {math_draw:.1%}（质量 {math_quality:.0%}）")
+    if market_support:
+        evidence.append(market_text)
+    if information_support:
+        evidence.append(information_text)
+
+    # Candidate ranking remains market anchored.  Context and the goal model
+    # qualify a candidate but are not added as independent bonuses because
+    # they often originate from overlapping match data.
+    score = (
+        0.80 * market_draw
+        + 0.20 * draw_probability
+        + 0.10 * max(0.0, draw_probability - market_draw)
+        - 0.05 * top_gap
+    )
+    return score, tuple(evidence)
+
+
+def _draw_hedge_information_support(prediction: Prediction) -> tuple[bool, str]:
+    if not _has_informative_signals(prediction.match):
+        return False, ""
+    expected_total, recent_draw_rate = _draw_context(prediction.match)
+    # Values below 1.2 were observed when incomplete xG inputs collapsed.  They
+    # are not credible enough to qualify a hedge candidate.
+    credible_low_scoring = expected_total is not None and 1.20 <= expected_total <= 2.40
+    draw_prone = recent_draw_rate is not None and recent_draw_rate >= 0.30
+    if not credible_low_scoring and not draw_prone:
+        return False, ""
+    details = []
+    if credible_low_scoring:
+        details.append(f"预期总进球 {expected_total:.2f}")
+    if draw_prone:
+        details.append(f"近期/交锋平局率 {recent_draw_rate:.1%}")
+    return True, "信息支持：" + "、".join(details)
+
+
+def _fix_draw_hedge_candidate(
+    prediction: Prediction,
+    evidence: tuple[str, ...],
+) -> Prediction:
+    original_picks = prediction.analysis_picks
+    reasons = tuple(
+        reason for reason in prediction.reasons if not reason.startswith(SELECTION_REASON_PREFIX)
+    )
+    updated = replace(
+        prediction,
+        picks=("1",),
+        original_picks=original_picks,
+        risk="高",
+        reasons=reasons,
+        budget_adjusted=False,
+        budget_forced_single=False,
+        budget_removed_picks=(),
+        tactical_draw=False,
+        tactical_draw_score=0.0,
+        tactical_draw_evidence=(),
+    )
+    hedge_reason = (
+        "平局对冲分支：主票因预算删除本场平局，本分支仅用独立小预算固定单选平；"
+        f"它不是稳胆，也不会替换主票。证据：{'；'.join(evidence)}。"
+    )
+    return replace(updated, reasons=(selection_reason(updated), hedge_reason, *updated.reasons))
 
 
 def _apply_tactical_draw_strategy(predictions: tuple[Prediction, ...]) -> tuple[Prediction, ...]:

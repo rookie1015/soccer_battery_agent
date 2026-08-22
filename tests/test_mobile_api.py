@@ -46,6 +46,11 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("ticket_single_count", report["metrics"])
         self.assertIn("budget_forced_single_count", report["metrics"])
         self.assertIn("tactical_draw_count", report["metrics"])
+        self.assertIn("draw_hedge_count", report["metrics"])
+        self.assertIn("budget", report)
+        self.assertLessEqual(report["budget"]["total_cost_yuan"], report["budget"]["limit_yuan"])
+        self.assertIsNotNone(report["draw_hedge"])
+        self.assertEqual(len(report["draw_hedge"]["selections"]), 14)
 
 
 if __name__ == "__main__":

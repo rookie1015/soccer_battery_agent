@@ -101,6 +101,54 @@ class ReviewReport:
         )
 
     @property
+    def budget_draw_caused_misses(self) -> int:
+        return sum(
+            1
+            for row in self.rows
+            if row.result.outcome == "1"
+            and not row.outcome_hit
+            and row.analysis_outcome_hit
+            and row.prediction.budget_adjusted
+        )
+
+    @property
+    def draw_hedge_candidate_hit(self) -> bool | None:
+        hedge = self.plan.draw_hedge
+        if hedge is None:
+            return None
+        row = next((row for row in self.rows if row.result.seq == hedge.candidate_seq), None)
+        if row is None or row.result.unplayed:
+            return None
+        return row.result.outcome == "1"
+
+    @property
+    def draw_hedge_outcome_hits(self) -> int:
+        hedge = self.plan.draw_hedge
+        if hedge is None:
+            return 0
+        results = {row.result.seq: row.result for row in self.rows}
+        return sum(
+            1
+            for prediction in hedge.predictions
+            if prediction.match.seq in results
+            and (
+                results[prediction.match.seq].unplayed
+                or results[prediction.match.seq].outcome in prediction.picks
+            )
+        )
+
+    @property
+    def draw_hedge_full_coverage(self) -> bool | None:
+        hedge = self.plan.draw_hedge
+        if hedge is None:
+            return None
+        if {row.result.seq for row in self.rows} != {
+            prediction.match.seq for prediction in hedge.predictions
+        }:
+            return None
+        return self.draw_hedge_outcome_hits == self.total
+
+    @property
     def top_score_hits(self) -> int:
         return sum(1 for row in self.rows if row.top_score_hit)
 
@@ -328,6 +376,26 @@ def render_review_markdown(
     lines.append(f"- 胜平负命中：{report.outcome_hits}/{report.total}（{_rate(report.outcome_hits, report.total)}）")
     lines.append(f"- 单选命中：{report.single_hits}/{single_total}（{_rate(report.single_hits, single_total)}）")
     lines.append(f"- 预算压缩导致漏判：{report.budget_caused_misses} 场")
+    lines.append(f"- 其中预算删平导致漏判：{report.budget_draw_caused_misses} 场")
+    if report.plan.draw_hedge:
+        candidate_mark = (
+            "未结算"
+            if report.draw_hedge_candidate_hit is None
+            else "命中"
+            if report.draw_hedge_candidate_hit
+            else "未中"
+        )
+        full_mark = (
+            "未结算"
+            if report.draw_hedge_full_coverage is None
+            else "命中"
+            if report.draw_hedge_full_coverage
+            else "未中"
+        )
+        lines.append(
+            f"- 平局对冲：候选单平{candidate_mark}；分支覆盖 "
+            f"{report.draw_hedge_outcome_hits}/{report.total}，整支{full_mark}。"
+        )
     lines.append(f"- 比分 Top1 命中：{report.top_score_hits}/{report.score_total}（{_rate(report.top_score_hits, report.score_total)}）")
     lines.append(f"- 比分 Top3 命中：{report.score_top3_hits}/{report.score_total}（{_rate(report.score_top3_hits, report.score_total)}）")
     lines.append(f"- 任九保留命中：{report.keep_hits}/{keep_total}（{_rate(report.keep_hits, keep_total)}）")

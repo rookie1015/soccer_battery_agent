@@ -16,7 +16,7 @@ from .history import archive_report, delete_history_entries, load_history_entrie
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
-from .models import Match, Odds, Signals, TicketPlan
+from .models import DrawHedgePlan, Match, Odds, Signals, TicketPlan
 from .notifier import send_text
 from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
@@ -1081,9 +1081,7 @@ def _restore_analysis_recommendations(
     if saved_keep is None or saved_drop is None or set(saved_keep) & set(saved_drop):
         return None
 
-    return TicketPlan(
-        issue=plan.issue,
-        predictions=tuple(
+    restored_predictions = tuple(
             replace(
                 prediction,
                 picks=saved_picks[prediction.match.seq],
@@ -1093,9 +1091,67 @@ def _restore_analysis_recommendations(
                 tactical_draw=saved_tactical_draws[prediction.match.seq],
             )
             for prediction in plan.predictions
-        ),
+        )
+    budget = report.get("budget") if isinstance(report.get("budget"), dict) else {}
+    restored_hedge = _restore_draw_hedge(plan, report.get("draw_hedge"))
+    return TicketPlan(
+        issue=plan.issue,
+        predictions=restored_predictions,
         choose9_keep=saved_keep,
         choose9_drop=saved_drop,
+        max_ticket_cost_yuan=int(budget.get("limit_yuan") or plan.max_ticket_cost_yuan),
+        main_allocated_budget_yuan=int(
+            budget.get("main_allocated_yuan") or plan.main_allocated_budget_yuan
+        ),
+        main_cost_yuan=int(budget.get("main_cost_yuan") or plan.main_cost_yuan),
+        draw_hedge=restored_hedge,
+    )
+
+
+def _restore_draw_hedge(plan: TicketPlan, value: object) -> DrawHedgePlan | None:
+    if not isinstance(value, dict):
+        return None
+    selections = value.get("selections")
+    if not isinstance(selections, list):
+        return None
+    saved: dict[int, tuple[str, ...]] = {}
+    for item in selections:
+        if not isinstance(item, dict):
+            return None
+        try:
+            seq = int(item.get("seq"))
+        except (TypeError, ValueError):
+            return None
+        picks = tuple(
+            pick for pick in str(item.get("pick_text") or "").split("/") if pick in OUTCOME_LABELS
+        )
+        if not picks:
+            return None
+        saved[seq] = picks
+    current = {prediction.match.seq: prediction for prediction in plan.predictions}
+    if set(saved) != set(current):
+        return None
+    try:
+        candidate_seq = int(value.get("candidate_seq"))
+        line_count = int(value.get("line_count"))
+        cost_yuan = int(value.get("cost_yuan"))
+        allocated = int(value.get("allocated_budget_yuan"))
+        score = float(value.get("score") or 0.0) / 100.0
+    except (TypeError, ValueError):
+        return None
+    if candidate_seq not in current or saved.get(candidate_seq) != ("1",):
+        return None
+    return DrawHedgePlan(
+        candidate_seq=candidate_seq,
+        predictions=tuple(
+            replace(current[seq], picks=saved[seq], original_picks=current[seq].analysis_picks)
+            for seq in sorted(current)
+        ),
+        allocated_budget_yuan=allocated,
+        line_count=line_count,
+        cost_yuan=cost_yuan,
+        score=score,
+        evidence=tuple(str(item) for item in value.get("evidence") or ()),
     )
 
 
@@ -1142,9 +1198,18 @@ def _serialize_review_report(
             1 for row in review.rows if len(row.prediction.picks) == 1 and row.outcome_hit
         ),
         "budget_forced_single_count": review.budget_caused_misses,
+        "draw_hedge_count": int(review.plan.draw_hedge is not None),
         "low_risk_count": review.outcome_hits,
         "average_confidence": round(review.outcome_hits / review.total * 100, 1) if review.total else 0.0,
     }
+    if isinstance(report.get("draw_hedge"), dict):
+        report["draw_hedge"] = {
+            **report["draw_hedge"],
+            "candidate_hit": review.draw_hedge_candidate_hit,
+            "outcome_hits": review.draw_hedge_outcome_hits,
+            "outcome_total": review.total,
+            "full_coverage": review.draw_hedge_full_coverage,
+        }
     report["review_diagnostics"] = diagnostics or {
         "issue_miss_count": review.total - review.outcome_hits,
         "issue_tags": [],

@@ -20,9 +20,23 @@ struct ReportSummaryView: View {
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
                 MetricTile(title: "比赛", value: "\(report.metrics.matchCount)", tint: .blue)
                 MetricTile(title: "模型单选", value: "\(report.metrics.singleCount)", tint: .indigo)
-                MetricTile(title: "战术单平", value: "\(report.metrics.tacticalDrawCount ?? 0)", tint: .orange)
+                MetricTile(title: "平局对冲", value: "\(report.metrics.drawHedgeCount ?? 0)", tint: .orange)
                 MetricTile(title: "低风险", value: "\(report.metrics.lowRiskCount)", tint: .green)
                 MetricTile(title: "平均置信", value: "\(report.metrics.averageConfidence, specifier: "%.1f")%", tint: .orange)
+            }
+
+            if let hedge = report.drawHedge {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("平局对冲 · 第 \(hedge.candidateSeq) 场")
+                        .font(.subheadline.bold())
+                        .foregroundStyle(.orange)
+                    Text("\(hedge.home) vs \(hedge.away) 固定单选平；主票 \(hedge.mainCostYuan) 元 + 对冲 \(hedge.costYuan) 元（\(hedge.lineCount) 注）= \(hedge.totalCostYuan) 元。不是稳胆。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("票面：" + hedge.selections.map { "\($0.seq):\($0.pickText)" }.joined(separator: " · "))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             VStack(alignment: .leading, spacing: 10) {

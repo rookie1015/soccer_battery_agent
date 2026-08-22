@@ -114,12 +114,26 @@ data class AnalysisReport(
     val analysisMode: String,
     val analysisModeMessage: String,
     val foreignOddsStatus: ForeignOddsStatus?,
+    val drawHedge: DrawHedgeReport?,
     val metrics: ReportMetrics,
     val choose9Keep: List<Int>,
     val choose9Drop: List<Int>,
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
     val modelCalibration: ModelCalibration?,
+)
+
+data class DrawHedgeReport(
+    val candidateSeq: Int,
+    val home: String,
+    val away: String,
+    val lineCount: Int,
+    val costYuan: Int,
+    val mainCostYuan: Int,
+    val totalCostYuan: Int,
+    val score: Double,
+    val evidence: List<String>,
+    val selections: List<String>,
 )
 
 data class ForeignOddsStatus(
@@ -162,6 +176,7 @@ data class ReportMetrics(
     val ticketSingleCount: Int,
     val budgetForcedSingleCount: Int,
     val tacticalDrawCount: Int,
+    val drawHedgeCount: Int,
     val lowRiskCount: Int,
     val averageConfidence: Double,
 )
@@ -928,12 +943,14 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             analysisMode = json.optString("analysis_mode", "full"),
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
+            drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
                 ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 tacticalDrawCount = metrics.optInt("tactical_draw_count"),
+                drawHedgeCount = metrics.optInt("draw_hedge_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1155,12 +1172,14 @@ class FootballLotteryApi(private val baseUrl: String) {
             analysisMode = json.optString("analysis_mode", "full"),
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
+            drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
             metrics = ReportMetrics(
                 matchCount = metrics.optInt("match_count"),
                 singleCount = metrics.optInt("single_count"),
                 ticketSingleCount = metrics.optInt("ticket_single_count", metrics.optInt("single_count")),
                 budgetForcedSingleCount = metrics.optInt("budget_forced_single_count"),
                 tacticalDrawCount = metrics.optInt("tactical_draw_count"),
+                drawHedgeCount = metrics.optInt("draw_hedge_count"),
                 lowRiskCount = metrics.optInt("low_risk_count"),
                 averageConfidence = metrics.optDouble("average_confidence"),
             ),
@@ -1514,7 +1533,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.3.0（6） · 市场锚定分析与战术单平",
+                        "App 版本 0.3.1（7） · 预算内主票与平局对冲",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1975,6 +1994,30 @@ private fun SummaryCard(report: AnalysisReport) {
                     color = Color(0xFFB54708),
                     style = MaterialTheme.typography.bodySmall,
                 )
+            }
+            if (!isReview) {
+                report.drawHedge?.let { hedge ->
+                    Text(
+                        text = "平局对冲：第 ${hedge.candidateSeq} 场 ${hedge.home} vs ${hedge.away} 固定单选平；" +
+                            "主票 ${hedge.mainCostYuan} 元 + 对冲 ${hedge.costYuan} 元（${hedge.lineCount} 注）" +
+                            " = ${hedge.totalCostYuan} 元。不是稳胆。",
+                        color = Color(0xFFB54708),
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "对冲票面：${hedge.selections.joinToString(" · ")}",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    if (hedge.evidence.isNotEmpty()) {
+                        Text(
+                            text = "对冲依据：${hedge.evidence.joinToString("；")}",
+                            color = Color(0xFF667085),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
             if (isReview) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2677,6 +2720,24 @@ private fun parseForeignOddsStatus(json: JSONObject): ForeignOddsStatus = Foreig
     creditsUsed = json.optNullableInt("credits_used"),
     creditsLast = json.optNullableInt("credits_last"),
 )
+
+private fun parseDrawHedge(json: JSONObject?): DrawHedgeReport? {
+    json ?: return null
+    return DrawHedgeReport(
+        candidateSeq = json.optInt("candidate_seq"),
+        home = json.optString("home"),
+        away = json.optString("away"),
+        lineCount = json.optInt("line_count"),
+        costYuan = json.optInt("cost_yuan"),
+        mainCostYuan = json.optInt("main_cost_yuan"),
+        totalCostYuan = json.optInt("total_cost_yuan"),
+        score = json.optDouble("score"),
+        evidence = json.optJSONArray("evidence").orEmptyArray().toStringList(),
+        selections = json.optJSONArray("selections").orEmptyArray().mapObjects { item ->
+            "${item.optInt("seq")}:${item.optString("pick_text")}"
+        },
+    )
+}
 
 private fun parseForeignOddsUsage(json: JSONObject): ForeignOddsUsage = ForeignOddsUsage(
     status = json.optString("status"),

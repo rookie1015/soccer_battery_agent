@@ -285,9 +285,41 @@ class ReviewTests(unittest.TestCase):
         result = MatchResult(seq=forced.match.seq, home_goals=0, away_goals=0)
 
         tags = _diagnostic_tags(forced, result)
+        review = build_review(
+            replace(plan, predictions=(forced,), choose9_keep=(forced.match.seq,), choose9_drop=()),
+            {forced.match.seq: result},
+        )
 
         self.assertIn("预算压缩导致漏判", tags)
         self.assertIn("平局漏判", tags)
+        self.assertEqual(review.budget_draw_caused_misses, 1)
+        self.assertIn("其中预算删平导致漏判：1 场", render_review_markdown(review))
+
+    def test_review_records_draw_hedge_candidate_and_branch_coverage(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        self.assertIsNotNone(plan.draw_hedge)
+        assert plan.draw_hedge is not None
+        result_by_outcome = {
+            "3": (1, 0),
+            "1": (0, 0),
+            "0": (0, 1),
+        }
+        results = {}
+        for prediction in plan.draw_hedge.predictions:
+            outcome = prediction.picks[0]
+            home_goals, away_goals = result_by_outcome[outcome]
+            results[prediction.match.seq] = MatchResult(
+                seq=prediction.match.seq,
+                home_goals=home_goals,
+                away_goals=away_goals,
+            )
+
+        review = build_review(plan, results)
+
+        self.assertTrue(review.draw_hedge_candidate_hit)
+        self.assertTrue(review.draw_hedge_full_coverage)
+        self.assertEqual(review.draw_hedge_outcome_hits, 14)
+        self.assertIn("平局对冲：候选单平命中", render_review_markdown(review))
 
 
 def _result_for_prediction(prediction):

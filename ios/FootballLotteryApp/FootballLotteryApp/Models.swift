@@ -66,6 +66,7 @@ struct AnalysisReport: Decodable, Identifiable {
     let purchaseDeadline: String
     let purchaseDeadlineSource: String
     let saleBeginTime: String
+    let drawHedge: DrawHedgeReport?
     let metrics: ReportMetrics
     let choose9Keep: [Int]
     let choose9Drop: [Int]
@@ -76,10 +77,44 @@ struct AnalysisReport: Decodable, Identifiable {
         case purchaseDeadline = "purchase_deadline"
         case purchaseDeadlineSource = "purchase_deadline_source"
         case saleBeginTime = "sale_begin_time"
+        case drawHedge = "draw_hedge"
         case metrics
         case choose9Keep = "choose9_keep"
         case choose9Drop = "choose9_drop"
         case predictions
+    }
+}
+
+struct DrawHedgeReport: Decodable {
+    let candidateSeq: Int
+    let home: String
+    let away: String
+    let lineCount: Int
+    let costYuan: Int
+    let mainCostYuan: Int
+    let totalCostYuan: Int
+    let score: Double
+    let evidence: [String]
+    let selections: [DrawHedgeSelection]
+
+    enum CodingKeys: String, CodingKey {
+        case candidateSeq = "candidate_seq"
+        case home, away
+        case lineCount = "line_count"
+        case costYuan = "cost_yuan"
+        case mainCostYuan = "main_cost_yuan"
+        case totalCostYuan = "total_cost_yuan"
+        case score, evidence, selections
+    }
+}
+
+struct DrawHedgeSelection: Decodable {
+    let seq: Int
+    let pickText: String
+
+    enum CodingKeys: String, CodingKey {
+        case seq
+        case pickText = "pick_text"
     }
 }
 
@@ -89,6 +124,7 @@ struct ReportMetrics: Decodable {
     let ticketSingleCount: Int?
     let budgetForcedSingleCount: Int?
     let tacticalDrawCount: Int?
+    let drawHedgeCount: Int?
     let lowRiskCount: Int
     let averageConfidence: Double
 
@@ -98,6 +134,7 @@ struct ReportMetrics: Decodable {
         case ticketSingleCount = "ticket_single_count"
         case budgetForcedSingleCount = "budget_forced_single_count"
         case tacticalDrawCount = "tactical_draw_count"
+        case drawHedgeCount = "draw_hedge_count"
         case lowRiskCount = "low_risk_count"
         case averageConfidence = "average_confidence"
     }

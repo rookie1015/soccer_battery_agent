@@ -25,7 +25,6 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 def render_analysis_html(plan: TicketPlan) -> str:
     singles = sum(1 for pred in plan.predictions if len(pred.analysis_picks) == 1)
     forced_singles = sum(1 for pred in plan.predictions if pred.budget_forced_single)
-    tactical_draws = sum(1 for pred in plan.predictions if pred.tactical_draw)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
@@ -34,7 +33,8 @@ def render_analysis_html(plan: TicketPlan) -> str:
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("模型单选", str(singles), "预算压缩前"),
             _metric_card("强制单选", str(forced_singles), "仅由预算压缩产生"),
-            _metric_card("战术单平", str(tactical_draws), "高风险且每期最多一场"),
+            _metric_card("平局对冲", "1" if plan.draw_hedge else "0", "独立预算分支"),
+            _metric_card("组合成本", f"{plan.total_cost_yuan}元", f"上限 {plan.max_ticket_cost_yuan}元"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
     )
@@ -55,6 +55,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
         </section>
         <div class="tab-panel active" id="outcome-panel">
           <section class="metrics">{cards}</section>
+          {_draw_hedge_section(plan)}
           <section class="split">
             <div class="panel">
               <h2>任九保留</h2>
@@ -80,6 +81,31 @@ def render_analysis_html(plan: TicketPlan) -> str:
     )
 
 
+def _draw_hedge_section(plan: TicketPlan) -> str:
+    hedge = plan.draw_hedge
+    if hedge is None:
+        return ""
+    candidate = next(
+        prediction for prediction in hedge.predictions if prediction.match.seq == hedge.candidate_seq
+    )
+    selections = " · ".join(
+        f"{prediction.match.seq}:{prediction.pick_text}" for prediction in hedge.predictions
+    )
+    evidence = "".join(f"<li>{escape(item)}</li>" for item in hedge.evidence)
+    return f"""
+    <section class="panel">
+      <div class="section-title">
+        <h2>平局对冲分支</h2>
+        <span>独立于主票，不是稳胆</span>
+      </div>
+      <p><strong>第 {hedge.candidate_seq} 场 {escape(candidate.match.home)} vs {escape(candidate.match.away)}：固定单选平（1）</strong></p>
+      <p class="subtle">主票 {plan.main_cost_yuan} 元 + 对冲 {hedge.cost_yuan} 元（{hedge.line_count} 注）= 组合 {plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。</p>
+      <p class="subtle">对冲票面：{escape(selections)}</p>
+      <div class="analysis-reasons"><span class="detail-label">候选依据</span><ol>{evidence}</ol></div>
+    </section>
+    """
+
+
 def render_review_html(report: ReviewReport) -> str:
     rows = "\n".join(_review_row(row) for row in report.rows)
     major_misses = _major_miss_section(report)
@@ -91,12 +117,30 @@ def render_review_html(report: ReviewReport) -> str:
         [
             _rate_card("胜平负命中", report.outcome_hits, total),
             _rate_card("单选命中", report.single_hits, single_total),
+            _rate_card("预算漏判", report.budget_caused_misses, total),
+            _rate_card("预算删平漏判", report.budget_draw_caused_misses, total),
             _rate_card("比分 Top1", report.top_score_hits, report.score_total),
             _rate_card("比分 Top3", report.score_top3_hits, report.score_total),
             _rate_card("任九保留", report.keep_hits, keep_total),
             _rate_card("剔除有效", report.effective_drops, drop_total),
         ]
     )
+    hedge_review = ""
+    if report.plan.draw_hedge:
+        candidate_mark = (
+            "未结算"
+            if report.draw_hedge_candidate_hit is None
+            else "命中"
+            if report.draw_hedge_candidate_hit
+            else "未中"
+        )
+        hedge_review = f"""
+        <section class="panel">
+          <div class="section-title"><h2>平局对冲复盘</h2><span>独立分支</span></div>
+          <p><strong>候选单平：{candidate_mark}</strong></p>
+          <p class="subtle">分支覆盖 {report.draw_hedge_outcome_hits}/{report.total}；整支组合{'命中' if report.draw_hedge_full_coverage else '未中'}。</p>
+        </section>
+        """
     return _page(
         title=f"足球彩票复盘报告 {escape(report.plan.issue.issue)}",
         body=f"""
@@ -108,6 +152,7 @@ def render_review_html(report: ReviewReport) -> str:
           </div>
         </section>
         <section class="metrics rates">{cards}</section>
+        {hedge_review}
         {major_misses}
         <section class="panel">
           <div class="section-title">

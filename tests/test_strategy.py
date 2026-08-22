@@ -9,6 +9,7 @@ from football_lottery_agent.predictor import _favorite_draw_guard, _has_informat
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import (
     _apply_tactical_draw_strategy,
+    _build_budget_portfolio,
     _downgrade_prediction,
     _fit_predictions_to_budget,
     _pick_coverage_probability,
@@ -28,6 +29,58 @@ class StrategyTests(unittest.TestCase):
         self.assertTrue(set(plan.choose9_keep).isdisjoint(plan.choose9_drop))
         self.assertLessEqual(ticket_cost_yuan(plan.predictions), 2000)
         self.assertTrue(all(prediction.reasons[0].startswith("选择依据：") for prediction in plan.predictions))
+        self.assertFalse(any(prediction.tactical_draw for prediction in plan.predictions))
+        self.assertLessEqual(plan.total_cost_yuan, plan.max_ticket_cost_yuan)
+
+    def test_budget_portfolio_keeps_main_ticket_and_adds_separate_draw_single(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2).predictions[:2]
+        candidates = (
+            replace(
+                base[0],
+                match=replace(
+                    base[0].match,
+                    sources={
+                        **base[0].match.sources,
+                        "odds_market": {"asian_current_line": 0.0},
+                    },
+                ),
+                probabilities={"3": 0.36, "1": 0.29, "0": 0.35},
+                picks=("3", "1", "0"),
+                original_picks=("3", "1", "0"),
+                selection_scores={},
+                market_probabilities={"3": 0.35, "1": 0.30, "0": 0.35},
+                dixon_coles_probabilities={"3": 0.36, "1": 0.30, "0": 0.34},
+                dixon_coles_quality_score=0.60,
+            ),
+            replace(
+                base[1],
+                match=replace(
+                    base[1].match,
+                    sources={
+                        **base[1].match.sources,
+                        "odds_market": {"asian_current_line": 0.0},
+                    },
+                ),
+                probabilities={"3": 0.37, "1": 0.28, "0": 0.35},
+                picks=("3", "1", "0"),
+                original_picks=("3", "1", "0"),
+                selection_scores={},
+                market_probabilities={"3": 0.37, "1": 0.28, "0": 0.35},
+                dixon_coles_probabilities={"3": 0.37, "1": 0.29, "0": 0.34},
+                dixon_coles_quality_score=0.60,
+            ),
+        )
+
+        main, main_budget, hedge = _build_budget_portfolio(candidates, max_ticket_cost_yuan=10)
+
+        self.assertEqual(main_budget, 8)
+        self.assertIsNotNone(hedge)
+        assert hedge is not None
+        self.assertEqual(hedge.candidate_seq, candidates[0].match.seq)
+        self.assertNotIn("1", main[0].picks)
+        self.assertEqual(hedge.predictions[0].picks, ("1",))
+        self.assertEqual(hedge.allocated_budget_yuan, 2)
+        self.assertLessEqual(ticket_cost_yuan(main) + hedge.cost_yuan, 10)
 
     def test_three_way_pick_explains_why_no_outcome_is_excluded(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))

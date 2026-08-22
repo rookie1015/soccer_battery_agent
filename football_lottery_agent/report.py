@@ -50,6 +50,31 @@ def render_markdown(plan: TicketPlan) -> str:
         if quota:
             lines.append(f"- 额度：{quota}")
         lines.append("")
+    lines.append("## 预算组合")
+    lines.append("")
+    lines.append(
+        f"- 主票：分配 {plan.main_allocated_budget_yuan} 元，实际 {plan.main_cost_yuan} 元。"
+    )
+    if plan.draw_hedge:
+        hedge = plan.draw_hedge
+        candidate = next(
+            prediction for prediction in hedge.predictions if prediction.match.seq == hedge.candidate_seq
+        )
+        selections = "-".join(prediction.pick_text for prediction in hedge.predictions)
+        lines.append(
+            f"- 平局对冲：第 {hedge.candidate_seq} 场 {candidate.match.home} vs {candidate.match.away} "
+            f"固定单选平；分配 {hedge.allocated_budget_yuan} 元，{hedge.line_count} 注，"
+            f"实际 {hedge.cost_yuan} 元。"
+        )
+        lines.append(f"- 对冲分支票面：`{selections}`")
+        lines.append(f"- 对冲依据：{'；'.join(hedge.evidence)}。")
+        lines.append("- 风险说明：对冲分支不是稳胆，与主票共同计算总预算。")
+    else:
+        lines.append("- 平局对冲：本期没有通过门槛且被主票删除的候选，不强行设置单平。")
+    lines.append(
+        f"- 组合总成本：{plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。"
+    )
+    lines.append("")
     lines.append("## 任九建议")
     lines.append("")
     lines.append(f"- 建议保留：{_join_seq(plan.choose9_keep)}")
