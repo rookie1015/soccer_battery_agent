@@ -7,6 +7,7 @@ from football_lottery_agent.auxiliary_sources import (
     AuxiliaryMatch,
     auxiliary_notes,
     auxiliary_odds,
+    reconcile_odds,
     fetch_500_issue,
     fetch_free_auxiliary_sources,
     fetch_zgzcw_issue,
@@ -72,7 +73,7 @@ class AuxiliarySourceTests(unittest.TestCase):
         self.assertEqual(result.by_seq[1], (five_hundred,))
         self.assertEqual(result.audit["providers"]["500.com"]["matched_matches"], 1)
 
-    def test_auxiliary_odds_fill_only_when_sina_is_missing(self) -> None:
+    def test_auxiliary_odds_fill_missing_and_correct_mirrored_primary(self) -> None:
         rows = (
             AuxiliaryMatch("500.com", 1, "主", "客", "", (2.0, 3.0, 4.0)),
             AuxiliaryMatch("zgzcw", 1, "主", "客", "", (2.2, 3.2, 4.2)),
@@ -80,7 +81,22 @@ class AuxiliarySourceTests(unittest.TestCase):
 
         self.assertEqual(auxiliary_odds(rows), (2.1, 3.1, 4.1))
         self.assertIn("新浪欧赔缺失", auxiliary_notes(rows, None)[0])
-        self.assertIn("未覆盖新浪主源", auxiliary_notes(rows, SimpleNamespace(home=4.0, draw=3.2, away=2.0))[0])
+        decision = reconcile_odds(rows, SimpleNamespace(home=4.0, draw=3.2, away=2.0))
+        self.assertEqual(decision.status, "mirrored_primary_corrected")
+        self.assertEqual(decision.odds, (2.0, 3.2, 4.0))
+        self.assertIn("已交换主胜与客胜赔率", auxiliary_notes(rows, SimpleNamespace(home=4.0, draw=3.2, away=2.0))[0])
+
+    def test_paris_rennes_mirrored_odds_are_corrected(self) -> None:
+        rows = (
+            AuxiliaryMatch("zgzcw", 12, "巴黎圣曼", "雷恩", "2026-08-24 02:45:00", (1.48, 4.71, 5.77)),
+        )
+
+        decision = reconcile_odds(rows, SimpleNamespace(home=5.733, draw=4.692, away=1.48))
+
+        self.assertEqual(decision.status, "mirrored_primary_corrected")
+        self.assertEqual(decision.odds, (1.48, 4.692, 5.733))
+        self.assertGreater(decision.largest_gap, 0.45)
+        self.assertLess(decision.mirrored_gap, 0.01)
 
     def test_auxiliary_notes_report_schedule_difference_without_overriding_sina(self) -> None:
         rows = (

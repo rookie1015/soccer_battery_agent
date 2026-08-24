@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import traceback
+from pathlib import Path
 
 from football_lottery_agent.standalone_api import (
     analysis_error_message,
@@ -23,7 +25,22 @@ def analysis(payload_json: str, work_dir: str) -> str:
     try:
         return _json(run_analysis(json.loads(payload_json), work_dir))
     except Exception as exc:
+        _write_analysis_error_log(work_dir)
         return _json({"ok": False, "error": analysis_error_message(exc)})
+
+
+def _write_analysis_error_log(work_dir: str) -> None:
+    """Persist the original Python traceback for local Android diagnostics."""
+    try:
+        report_dir = Path(work_dir) / "reports"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / "last_analysis_error.log").write_text(
+            traceback.format_exc(),
+            encoding="utf-8",
+        )
+    except Exception:
+        # Diagnostics must never replace the user-facing analysis error.
+        pass
 
 
 def foreign_odds_usage(payload_json: str) -> str:

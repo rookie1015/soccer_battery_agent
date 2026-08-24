@@ -59,6 +59,51 @@ class TeamIdentityTests(unittest.TestCase):
             self.assertNotIn("sofascore", identity_summary("乙队")["provider_ids"])
             self.assertNotIn("Wrong Alpha", identity_summary("甲队")["aliases"])
 
+    def test_load_removes_kickoff_only_alias_that_conflicts_with_seed_identity(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "team_identity.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "teams": {
+                            "巴黎": {
+                                "aliases": [
+                                    {
+                                        "name": "Rennes",
+                                        "provider": "fotmob",
+                                        "source": "unique_competition_kickoff",
+                                    }
+                                ],
+                                "provider_ids": {"fotmob": "9851"},
+                            },
+                            "雷恩": {
+                                "aliases": [
+                                    {
+                                        "name": "PSG",
+                                        "provider": "fotmob",
+                                        "source": "unique_competition_kickoff",
+                                    }
+                                ],
+                                "provider_ids": {"fotmob": "9847"},
+                            },
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            configure_team_identity(path)
+
+            self.assertEqual(team_match_score("巴黎", "PSG"), 1.0)
+            self.assertEqual(team_match_score("雷恩", "Rennes"), 1.0)
+            self.assertEqual(team_match_score("巴黎", "Rennes"), 0.0)
+            self.assertEqual(provider_team_match_score("巴黎", "Rennes", "fotmob", 9851), 0.0)
+            cleaned = json.loads(path.read_text(encoding="utf-8"))
+            self.assertNotIn("fotmob", cleaned["teams"]["巴黎"]["provider_ids"])
+            self.assertNotIn("fotmob", cleaned["teams"]["雷恩"]["provider_ids"])
+
 
 if __name__ == "__main__":
     unittest.main()

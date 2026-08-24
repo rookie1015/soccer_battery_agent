@@ -17,6 +17,7 @@ from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
 from .mobile_api import serialize_ticket_plan
 from .models import (
+    Choose9Plan,
     DrawHedgePlan,
     DrawLineCoverage,
     LinePortfolioPlan,
@@ -614,6 +615,7 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         len(line_portfolio.get("draw_coverages") or []) if line_portfolio else 0
     )
     budget = _parse_analysis_budget(markdown_text, line_portfolio)
+    choose9 = _parse_choose9_markdown(markdown_text, predictions)
     return {
         "issue": issue,
         "purchase_deadline": metadata.get("purchase_deadline", ""),
@@ -639,7 +641,68 @@ def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "
         "line_portfolio": line_portfolio,
         "choose9_keep": keep,
         "choose9_drop": drop,
+        "choose9": choose9,
         "predictions": predictions,
+    }
+
+
+def _parse_choose9_markdown(
+    markdown_text: str,
+    predictions: list[dict[str, object]],
+) -> dict[str, object] | None:
+    summary = re.search(
+        r"^- 任九票：独立选择 9 场，(\d+) 注，每注 2 元，实际 (\d+)/(\d+) 元。?$",
+        markdown_text,
+        re.MULTILINE,
+    )
+    heading = "## 任九建议（独立优化）"
+    if not summary or heading not in markdown_text:
+        return None
+    section = markdown_text.split(heading, 1)[1].split("\n## ", 1)[0]
+    probability_match = re.search(r"^- 理论联合覆盖率：([\d.]+)%", section, re.MULTILINE)
+    matches = {
+        int(prediction["seq"]): (str(prediction["home"]), str(prediction["away"]))
+        for prediction in predictions
+    }
+    selections: list[dict[str, object]] = []
+    for line in section.splitlines():
+        if not line.startswith("| ") or "---" in line or "序号" in line:
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) < 4 or not cells[0].isdigit():
+            continue
+        seq = int(cells[0])
+        picks = [pick for pick in cells[2].split("/") if pick in OUTCOME_LABELS]
+        if not picks:
+            continue
+        home, away = matches.get(seq, _split_matchup(cells[1]))
+        selections.append(
+            {
+                "seq": seq,
+                "home": home,
+                "away": away,
+                "pick_text": "/".join(picks),
+                "picks": picks,
+                "pick_labels": [OUTCOME_LABELS[pick] for pick in picks],
+                "coverage_probability": _parse_percent(cells[3]),
+            }
+        )
+    if len(selections) != 9:
+        return None
+    keep = sorted(int(selection["seq"]) for selection in selections)
+    all_sequences = {int(prediction["seq"]) for prediction in predictions}
+    return {
+        "mode": "independent",
+        "budget_scope": "separate",
+        "limit_yuan": int(summary.group(3)),
+        "line_count": int(summary.group(1)),
+        "cost_yuan": int(summary.group(2)),
+        "joint_coverage_probability": (
+            float(probability_match.group(1)) if probability_match else 0.0
+        ),
+        "keep": keep,
+        "drop": sorted(all_sequences - set(keep)),
+        "selections": selections,
     }
 
 
@@ -1216,6 +1279,7 @@ def _restore_analysis_recommendations(
     budget = report.get("budget") if isinstance(report.get("budget"), dict) else {}
     restored_hedge = _restore_draw_hedge(plan, report.get("draw_hedge"))
     restored_portfolio = _restore_line_portfolio(report.get("line_portfolio"))
+    restored_choose9 = _restore_choose9(plan, report.get("choose9"))
     return TicketPlan(
         issue=plan.issue,
         predictions=restored_predictions,
@@ -1228,7 +1292,41 @@ def _restore_analysis_recommendations(
         main_cost_yuan=int(budget.get("main_cost_yuan") or plan.main_cost_yuan),
         draw_hedge=restored_hedge,
         line_portfolio=restored_portfolio,
+        choose9_plan=restored_choose9,
     )
+
+
+def _restore_choose9(plan: TicketPlan, value: object) -> Choose9Plan | None:
+    if not isinstance(value, dict) or not isinstance(value.get("selections"), list):
+        return None
+    predictions = {prediction.match.seq: prediction for prediction in plan.predictions}
+    restored: list = []
+    try:
+        for item in value["selections"]:
+            if not isinstance(item, dict):
+                return None
+            seq = int(item["seq"])
+            picks = tuple(
+                pick
+                for pick in str(item.get("pick_text") or "").split("/")
+                if pick in OUTCOME_LABELS
+            )
+            if seq not in predictions or not picks:
+                return None
+            restored.append(replace(predictions[seq], picks=picks))
+        if len(restored) != 9:
+            return None
+        return Choose9Plan(
+            predictions=tuple(sorted(restored, key=lambda prediction: prediction.match.seq)),
+            allocated_budget_yuan=int(value.get("limit_yuan") or 0),
+            line_count=int(value.get("line_count") or 0),
+            cost_yuan=int(value.get("cost_yuan") or 0),
+            joint_coverage_probability=(
+                float(value.get("joint_coverage_probability") or 0.0) / 100.0
+            ),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _restore_line_portfolio(value: object) -> LinePortfolioPlan | None:
@@ -1347,6 +1445,7 @@ def _serialize_review_report(
             prediction["final_result_label"] = row.result.outcome_label
             prediction["outcome_hit"] = row.outcome_hit
             prediction["analysis_outcome_hit"] = row.analysis_outcome_hit
+            prediction["choose9_outcome_hit"] = row.choose9_outcome_hit
             prediction["diagnostic_tags"] = list(row.diagnostic_tags)
             prediction["post_match_evidence"] = normalize_evidence(
                 (post_match_evidence or {}).get(row.prediction.match.seq)

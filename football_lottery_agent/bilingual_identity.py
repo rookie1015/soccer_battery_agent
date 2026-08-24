@@ -83,7 +83,12 @@ def _fetch_json(url: str, cache_dir: Path) -> Any:
     try:
         text = _download_text(url, request)
         payload = loads_json(text)
-    except (OSError, urllib.error.URLError, json.JSONDecodeError, TypeError, ValueError):
+    except Exception:
+        # This is an optional identity-enrichment source. In Chaquopy, Android
+        # network failures arrive as Java exception proxies (for example
+        # java.net.SocketTimeoutException), which aren't subclasses of the
+        # equivalent Python OSError/TimeoutError classes. Never abort the full
+        # analysis because this lookup is unavailable.
         return cached
     cache_path.write_text(text, encoding="utf-8")
     return payload

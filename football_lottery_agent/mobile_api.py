@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import DrawHedgePlan, LinePortfolioPlan, Prediction, TicketPlan
+from .models import Choose9Plan, DrawHedgePlan, LinePortfolioPlan, Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
 
 
@@ -58,7 +58,48 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "metrics": metrics,
         "choose9_keep": list(plan.choose9_keep),
         "choose9_drop": list(plan.choose9_drop),
+        "choose9": _serialize_choose9(plan),
         "predictions": [_serialize_prediction(prediction, include_review_fields) for prediction in predictions],
+    }
+
+
+def _serialize_choose9(plan: TicketPlan) -> dict[str, object] | None:
+    choose9 = getattr(plan, "choose9_plan", None)
+    if not isinstance(choose9, Choose9Plan):
+        return None
+    all_sequences = {prediction.match.seq for prediction in plan.predictions}
+    keep = set(choose9.keep)
+    return {
+        "mode": "independent",
+        "budget_scope": "separate",
+        "limit_yuan": choose9.allocated_budget_yuan,
+        "line_count": choose9.line_count,
+        "cost_yuan": choose9.cost_yuan,
+        "joint_coverage_probability": round(choose9.joint_coverage_probability * 100, 2),
+        "keep": list(choose9.keep),
+        "drop": sorted(all_sequences - keep),
+        "selections": [
+            {
+                "seq": prediction.match.seq,
+                "home": prediction.match.home,
+                "away": prediction.match.away,
+                "pick_text": prediction.pick_text,
+                "picks": list(prediction.picks),
+                "pick_labels": [OUTCOME_LABELS[pick] for pick in prediction.picks],
+                "coverage_probability": round(
+                    min(
+                        1.0,
+                        sum(
+                            prediction.probabilities.get(outcome, 0.0)
+                            for outcome in prediction.picks
+                        ),
+                    )
+                    * 100,
+                    1,
+                ),
+            }
+            for prediction in choose9.predictions
+        ],
     }
 
 

@@ -20,7 +20,12 @@ from football_lottery_agent.strength_model import (
     _team_score,
 )
 from football_lottery_agent.collectors import RawMatch
-from football_lottery_agent.team_identity import TEAM_ALIASES, configure_team_identity, normalize_team_name
+from football_lottery_agent.team_identity import (
+    TEAM_ALIASES,
+    configure_team_identity,
+    normalize_team_name,
+    provider_team_match_score,
+)
 
 
 class StrengthModelTests(unittest.TestCase):
@@ -117,7 +122,7 @@ class StrengthModelTests(unittest.TestCase):
         self.assertTrue(reversed_sides)
         self.assertEqual(diagnostic["match_status"], "matched")
 
-    def test_unique_competition_and_kickoff_bootstraps_two_unknown_names(self) -> None:
+    def test_unique_competition_and_kickoff_does_not_guess_two_unknown_names(self) -> None:
         match = RawMatch(
             seq=1,
             kickoff="2026-08-07T01:45:00+08:00",
@@ -146,11 +151,11 @@ class StrengthModelTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             configure_team_identity(Path(temp_dir) / "team_identity.json")
             _learn_unique_context_provider_aliases([match], events)
-            self.assertEqual(_team_score("测试甲队", "Alpha Town"), 1.0)
-            self.assertEqual(_team_score("测试乙队", "Beta City"), 1.0)
+            self.assertEqual(_team_score("测试甲队", "Alpha Town"), 0.0)
+            self.assertEqual(_team_score("测试乙队", "Beta City"), 0.0)
         configure_team_identity(None)
 
-    def test_domestic_league_context_bootstraps_unknown_clubs_without_seed_aliases(self) -> None:
+    def test_domestic_league_context_also_refuses_unknown_orientation(self) -> None:
         match = RawMatch(
             seq=1,
             kickoff="2026-08-09T00:45:00+08:00",
@@ -179,8 +184,30 @@ class StrengthModelTests(unittest.TestCase):
         with TemporaryDirectory() as temp_dir:
             configure_team_identity(Path(temp_dir) / "team_identity.json")
             _learn_unique_context_provider_aliases([match], events)
-            self.assertEqual(_team_score("全新主队", "Brand New Eagles"), 1.0)
-            self.assertEqual(_team_score("全新客队", "Novel United"), 1.0)
+            self.assertEqual(_team_score("全新主队", "Brand New Eagles"), 0.0)
+            self.assertEqual(_team_score("全新客队", "Novel United"), 0.0)
+        configure_team_identity(None)
+
+    def test_seeded_identity_orients_unique_reversed_fixture(self) -> None:
+        match = RawMatch(12, "2026-08-24T02:45:00+08:00", "法甲", "巴黎", "雷恩")
+        events = {
+            "20260823": [
+                {
+                    "id": 5803105,
+                    "_provider_league_name": "Ligue 1",
+                    "status": {"utcTime": "2026-08-23T18:45:00Z"},
+                    "home": {"id": 9851, "name": "Rennes"},
+                    "away": {"id": 9847, "name": "PSG", "longName": "Paris Saint-Germain"},
+                }
+            ]
+        }
+        with TemporaryDirectory() as temp_dir:
+            configure_team_identity(Path(temp_dir) / "team_identity.json")
+            _learn_unique_context_provider_aliases([match], events)
+
+            self.assertEqual(provider_team_match_score("巴黎", "Renamed", "fotmob", 9847), 1.0)
+            self.assertEqual(provider_team_match_score("雷恩", "Renamed", "fotmob", 9851), 1.0)
+            self.assertEqual(provider_team_match_score("巴黎", "Rennes", "fotmob", 9851), 0.0)
         configure_team_identity(None)
 
     def test_unmatched_diagnostic_lists_ambiguous_same_time_candidates(self) -> None:

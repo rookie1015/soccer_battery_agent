@@ -1,8 +1,9 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from football_lottery_agent.bilingual_identity import _club_alias_variants, fetch_dbpedia_club_aliases
+from football_lottery_agent.bilingual_identity import _club_alias_variants, _fetch_json, fetch_dbpedia_club_aliases
 
 
 class BilingualIdentityTests(unittest.TestCase):
@@ -21,6 +22,16 @@ class BilingualIdentityTests(unittest.TestCase):
         with patch("football_lottery_agent.bilingual_identity._fetch_json", return_value=payload):
             aliases = fetch_dbpedia_club_aliases("德比郡", Path("unused"))
         self.assertEqual(aliases, ("Derby County F.C.", "Derby County"))
+
+    def test_optional_lookup_ignores_unclassified_platform_network_error(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            with patch(
+                "football_lottery_agent.bilingual_identity._download_text",
+                side_effect=RuntimeError("java.net.SocketTimeoutException"),
+            ):
+                payload = _fetch_json("https://dbpedia.org/sparql?query=test", Path(temp_dir))
+
+        self.assertIsNone(payload)
 
 
 if __name__ == "__main__":

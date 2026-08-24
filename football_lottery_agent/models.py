@@ -192,6 +192,27 @@ class LinePortfolioPlan:
 
 
 @dataclass(frozen=True)
+class Choose9Plan:
+    """An independently optimized rectangular ticket for the choose-nine game.
+
+    The selected fixtures and their outcomes are deliberately stored apart
+    from the fourteen-match ticket.  Both games may share the same match
+    probabilities, but their fixture selection, budget compression, line
+    count, and cost are separate decisions.
+    """
+
+    predictions: tuple[Prediction, ...]
+    allocated_budget_yuan: int
+    line_count: int
+    cost_yuan: int
+    joint_coverage_probability: float
+
+    @property
+    def keep(self) -> tuple[int, ...]:
+        return tuple(sorted(prediction.match.seq for prediction in self.predictions))
+
+
+@dataclass(frozen=True)
 class TicketPlan:
     issue: Issue
     predictions: tuple[Prediction, ...]
@@ -202,6 +223,7 @@ class TicketPlan:
     main_cost_yuan: int = 0
     draw_hedge: DrawHedgePlan | None = None
     line_portfolio: LinePortfolioPlan | None = None
+    choose9_plan: Choose9Plan | None = None
 
     @property
     def total_cost_yuan(self) -> int:

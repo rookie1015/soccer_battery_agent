@@ -24,6 +24,8 @@ def write_review_html(report: ReviewReport, output_path: str | Path) -> Path:
 
 def render_analysis_html(plan: TicketPlan) -> str:
     singles = sum(1 for pred in plan.predictions if len(pred.analysis_picks) == 1)
+    ticket_singles = sum(1 for pred in plan.predictions if len(pred.picks) == 1)
+    ticket_units = _ticket_units(plan)
     avg_confidence = sum(pred.confidence for pred in plan.predictions) / len(plan.predictions)
     purchase_deadline = _purchase_deadline_text(plan)
     match_tabs = "\n".join(_analysis_match_tab(pred, plan) for pred in plan.predictions)
@@ -31,17 +33,9 @@ def render_analysis_html(plan: TicketPlan) -> str:
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("模型单选", str(singles), "预算压缩前"),
-            _metric_card(
-                "独立线路",
-                str(plan.line_portfolio.line_count if plan.line_portfolio else 0),
-                "每行一注完整14场",
-            ),
-            _metric_card(
-                "平局候选",
-                str(len(plan.line_portfolio.draw_coverages) if plan.line_portfolio else 0),
-                "全部按概率分配线路",
-            ),
-            _metric_card("组合成本", f"{plan.total_cost_yuan}元", f"上限 {plan.max_ticket_cost_yuan}元"),
+            _metric_card("票面单选", str(ticket_singles), "实际出票选择"),
+            _metric_card("复式注数", str(ticket_units), "各场选择数相乘"),
+            _metric_card("复式成本", f"{plan.total_cost_yuan}元", f"上限 {plan.max_ticket_cost_yuan}元"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
         ]
     )
@@ -62,8 +56,9 @@ def render_analysis_html(plan: TicketPlan) -> str:
         </section>
         <div class="tab-panel active" id="outcome-panel">
           <section class="metrics">{cards}</section>
-          {_line_portfolio_section(plan)}
+          {_rectangular_ticket_section(plan)}
           {_draw_hedge_section(plan)}
+          {_choose9_ticket_section(plan)}
           <section class="split">
             <div class="panel">
               <h2>任九保留</h2>
@@ -87,6 +82,52 @@ def render_analysis_html(plan: TicketPlan) -> str:
         </div>
         """,
     )
+
+
+def _rectangular_ticket_section(plan: TicketPlan) -> str:
+    units = _ticket_units(plan)
+    selections = " · ".join(
+        f"{prediction.match.seq}:{prediction.pick_text}" for prediction in plan.predictions
+    )
+    return f"""
+    <section class="panel">
+      <div class="section-title">
+        <h2>正规复式出票</h2>
+        <span>{units} 注 · {plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元</span>
+      </div>
+      <p><strong>各场预算票面选择数相乘为 {units} 注，每注 2 元，实际成本 {plan.total_cost_yuan} 元。</strong></p>
+      <p class="subtle">实际票面：{escape(selections)}</p>
+      <p class="subtle">“模型建议”用于说明预算压缩前的判断范围；实际出票和计价只使用“预算票面”。</p>
+    </section>
+    """
+
+
+def _choose9_ticket_section(plan: TicketPlan) -> str:
+    choose9 = plan.choose9_plan
+    if choose9 is None:
+        return ""
+    selections = " · ".join(
+        f"{prediction.match.seq}:{prediction.pick_text}"
+        for prediction in choose9.predictions
+    )
+    return f"""
+    <section class="panel">
+      <div class="section-title">
+        <h2>任九独立优化</h2>
+        <span>{choose9.line_count} 注 · {choose9.cost_yuan}/{choose9.allocated_budget_yuan} 元</span>
+      </div>
+      <p><strong>独立票面：{escape(selections)}</strong></p>
+      <p class="subtle">理论联合覆盖率 {choose9.joint_coverage_probability:.2%}。任九与十四场共享基础概率，
+      但场次选择、复式票面和预算压缩分别优化；若两种玩法同时购买，金额需要相加。</p>
+    </section>
+    """
+
+
+def _ticket_units(plan: TicketPlan) -> int:
+    units = 1
+    for prediction in plan.predictions:
+        units *= max(1, len(prediction.picks))
+    return units
 
 
 def _line_portfolio_section(plan: TicketPlan) -> str:

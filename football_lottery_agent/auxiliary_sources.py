@@ -57,6 +57,15 @@ class AuxiliaryResult:
     audit: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class OddsReconciliation:
+    odds: tuple[float, float, float] | None
+    status: str
+    providers: tuple[str, ...] = ()
+    largest_gap: float = 0.0
+    mirrored_gap: float = 0.0
+
+
 def fetch_free_auxiliary_sources(
     matches: list[Any],
     issue: str,
@@ -250,6 +259,47 @@ def auxiliary_odds(rows: tuple[AuxiliaryMatch, ...]) -> tuple[float, float, floa
     return tuple(round(sum(values) / len(values), 3) for values in zip(*odds_rows))  # type: ignore[return-value]
 
 
+def reconcile_odds(rows: tuple[AuxiliaryMatch, ...], sina_odds: Any) -> OddsReconciliation:
+    """Use issue-specific sources to catch mirrored or corrupted Sina odds.
+
+    The fixed SFC sequence supplied by 500.com/ZGZCW preserves the lottery's
+    home/away order. A near-exact home/away mirror is safe to correct. Other
+    large conflicts use the issue-specific average instead of silently keeping
+    a primary market whose direction failed verification.
+    """
+    verified = auxiliary_odds(rows)
+    providers = tuple(dict.fromkeys(row.provider for row in rows if row.odds))
+    if sina_odds is None:
+        return OddsReconciliation(verified, "auxiliary_fallback" if verified else "missing", providers)
+    primary = (float(sina_odds.home), float(sina_odds.draw), float(sina_odds.away))
+    if verified is None:
+        return OddsReconciliation(primary, "primary", providers)
+
+    primary_probs = _implied_probabilities(primary)
+    verified_probs = _implied_probabilities(verified)
+    mirrored_probs = (primary_probs[2], primary_probs[1], primary_probs[0])
+    largest_gap = max(abs(left - right) for left, right in zip(primary_probs, verified_probs))
+    mirrored_gap = max(abs(left - right) for left, right in zip(mirrored_probs, verified_probs))
+
+    if largest_gap >= 0.20 and mirrored_gap <= 0.05 and mirrored_gap + 0.12 <= largest_gap:
+        return OddsReconciliation(
+            (primary[2], primary[1], primary[0]),
+            "mirrored_primary_corrected",
+            providers,
+            largest_gap,
+            mirrored_gap,
+        )
+    if largest_gap >= 0.12:
+        return OddsReconciliation(
+            verified,
+            "auxiliary_conflict_override",
+            providers,
+            largest_gap,
+            mirrored_gap,
+        )
+    return OddsReconciliation(primary, "primary_verified", providers, largest_gap, mirrored_gap)
+
+
 def auxiliary_notes(
     rows: tuple[AuxiliaryMatch, ...],
     sina_odds: Any,
@@ -275,22 +325,23 @@ def auxiliary_notes(
             + "、".join(kickoff_differences)
             + f"，新浪为{sina_kickoff}；仅提示差异，未覆盖新浪主源。"
         )
-    aux_odds = auxiliary_odds(rows)
-    if not aux_odds:
+    decision = reconcile_odds(rows, sina_odds)
+    if not auxiliary_odds(rows):
         notes.append(f"辅助信源核验：{providers}已匹配本场赛程，未提供可比较欧赔。")
         return notes
     if sina_odds is None:
         notes.append(f"辅助信源补缺：新浪欧赔缺失，使用{odds_providers}公开欧赔均值。")
         return notes
-    sina_probs = _implied_probabilities((float(sina_odds.home), float(sina_odds.draw), float(sina_odds.away)))
-    aux_probs = _implied_probabilities(aux_odds)
-    largest_gap = max(abs(a - b) for a, b in zip(sina_probs, aux_probs))
-    sina_direction = max(range(3), key=sina_probs.__getitem__)
-    aux_direction = max(range(3), key=aux_probs.__getitem__)
-    if sina_direction != aux_direction or largest_gap >= 0.08:
+    if decision.status == "mirrored_primary_corrected":
         notes.append(
-            f"辅助信源核验：{odds_providers}与新浪赔率存在明显差异（最大去水概率差{largest_gap:.1%}），"
-            "仅提示差异，未覆盖新浪主源。"
+            f"辅助信源纠错：{odds_providers}确认新浪赔率主客镜像（原最大去水概率差"
+            f"{decision.largest_gap:.1%}），已交换主胜与客胜赔率。"
+        )
+        return notes
+    if decision.status == "auxiliary_conflict_override":
+        notes.append(
+            f"辅助信源纠错：{odds_providers}与新浪赔率严重冲突（最大去水概率差"
+            f"{decision.largest_gap:.1%}），已使用期次专属辅助赔率，未继续采用冲突主源。"
         )
         return notes
     notes.append(f"辅助信源核验：{odds_providers}公开赔率与新浪市场方向一致。")

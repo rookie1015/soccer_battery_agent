@@ -17,7 +17,7 @@ from football_lottery_agent.review import (
     parse_sporttery_result_row,
     render_review_markdown,
 )
-from football_lottery_agent.strategy import _fit_predictions_to_budget, build_ticket_plan
+from football_lottery_agent.strategy import _build_line_portfolio, _fit_predictions_to_budget, build_ticket_plan
 
 
 class ReviewTests(unittest.TestCase):
@@ -301,6 +301,8 @@ class ReviewTests(unittest.TestCase):
 
     def test_review_records_line_portfolio_hit_and_draw_combination_coverage(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        portfolio = _build_line_portfolio(plan.predictions, max_ticket_cost_yuan=2000)
+        plan = replace(plan, line_portfolio=portfolio, main_cost_yuan=portfolio.cost_yuan)
         self.assertIsNotNone(plan.line_portfolio)
         assert plan.line_portfolio is not None
         result_by_outcome = {
@@ -324,6 +326,40 @@ class ReviewTests(unittest.TestCase):
         self.assertEqual(review.line_portfolio_best_hits, 14)
         self.assertGreater(review.actual_draw_combination_lines, 0)
         self.assertIn("独立线路：最佳一注命中 14/14", render_review_markdown(review))
+
+    def test_review_scores_choose9_with_its_independent_ticket_picks(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2000)
+        assert plan.choose9_plan is not None
+        main_by_seq = {prediction.match.seq: prediction for prediction in plan.predictions}
+        expanded = next(
+            prediction
+            for prediction in plan.choose9_plan.predictions
+            if any(pick not in main_by_seq[prediction.match.seq].picks for pick in prediction.picks)
+        )
+        extra_outcome = next(
+            pick for pick in expanded.picks if pick not in main_by_seq[expanded.match.seq].picks
+        )
+        scores = {"3": (1, 0), "1": (0, 0), "0": (0, 1)}
+        results = {
+            prediction.match.seq: MatchResult(
+                seq=prediction.match.seq,
+                home_goals=scores[prediction.picks[0]][0],
+                away_goals=scores[prediction.picks[0]][1],
+            )
+            for prediction in plan.predictions
+        }
+        results[expanded.match.seq] = MatchResult(
+            seq=expanded.match.seq,
+            home_goals=scores[extra_outcome][0],
+            away_goals=scores[extra_outcome][1],
+        )
+
+        review = build_review(plan, results)
+        row = next(item for item in review.rows if item.result.seq == expanded.match.seq)
+
+        self.assertFalse(row.outcome_hit)
+        self.assertTrue(row.choose9_outcome_hit)
+        self.assertEqual(review.keep_hits, 9)
 
 
 def _result_for_prediction(prediction):

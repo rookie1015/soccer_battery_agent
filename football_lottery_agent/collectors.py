@@ -340,9 +340,10 @@ def collect_issue(
         polymarket = polymarket_by_seq.get(item.seq)
         polymarket_notes = _polymarket_notes(polymarket)
         auxiliary_rows = auxiliary_result.by_seq.get(item.seq, ())
-        from .auxiliary_sources import auxiliary_notes, auxiliary_odds
+        from .auxiliary_sources import auxiliary_notes, auxiliary_odds, reconcile_odds
 
         auxiliary_fallback_odds = auxiliary_odds(auxiliary_rows)
+        odds_reconciliation = reconcile_odds(auxiliary_rows, detail.odds)
         auxiliary_verification_notes = auxiliary_notes(auxiliary_rows, detail.odds, item.kickoff)
         media_notes = _mainstream_media_notes(media_items)
         has_real_odds = (
@@ -367,10 +368,15 @@ def collect_issue(
             if auxiliary_fallback_odds is not None
             else None
         )
+        verified_detail_row = (
+            OddsRow(item.seq, *odds_reconciliation.odds)
+            if detail.odds is not None and odds_reconciliation.odds is not None
+            else None
+        )
         odds = (
             odds_by_seq.get(item.seq)
             or (foreign.odds if foreign else None)
-            or detail.odds
+            or verified_detail_row
             or fallback_row
             or OddsRow(item.seq, 2.35, 3.15, 2.95)
         )
@@ -379,8 +385,8 @@ def collect_issue(
             odds_source = (
                 "foreign_bookmakers"
                 if foreign
-                else "sina_average_euro"
-                if detail.odds
+                else _reconciled_odds_source(odds_reconciliation.status)
+                if verified_detail_row
                 else "free_auxiliary_average"
                 if fallback_row
                 else "default_placeholder"
@@ -395,6 +401,11 @@ def collect_issue(
         signals = _apply_sina_detail_to_signals(signals, detail)
         strength_source = _strength_source(strength)
         selected_market = _selected_market_source(detail, foreign)
+        if not foreign and item.seq not in odds_by_seq and odds_reconciliation.status in {
+            "mirrored_primary_corrected",
+            "auxiliary_conflict_override",
+        }:
+            selected_market = _reconciled_market_source(odds_reconciliation)
         if odds_source == "free_auxiliary_average":
             selected_market = {
                 "provider": "free_auxiliary_average",
@@ -1565,6 +1576,28 @@ def _selected_market_source(detail: SinaDetail, foreign: Any) -> dict[str, Any]:
         )
         if key in raw
     } | {"provider": "sina_average_euro"}
+
+
+def _reconciled_odds_source(status: str) -> str:
+    if status == "mirrored_primary_corrected":
+        return "sina_average_euro_home_away_corrected"
+    if status == "auxiliary_conflict_override":
+        return "free_auxiliary_conflict_override"
+    return "sina_average_euro"
+
+
+def _reconciled_market_source(decision: Any) -> dict[str, Any]:
+    home, draw, away = decision.odds
+    inverse = {"3": 1.0 / home, "1": 1.0 / draw, "0": 1.0 / away}
+    total = sum(inverse.values())
+    return {
+        "provider": _reconciled_odds_source(str(decision.status)),
+        "market_consensus": {key: value / total for key, value in inverse.items()},
+        "verification_status": decision.status,
+        "verification_providers": list(decision.providers),
+        "original_max_probability_gap": round(float(decision.largest_gap), 6),
+        "mirrored_probability_gap": round(float(decision.mirrored_gap), 6),
+    }
 
 
 def _data_usage_summary(audit: dict[str, Any], foreign_selected: bool) -> dict[str, list[str]]:

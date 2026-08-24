@@ -26,6 +26,11 @@ class MobileApiTests(unittest.TestCase):
         self.assertEqual(report["metrics"]["match_count"], 14)
         self.assertEqual(len(report["choose9_keep"]), 9)
         self.assertEqual(len(report["choose9_drop"]), 5)
+        self.assertEqual(report["choose9"]["mode"], "independent")
+        self.assertEqual(report["choose9"]["budget_scope"], "separate")
+        self.assertEqual(len(report["choose9"]["selections"]), 9)
+        self.assertEqual(report["choose9"]["cost_yuan"], report["choose9"]["line_count"] * 2)
+        self.assertLessEqual(report["choose9"]["cost_yuan"], report["choose9"]["limit_yuan"])
         self.assertEqual(len(report["predictions"]), 14)
 
         first = report["predictions"][0]
@@ -50,9 +55,11 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("budget", report)
         self.assertLessEqual(report["budget"]["total_cost_yuan"], report["budget"]["limit_yuan"])
         self.assertIsNone(report["draw_hedge"])
-        self.assertIsNotNone(report["line_portfolio"])
-        self.assertEqual(len(report["line_portfolio"]["lines"]), 1000)
-        self.assertTrue(report["line_portfolio"]["draw_coverages"])
+        self.assertIsNone(report["line_portfolio"])
+        expected_units = 1
+        for prediction in report["predictions"]:
+            expected_units *= len(prediction["pick_labels"])
+        self.assertEqual(report["budget"]["total_cost_yuan"], expected_units * 2)
 
 
 if __name__ == "__main__":

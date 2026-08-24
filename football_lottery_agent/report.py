@@ -50,7 +50,7 @@ def render_markdown(plan: TicketPlan) -> str:
         if quota:
             lines.append(f"- 额度：{quota}")
         lines.append("")
-    lines.append("## 预算组合")
+    lines.append("## 正规复式出票")
     lines.append("")
     if plan.line_portfolio:
         portfolio = plan.line_portfolio
@@ -64,9 +64,12 @@ def render_markdown(plan: TicketPlan) -> str:
         )
         lines.append("- 规则：模型建议中保留的每一个平局都按概率获得线路配额，不再只选一场对冲。")
     else:
+        units = _ticket_units(plan.predictions)
         lines.append(
-            f"- 主票：分配 {plan.main_allocated_budget_yuan} 元，实际 {plan.main_cost_yuan} 元。"
+            f"- 主票：各场预算票面选择数相乘为 {units} 注，每注 2 元，"
+            f"实际 {plan.main_cost_yuan}/{plan.main_allocated_budget_yuan} 元。"
         )
+        lines.append("- 计价规则：仅以“预算票面”列作为实际复式选择；“模型建议”列不参与出票计价。")
     if plan.draw_hedge and not plan.line_portfolio:
         hedge = plan.draw_hedge
         candidate = next(
@@ -87,11 +90,37 @@ def render_markdown(plan: TicketPlan) -> str:
         f"- 组合总成本：{plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。"
     )
     lines.append("")
-    lines.append("## 任九建议")
+    lines.append("## 任九建议（独立优化）")
     lines.append("")
+    if plan.choose9_plan:
+        choose9 = plan.choose9_plan
+        lines.append(
+            f"- 任九票：独立选择 9 场，{choose9.line_count} 注，每注 2 元，"
+            f"实际 {choose9.cost_yuan}/{choose9.allocated_budget_yuan} 元。"
+        )
+        lines.append(
+            "- 预算口径：任九与十四场共享基础概率，但场次和票面分别优化；"
+            "两种玩法的金额各自计算，若同时购买需要相加。"
+        )
+        lines.append(
+            f"- 理论联合覆盖率：{choose9.joint_coverage_probability:.2%}；"
+            "这是按各场概率近似独立计算的模型值，不代表中奖保证。"
+        )
     lines.append(f"- 建议保留：{_join_seq(plan.choose9_keep)}")
     lines.append(f"- 建议剔除：{_join_seq(plan.choose9_drop)}")
     lines.append("")
+    if plan.choose9_plan:
+        lines.append("| 序号 | 对阵 | 任九票面 | 本场覆盖率 |")
+        lines.append("| --- | --- | --- | ---: |")
+        for prediction in plan.choose9_plan.predictions:
+            coverage = sum(
+                prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks
+            )
+            lines.append(
+                f"| {prediction.match.seq} | {prediction.match.home} vs {prediction.match.away} | "
+                f"{prediction.pick_text} | {min(1.0, coverage):.1%} |"
+            )
+        lines.append("")
     lines.append("## 14场逐场建议")
     lines.append("")
     lines.append("| 序号 | 联赛 | 对阵 | 模型建议 | 预算票面 | 置信度 | 概率(3/1/0) |")
@@ -140,6 +169,13 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append("- `0` = 客胜")
     lines.append("")
     return "\n".join(lines)
+
+
+def _ticket_units(predictions: tuple[Prediction, ...]) -> int:
+    units = 1
+    for prediction in predictions:
+        units *= max(1, len(prediction.picks))
+    return units
 
 
 def write_report(plan: TicketPlan, output_path: str | Path) -> Path:

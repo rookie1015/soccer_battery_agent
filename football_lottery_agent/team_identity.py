@@ -104,6 +104,10 @@ SEED_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "维京古": ("vikingur reykjavik",),
     "本菲卡": ("benfica",),
     "哈茨": ("hearts",),
+    "巴黎": ("paris saint-germain", "paris sg", "psg"),
+    "巴黎圣曼": ("paris saint-germain", "paris sg", "psg"),
+    "巴黎圣日耳曼": ("paris saint-germain", "paris sg", "psg"),
+    "雷恩": ("rennes", "stade rennais"),
 }
 
 # Keep this object stable: collectors and other modules import it by reference.
@@ -113,6 +117,7 @@ _IDENTITY_LOCK = threading.RLock()
 _IDENTITY_PATH: Path | None = None
 _IDENTITY_DATA: dict[str, Any] = {"schema_version": 1, "teams": {}}
 _SAFE_CLUB_SUFFIXES = {"afc", "bk", "cf", "club", "fc", "ff", "fk", "football", "if", "sc"}
+_UNSAFE_ORIENTATION_SOURCES = {"unique_competition_kickoff"}
 _LATIN_TRANSLATION = str.maketrans({"ø": "o", "ł": "l", "đ": "d", "ð": "d", "þ": "th", "æ": "ae", "œ": "oe"})
 
 
@@ -137,8 +142,9 @@ def configure_team_identity(path: str | Path | None) -> None:
             return
         if not isinstance(raw, dict) or not isinstance(raw.get("teams"), dict):
             return
-        _IDENTITY_DATA = {"schema_version": 1, "teams": raw["teams"]}
-        for canonical, record in raw["teams"].items():
+        sanitized_teams, sanitized = _sanitize_persisted_teams(raw["teams"])
+        _IDENTITY_DATA = {"schema_version": 1, "teams": sanitized_teams}
+        for canonical, record in sanitized_teams.items():
             if not isinstance(canonical, str) or not isinstance(record, dict):
                 continue
             aliases = list(TEAM_ALIASES.get(canonical, ()))
@@ -147,6 +153,8 @@ def configure_team_identity(path: str | Path | None) -> None:
                 if isinstance(name, str) and name.strip() and not _contains_normalized(aliases, name):
                     aliases.append(name.strip())
             TEAM_ALIASES[canonical] = tuple(aliases)
+        if sanitized:
+            _save_identity_data()
 
 
 def normalize_team_name(value: str) -> str:
@@ -270,6 +278,65 @@ def _canonical_name(value: str) -> str:
         if any(normalized == normalize_team_name(alias) for alias in aliases):
             return canonical
     return value.strip()
+
+
+def _sanitize_persisted_teams(teams: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Remove aliases whose old kickoff-only learner guessed the wrong side.
+
+    Kickoff and competition can identify a fixture, but not its orientation.
+    When such a learned alias contradicts a shipped, verified seed identity,
+    discard both that alias and the provider ID learned with it.
+    """
+    output: dict[str, Any] = {}
+    changed = False
+    for canonical, raw_record in teams.items():
+        if not isinstance(canonical, str) or not isinstance(raw_record, dict):
+            output[canonical] = raw_record
+            continue
+        record = dict(raw_record)
+        aliases = list(raw_record.get("aliases", ()))
+        blocked_providers: set[str] = set()
+        kept_aliases: list[Any] = []
+        for item in aliases:
+            source = str(item.get("source") or "") if isinstance(item, dict) else ""
+            name = str(item.get("name") or "") if isinstance(item, dict) else str(item or "")
+            provider = str(item.get("provider") or "") if isinstance(item, dict) else ""
+            if (
+                source in _UNSAFE_ORIENTATION_SOURCES
+                and canonical in SEED_TEAM_ALIASES
+                and not _matches_seed_identity(canonical, name)
+            ):
+                changed = True
+                if provider:
+                    blocked_providers.add(provider)
+                continue
+            kept_aliases.append(item)
+        record["aliases"] = kept_aliases
+        provider_ids = dict(raw_record.get("provider_ids", {}))
+        for provider in blocked_providers:
+            has_supported_alias = any(
+                isinstance(item, dict)
+                and str(item.get("provider") or "") == provider
+                and str(item.get("source") or "") not in _UNSAFE_ORIENTATION_SOURCES
+                for item in kept_aliases
+            )
+            if not has_supported_alias and provider in provider_ids:
+                provider_ids.pop(provider, None)
+                changed = True
+        record["provider_ids"] = provider_ids
+        output[canonical] = record
+    return output, changed
+
+
+def _matches_seed_identity(canonical: str, candidate: str) -> bool:
+    normalized = normalize_team_name(candidate)
+    if not normalized:
+        return False
+    for value in (canonical, *SEED_TEAM_ALIASES.get(canonical, ())):
+        seed = normalize_team_name(value)
+        if seed == normalized or _safe_suffix_variant(seed, normalized):
+            return True
+    return False
 
 
 def _safe_suffix_variant(first: str, second: str) -> bool:

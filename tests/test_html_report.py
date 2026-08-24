@@ -15,8 +15,11 @@ class HtmlReportTests(unittest.TestCase):
 
         self.assertIn("Analysis Dashboard", html)
         self.assertIn("逐场胜平负分析", html)
-        self.assertIn("预算内多平线路组合", html)
-        self.assertIn("查看全部 1000 条投注线路", html)
+        self.assertIn("正规复式出票", html)
+        self.assertIn("任九独立优化", html)
+        self.assertIn("任九与十四场共享基础概率", html)
+        self.assertIn("各场预算票面选择数相乘", html)
+        self.assertNotIn("查看全部 1000 条投注线路", html)
         self.assertIn('id="outcome-panel"', html)
         self.assertIn("class=\"prob\"", html)
         self.assertIn("置信度", html)

@@ -119,9 +119,27 @@ data class AnalysisReport(
     val metrics: ReportMetrics,
     val choose9Keep: List<Int>,
     val choose9Drop: List<Int>,
+    val choose9: Choose9Report?,
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
     val modelCalibration: ModelCalibration?,
+)
+
+data class Choose9Report(
+    val lineCount: Int,
+    val costYuan: Int,
+    val limitYuan: Int,
+    val jointCoverageProbability: Double,
+    val selections: List<Choose9Selection>,
+)
+
+data class Choose9Selection(
+    val seq: Int,
+    val home: String,
+    val away: String,
+    val pickText: String,
+    val pickLabels: List<String>,
+    val coverageProbability: Double,
 )
 
 data class LinePortfolioReport(
@@ -229,6 +247,7 @@ data class MatchPrediction(
     val finalResult: String,
     val finalResultLabel: String,
     val outcomeHit: Boolean,
+    val choose9OutcomeHit: Boolean,
     val diagnosticTags: List<String>,
     val postMatchEvidence: List<PostMatchEvidence>,
 )
@@ -984,6 +1003,24 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             ),
             choose9Keep = json.optJSONArray("choose9_keep").orEmptyArray().toIntList(),
             choose9Drop = json.optJSONArray("choose9_drop").orEmptyArray().toIntList(),
+            choose9 = json.optJSONObject("choose9")?.let { choose9 ->
+                Choose9Report(
+                    lineCount = choose9.optInt("line_count"),
+                    costYuan = choose9.optInt("cost_yuan"),
+                    limitYuan = choose9.optInt("limit_yuan"),
+                    jointCoverageProbability = choose9.optDouble("joint_coverage_probability"),
+                    selections = choose9.optJSONArray("selections").orEmptyArray().mapObjects { selection ->
+                        Choose9Selection(
+                            seq = selection.optInt("seq"),
+                            home = selection.optString("home"),
+                            away = selection.optString("away"),
+                            pickText = selection.optString("pick_text"),
+                            pickLabels = selection.optJSONArray("pick_labels").orEmptyArray().toStringList(),
+                            coverageProbability = selection.optDouble("coverage_probability"),
+                        )
+                    },
+                )
+            },
             predictions = json.optJSONArray("predictions").orEmptyArray().mapObjects { parsePrediction(it) },
             reviewDiagnostics = json.optJSONObject("review_diagnostics")?.let { diagnostics ->
                 ReviewDiagnostics(
@@ -1046,6 +1083,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             finalResult = json.optString("final_result"),
             finalResultLabel = json.optString("final_result_label"),
             outcomeHit = json.optBoolean("outcome_hit"),
+            choose9OutcomeHit = json.optBoolean("choose9_outcome_hit", json.optBoolean("outcome_hit")),
             diagnosticTags = json.optJSONArray("diagnostic_tags").orEmptyArray().toStringList(),
             postMatchEvidence = json.optJSONArray("post_match_evidence").orEmptyArray().mapObjects { item ->
                 PostMatchEvidence(
@@ -1216,6 +1254,24 @@ class FootballLotteryApi(private val baseUrl: String) {
             ),
             choose9Keep = json.optJSONArray("choose9_keep").orEmptyArray().toIntList(),
             choose9Drop = json.optJSONArray("choose9_drop").orEmptyArray().toIntList(),
+            choose9 = json.optJSONObject("choose9")?.let { choose9 ->
+                Choose9Report(
+                    lineCount = choose9.optInt("line_count"),
+                    costYuan = choose9.optInt("cost_yuan"),
+                    limitYuan = choose9.optInt("limit_yuan"),
+                    jointCoverageProbability = choose9.optDouble("joint_coverage_probability"),
+                    selections = choose9.optJSONArray("selections").orEmptyArray().mapObjects { selection ->
+                        Choose9Selection(
+                            seq = selection.optInt("seq"),
+                            home = selection.optString("home"),
+                            away = selection.optString("away"),
+                            pickText = selection.optString("pick_text"),
+                            pickLabels = selection.optJSONArray("pick_labels").orEmptyArray().toStringList(),
+                            coverageProbability = selection.optDouble("coverage_probability"),
+                        )
+                    },
+                )
+            },
             predictions = json.optJSONArray("predictions").orEmptyArray().mapObjects { parsePrediction(it) },
             reviewDiagnostics = json.optJSONObject("review_diagnostics")?.let { diagnostics ->
                 ReviewDiagnostics(
@@ -1278,6 +1334,7 @@ class FootballLotteryApi(private val baseUrl: String) {
             finalResult = json.optString("final_result"),
             finalResultLabel = json.optString("final_result_label"),
             outcomeHit = json.optBoolean("outcome_hit"),
+            choose9OutcomeHit = json.optBoolean("choose9_outcome_hit", json.optBoolean("outcome_hit")),
             diagnosticTags = json.optJSONArray("diagnostic_tags").orEmptyArray().toStringList(),
             postMatchEvidence = json.optJSONArray("post_match_evidence").orEmptyArray().mapObjects { item ->
                 PostMatchEvidence(
@@ -1564,7 +1621,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.3.4（10） · 精简预算组合展示",
+                        "App 版本 0.3.5（11） · 球队别名源网络容错",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1969,7 +2026,7 @@ private fun SummaryCard(report: AnalysisReport) {
     val keepSet = report.choose9Keep.toSet()
     val choose9Total = report.choose9Keep.size
     val choose9Hits = report.predictions.count { prediction ->
-        prediction.seq in keepSet && prediction.outcomeHit
+        prediction.seq in keepSet && prediction.choose9OutcomeHit
     }
     val choose9Rate = if (choose9Total > 0) choose9Hits * 100.0 / choose9Total else 0.0
     val purchaseCostText = purchaseCostText(report)
@@ -2027,6 +2084,37 @@ private fun SummaryCard(report: AnalysisReport) {
                 )
             }
             if (!isReview) {
+                val ticketUnits = report.predictions.fold(1L) { total, prediction ->
+                    total * recommendedChoiceCount(prediction).toLong()
+                }
+                Text(
+                    text = "正规复式：各场预算票面选择数相乘，共 $ticketUnits 注 × 2 元 = ${ticketUnits * 2L} 元。",
+                    color = Color(0xFF2364AA),
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Bold,
+                )
+                report.choose9?.let { choose9 ->
+                    Text(
+                        text = "任九独立复式：${choose9.lineCount} 注 × 2 元 = ${choose9.costYuan} 元" +
+                            "（独立上限 ${choose9.limitYuan} 元）。",
+                        color = Color(0xFF16845B),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        text = "任九票面：" + choose9.selections.joinToString(" · ") { selection ->
+                            "${selection.seq}:${selection.pickText}"
+                        },
+                        color = Color(0xFF344054),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                    Text(
+                        text = "理论联合覆盖率 ${"%.2f".format(choose9.jointCoverageProbability)}%；" +
+                            "任九与十四场分别计价，若同时购买金额需要相加。",
+                        color = Color(0xFF667085),
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                }
                 report.drawHedge?.let { hedge ->
                     Text(
                         text = "平局对冲：第 ${hedge.candidateSeq} 场 ${hedge.home} vs ${hedge.away} 固定单选平；" +
@@ -2567,15 +2655,25 @@ private fun purchaseCostText(report: AnalysisReport): String {
     if (units <= 0L) {
         return ""
     }
-    return "购彩 ¥${"%,d".format(units * 2L)}"
+    val fourteenCost = "¥${"%,d".format(units * 2L)}"
+    val choose9Cost = report.choose9?.let { " · 任九 ¥${"%,d".format(it.costYuan)}" }.orEmpty()
+    return "十四场 $fourteenCost$choose9Cost"
 }
 
 private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
     appendLine("足球彩票分析 · 第 ${report.issue} 期")
     appendLine(deadlineText(report))
     purchaseCostText(report).takeIf { it.isNotBlank() }?.let(::appendLine)
-    appendLine("任选九保留：${report.choose9Keep.joinToString("、")}")
-    appendLine("建议剔除：${report.choose9Drop.joinToString("、")}")
+    appendLine("任九保留：${report.choose9Keep.joinToString("、")}")
+    appendLine("任九剔除：${report.choose9Drop.joinToString("、")}")
+    report.choose9?.let { choose9 ->
+        appendLine("任九独立票：${choose9.lineCount} 注 / ${choose9.costYuan} 元")
+        appendLine(
+            "任九票面：" + choose9.selections.joinToString(" · ") { selection ->
+                "${selection.seq}:${selection.pickText}"
+            },
+        )
+    }
     appendLine()
     report.linePortfolio?.let { portfolio ->
         appendLine("预算组合：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")

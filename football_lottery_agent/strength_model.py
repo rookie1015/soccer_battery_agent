@@ -712,11 +712,12 @@ def _learn_unique_context_provider_aliases(
     matches: list[RawMatch],
     events_by_date: dict[str, list[dict[str, Any]]],
 ) -> None:
-    """Bootstrap two unknown names from a unique competition and kickoff.
+    """Persist a unique fixture only when team evidence proves orientation.
 
     A provider fixture is accepted only when it is the sole event in the
     mapped competition within 15 minutes and belongs to only one local match.
-    This deliberately leaves same-time groups unresolved instead of guessing.
+    Competition and kickoff alone cannot tell which side is home, so two
+    entirely unknown labels are deliberately left unresolved.
     """
     candidates_by_seq: dict[int, list[dict[str, Any]]] = {}
     owners: dict[str, set[int]] = {}
@@ -739,8 +740,15 @@ def _learn_unique_context_provider_aliases(
             continue
         home = event.get("home") or {}
         away = event.get("away") or {}
-        _register_fotmob_side(match.home, home, 0.99, "unique_competition_kickoff")
-        _register_fotmob_side(match.away, away, 0.99, "unique_competition_kickoff")
+        direct = _fotmob_side_score(match.home, home) + _fotmob_side_score(match.away, away)
+        reverse = _fotmob_side_score(match.home, away) + _fotmob_side_score(match.away, home)
+        if max(direct, reverse) < 0.8 or abs(direct - reverse) < 0.4:
+            continue
+        reversed_sides = reverse > direct
+        home_side = away if reversed_sides else home
+        away_side = home if reversed_sides else away
+        _register_fotmob_side(match.home, home_side, 0.99, "identity_oriented_unique_fixture")
+        _register_fotmob_side(match.away, away_side, 0.99, "identity_oriented_unique_fixture")
 
 
 def _learn_one_sided_provider_aliases(
@@ -832,7 +840,10 @@ def _learn_bilingual_provider_aliases(
         for name, future in futures.items():
             try:
                 aliases_by_name[name] = future.result()
-            except (OSError, TimeoutError, urllib.error.URLError):
+            except Exception:
+                # DBpedia is optional, and Chaquopy exposes Android networking
+                # failures as Java exception proxies rather than Python socket
+                # exceptions. Treat every lookup failure as an empty alias set.
                 aliases_by_name[name] = ()
 
     claimed_events: set[str] = set()

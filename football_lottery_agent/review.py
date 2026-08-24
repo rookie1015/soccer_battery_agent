@@ -65,6 +65,7 @@ class MatchReview:
     result: MatchResult
     outcome_hit: bool
     analysis_outcome_hit: bool
+    choose9_outcome_hit: bool | None
     top_score_hit: bool
     score_top3_hit: bool
     bucket: str
@@ -211,7 +212,7 @@ class ReviewReport:
 
     @property
     def keep_hits(self) -> int:
-        return sum(1 for row in self.keep_rows if row.outcome_hit)
+        return sum(1 for row in self.keep_rows if row.choose9_outcome_hit)
 
     @property
     def effective_drops(self) -> int:
@@ -378,6 +379,14 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
         raise ValueError(f"Missing results for match seq: {', '.join(str(item) for item in missing)}")
 
     keep = set(plan.choose9_keep)
+    choose9_picks = {
+        prediction.match.seq: prediction.picks
+        for prediction in plan.choose9_plan.predictions
+    } if plan.choose9_plan else {
+        prediction.match.seq: prediction.picks
+        for prediction in plan.predictions
+        if prediction.match.seq in keep
+    }
     for prediction in plan.predictions:
         result = results[prediction.match.seq]
         score_texts = tuple(item.text for item in prediction.scorelines)
@@ -388,6 +397,11 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
                 result=result,
                 outcome_hit=result.unplayed or result.outcome in prediction.picks,
                 analysis_outcome_hit=result.unplayed or result.outcome in prediction.analysis_picks,
+                choose9_outcome_hit=(
+                    result.unplayed or result.outcome in choose9_picks[result.seq]
+                    if result.seq in choose9_picks
+                    else None
+                ),
                 top_score_hit=(
                     result.score_exact
                     and not result.unplayed

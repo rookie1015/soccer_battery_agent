@@ -7,6 +7,7 @@ from math import exp, log
 from random import Random
 
 from .models import (
+    Choose9Plan,
     DrawHedgePlan,
     DrawLineCoverage,
     Issue,
@@ -52,22 +53,35 @@ def build_ticket_plan(
         evidence_aware_secondary=evidence_aware_secondary,
         selection_policy=selection_policy,
     )
-    line_portfolio = _build_line_portfolio(
+    ticket_predictions = _fit_predictions_to_budget(
         raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
     )
-    choose9_keep, choose9_drop = _select_choose9(raw_predictions)
+    choose9_plan = _build_choose9_plan(
+        raw_predictions,
+        max_ticket_cost_yuan=max_ticket_cost_yuan,
+    )
+    choose9_keep = choose9_plan.keep
+    choose9_drop = tuple(
+        sorted(
+            prediction.match.seq
+            for prediction in raw_predictions
+            if prediction.match.seq not in choose9_keep
+        )
+    )
+    main_cost_yuan = ticket_cost_yuan(ticket_predictions)
 
     return TicketPlan(
         issue=issue,
-        predictions=raw_predictions,
+        predictions=ticket_predictions,
         choose9_keep=choose9_keep,
         choose9_drop=choose9_drop,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
         main_allocated_budget_yuan=max_ticket_cost_yuan,
-        main_cost_yuan=line_portfolio.cost_yuan,
+        main_cost_yuan=main_cost_yuan,
         draw_hedge=None,
-        line_portfolio=line_portfolio,
+        line_portfolio=None,
+        choose9_plan=choose9_plan,
     )
 
 
@@ -632,28 +646,116 @@ def _number_or_none(value: object) -> float | None:
         return None
 
 
-def _select_choose9(predictions: tuple[Prediction, ...]) -> tuple[tuple[int, ...], tuple[int, ...]]:
-    """Select nine fixtures for the chance that all nine recommended picks land.
+def _build_choose9_plan(
+    predictions: tuple[Prediction, ...],
+    *,
+    max_ticket_cost_yuan: int,
+) -> Choose9Plan:
+    """Jointly optimize the nine fixtures and their rectangular selections.
 
-    A fixture's relevant probability is the total probability covered by its selected
-    outcomes, rather than its raw confidence or number of selected outcomes.
+    This is intentionally independent from the fourteen-match ticket.  Each
+    fixture offers its strongest single, double, and three-way coverage; an
+    exact dynamic program then chooses exactly nine fixtures and a product of
+    choice counts that fits the choose-nine budget while maximizing estimated
+    joint coverage.
     """
-    ranked = sorted(
-        predictions,
-        key=lambda prediction: (
-            _pick_coverage_probability(prediction),
-            prediction.confidence,
-            -prediction.match.seq,
-        ),
-        reverse=True,
+    max_units = max(1, max_ticket_cost_yuan // STAKE_PER_LINE_YUAN)
+    # (selected fixture count, ticket units) -> (log coverage, predictions)
+    states: dict[tuple[int, int], tuple[float, tuple[Prediction, ...]]] = {
+        (0, 1): (0.0, ())
+    }
+    for prediction in predictions:
+        next_states = dict(states)  # Skipping this fixture is a valid choice.
+        for (selected_count, units), (score, selected) in states.items():
+            if selected_count >= 9:
+                continue
+            for option in _choose9_prediction_options(prediction):
+                new_units = units * len(option.picks)
+                if new_units > max_units:
+                    continue
+                coverage = _choose9_coverage_probability(option)
+                key = (selected_count + 1, new_units)
+                candidate = (score + log(max(coverage, 1e-12)), (*selected, option))
+                existing = next_states.get(key)
+                if existing is None or _choose9_state_key(candidate) > _choose9_state_key(existing):
+                    next_states[key] = candidate
+        states = next_states
+
+    candidates = [
+        (units, value)
+        for (selected_count, units), value in states.items()
+        if selected_count == 9
+    ]
+    if not candidates:
+        raise ValueError("任九预算不足，至少需要 2 元购买 1 注。")
+
+    units, (score, selected_predictions) = max(
+        candidates,
+        key=lambda item: (_choose9_state_key(item[1]), item[0]),
     )
-    keep = tuple(sorted(prediction.match.seq for prediction in ranked[:9]))
-    drop = tuple(sorted(prediction.match.seq for prediction in ranked[9:]))
-    return keep, drop
+    ordered = tuple(sorted(selected_predictions, key=lambda item: item.match.seq))
+    return Choose9Plan(
+        predictions=ordered,
+        allocated_budget_yuan=max_ticket_cost_yuan,
+        line_count=units,
+        cost_yuan=units * STAKE_PER_LINE_YUAN,
+        joint_coverage_probability=round(exp(score), 8),
+    )
+
+
+def _choose9_prediction_options(prediction: Prediction) -> tuple[Prediction, ...]:
+    ranked_outcomes = tuple(
+        sorted(
+            ("3", "1", "0"),
+            key=lambda outcome: (
+                _coverage_value(prediction, outcome),
+                prediction.probabilities.get(outcome, 0.0),
+                -("3", "1", "0").index(outcome),
+            ),
+            reverse=True,
+        )
+    )
+    return tuple(
+        replace(
+            prediction,
+            picks=("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count],
+            original_picks=prediction.analysis_picks,
+            budget_adjusted=(
+                (("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count])
+                != prediction.analysis_picks
+            ),
+            budget_forced_single=False,
+            budget_removed_picks=tuple(
+                outcome
+                for outcome in prediction.analysis_picks
+                if outcome
+                not in (("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count])
+            ),
+        )
+        for choice_count in (1, 2, 3)
+    )
+
+
+def _choose9_coverage_probability(prediction: Prediction) -> float:
+    return min(
+        1.0,
+        sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks),
+    )
+
+
+def _choose9_state_key(
+    state: tuple[float, tuple[Prediction, ...]],
+) -> tuple[float, float, tuple[int, ...]]:
+    score, selected = state
+    # Deterministic ties: prefer stronger top outcomes and then earlier issue
+    # sequence numbers.  The coverage objective remains the primary criterion.
+    top_sum = sum(max(prediction.probabilities.values()) for prediction in selected)
+    sequences = tuple(-prediction.match.seq for prediction in selected)
+    return score, top_sum, sequences
 
 
 def _pick_coverage_probability(prediction: Prediction) -> float:
-    return sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks)
+    return sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.analysis_picks)
 
 
 def ticket_cost_yuan(predictions: tuple[Prediction, ...]) -> int:
