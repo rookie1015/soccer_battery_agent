@@ -271,7 +271,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.4;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.FootballLottery;
 				PRODUCT_NAME = FootballLottery;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -296,7 +296,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 0.3.4;
+				MARKETING_VERSION = 0.4.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.FootballLottery;
 				PRODUCT_NAME = FootballLottery;
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

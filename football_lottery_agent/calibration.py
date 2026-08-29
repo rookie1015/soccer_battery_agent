@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from itertools import product
 from pathlib import Path
 from typing import Iterable
@@ -60,6 +60,8 @@ def load_review_samples(root: Path) -> list[CalibrationSample]:
             loaded = load_issue(issue_path)
         except (OSError, ValueError, KeyError):
             continue
+        if not _verified_pre_match_snapshot(loaded.metadata, loaded.matches):
+            continue
         for match in loaded.matches:
             outcome = outcomes.get(match.seq)
             if outcome:
@@ -111,7 +113,7 @@ def fit_weights(samples: Iterable[CalibrationSample]) -> dict[str, float]:
         odds = odds_step / 20.0
         signals = signals_step / 20.0
         dixon_coles = 1.0 - odds - signals
-        if dixon_coles < 0.10:
+        if dixon_coles < 0.0:
             continue
         weights = {"odds": odds, "signals": signals, "dixon_coles": dixon_coles}
         score = _brier_score(items, weights)
@@ -172,3 +174,20 @@ def _normalize(values: dict[str, float]) -> dict[str, float]:
 
 def _slug(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", value).strip("_") or "issue"
+
+
+def _verified_pre_match_snapshot(metadata: dict[str, object], matches: tuple[Match, ...]) -> bool:
+    value = str(metadata.get("snapshot_collected_at") or "").strip()
+    if not value or not matches:
+        return False
+    try:
+        collected = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if collected.tzinfo is None:
+        collected = collected.replace(tzinfo=timezone.utc)
+    first_kickoff = min(
+        match.kickoff.replace(tzinfo=timezone.utc) if match.kickoff.tzinfo is None else match.kickoff.astimezone(timezone.utc)
+        for match in matches
+    )
+    return collected.astimezone(timezone.utc) < first_kickoff

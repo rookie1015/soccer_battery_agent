@@ -11,7 +11,12 @@ import urllib.parse
 
 from .collectors import collect_issue
 from .calibration import build_calibration
-from .experiments import load_active_model_weights, load_active_selection_policy, run_experiment
+from .experiments import (
+    load_active_fundamental_coefficients,
+    load_active_model_weights,
+    load_active_selection_policy,
+    run_experiment,
+)
 from .history import archive_report, delete_history_entries, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
@@ -259,6 +264,7 @@ def _run_analysis(
     check_cancelled()
     calibration = build_calibration(root)
     active_weights = load_active_model_weights(root)
+    active_fundamental_coefficients = load_active_fundamental_coefficients(root)
     active_selection_policy = load_active_selection_policy(root)
     if active_weights is not None:
         calibration = {
@@ -277,6 +283,8 @@ def _run_analysis(
     strategy_options: dict[str, Any] = {"max_ticket_cost_yuan": max_ticket_cost_yuan}
     if active_weights is not None:
         strategy_options["model_weights"] = active_weights
+    if active_fundamental_coefficients is not None:
+        strategy_options["fundamental_coefficients"] = active_fundamental_coefficients
     if active_selection_policy is not None:
         strategy_options["selection_policy"] = active_selection_policy
     strategy_options["evidence_aware_secondary"] = True
@@ -1133,7 +1141,9 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
 
 def _refresh_model_experiment(root: Path) -> dict[str, object]:
     try:
-        result = run_experiment(root, promote=True)
+        # A review refreshes the rolling candidate only. Production parameters
+        # remain immutable until an explicit user-confirmed promotion action.
+        result = run_experiment(root, promote=False)
     except Exception as exc:
         return {
             "status": "error",

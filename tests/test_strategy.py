@@ -283,8 +283,8 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(adjusted.picks, ("3", "0"))
 
     def test_full_analysis_can_choose_draw_from_supporting_evidence(self) -> None:
-        ranked = [("3", 0.46), ("0", 0.275), ("1", 0.265)]
-        evidence_scores = {"3": 0.46, "1": 0.30, "0": 0.25}
+        ranked = [("3", 0.48), ("0", 0.275), ("1", 0.245)]
+        evidence_scores = {"3": 0.48, "1": 0.30, "0": 0.25}
 
         self.assertEqual(
             _select_picks(ranked, selection_scores=evidence_scores),
@@ -292,12 +292,21 @@ class StrategyTests(unittest.TestCase):
         )
 
     def test_full_analysis_can_choose_non_draw_from_supporting_evidence(self) -> None:
-        ranked = [("3", 0.46), ("1", 0.275), ("0", 0.265)]
-        evidence_scores = {"3": 0.46, "1": 0.25, "0": 0.31}
+        ranked = [("3", 0.48), ("1", 0.275), ("0", 0.245)]
+        evidence_scores = {"3": 0.48, "1": 0.25, "0": 0.31}
 
         self.assertEqual(
             _select_picks(ranked, selection_scores=evidence_scores),
             ("3", "0"),
+        )
+
+    def test_full_analysis_evidence_cannot_bypass_triple_guard(self) -> None:
+        ranked = [("3", 0.46), ("1", 0.275), ("0", 0.265)]
+        evidence_scores = {"3": 0.46, "1": 0.24, "0": 0.31}
+
+        self.assertEqual(
+            _select_picks(ranked, selection_scores=evidence_scores),
+            ("3", "1", "0"),
         )
 
     def test_full_analysis_keeps_three_choices_when_evidence_is_inconclusive(self) -> None:

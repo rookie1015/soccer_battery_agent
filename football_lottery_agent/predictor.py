@@ -3,6 +3,13 @@ from __future__ import annotations
 from math import exp, factorial, sqrt
 
 from .dixon_coles import DixonColesForecast, forecast as dixon_coles_forecast
+from .fundamentals import (
+    DEFAULT_FUNDAMENTAL_COEFFICIENTS,
+    apply_logit_corrections,
+    build_fundamental_profile,
+    fundamental_corrections,
+    mathematical_corrections,
+)
 from .models import Match, Prediction, Scoreline
 
 
@@ -34,11 +41,11 @@ DEFAULT_SELECTION_POLICY = {
 def predict_match(
     match: Match,
     model_weights: dict[str, float] | None = None,
+    fundamental_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> Prediction:
     odds_probs = _odds_to_probabilities(match)
-    signal_scores = _signal_scores(match)
     math_forecast = dixon_coles_forecast(match)
     odds_weight, signal_weight, math_weight = _effective_blend_weights(
         match,
@@ -46,17 +53,37 @@ def predict_match(
         model_weights,
     )
 
-    mixed = {
-        outcome: (
-            odds_weight * odds_probs[outcome]
-            + signal_weight * signal_scores[outcome]
-            + math_weight * math_forecast.probabilities[outcome]
-        )
-        for outcome in ("3", "1", "0")
-    }
-    probabilities = _normalize(mixed)
+    profile = build_fundamental_profile(match)
     if match.sources.get("odds") != "default_placeholder":
+        information_scale = signal_weight / 0.22 if signal_weight > 0 else 0.0
+        information_corrections = fundamental_corrections(
+            profile,
+            fundamental_coefficients or DEFAULT_FUNDAMENTAL_COEFFICIENTS,
+            scale=information_scale,
+        )
+        signal_scores = apply_logit_corrections(odds_probs, information_corrections)
+        math_corrections = mathematical_corrections(
+            odds_probs,
+            math_forecast.probabilities,
+            strength=math_weight,
+            quality=math_forecast.data_quality,
+        )
+        probabilities = apply_logit_corrections(
+            signal_scores,
+            math_corrections,
+        )
         probabilities = _cap_market_anchor_shift(probabilities, odds_probs)
+    else:
+        # Without a real market there is no offset to correct. Preserve the
+        # bounded legacy fallback, but record that it is not market anchored.
+        signal_scores = _signal_scores(match)
+        information_corrections = {outcome: 0.0 for outcome in ("3", "1", "0")}
+        math_corrections = {outcome: 0.0 for outcome in ("3", "1", "0")}
+        mixed = {
+            outcome: signal_weight * signal_scores[outcome] + math_weight * math_forecast.probabilities[outcome]
+            for outcome in ("3", "1", "0")
+        }
+        probabilities = _normalize(mixed)
     probabilities, venue_adjustment = _apply_venue_form_adjustment(match, probabilities)
     probabilities, knockout_adjustment = _apply_knockout_adjustment(match, probabilities)
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
@@ -94,6 +121,8 @@ def predict_match(
         math_forecast,
         odds_probs,
         (odds_weight, signal_weight, math_weight),
+        information_corrections,
+        math_corrections,
     )
     if venue_adjustment:
         reasons.append(_venue_adjustment_reason(match, venue_adjustment))
@@ -143,6 +172,10 @@ def predict_match(
             "information": round(signal_weight, 4),
             "mathematical": round(math_weight, 4),
         },
+        fundamental_features={key: round(value, 4) for key, value in profile.raw_features.items()},
+        fundamental_reliability={key: round(value, 4) for key, value in profile.reliabilities.items()},
+        fundamental_corrections={key: round(value, 6) for key, value in information_corrections.items()},
+        mathematical_corrections={key: round(value, 6) for key, value in math_corrections.items()},
         draw_guard=draw_guard,
     )
 
@@ -240,6 +273,7 @@ def _selection_reason(
 def predict_issue(
     matches: tuple[Match, ...],
     model_weights: dict[str, float] | None = None,
+    fundamental_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> tuple[Prediction, ...]:
@@ -247,6 +281,7 @@ def predict_issue(
         predict_match(
             match,
             model_weights=model_weights,
+            fundamental_coefficients=fundamental_coefficients,
             evidence_aware_secondary=evidence_aware_secondary,
             selection_policy=selection_policy,
         )
@@ -276,7 +311,9 @@ def _select_picks(
             raw_gap_limit=policy["secondary_raw_gap"],
             evidence_margin=policy["secondary_evidence_margin"],
         )
-        if third_prob >= policy["triple_third"] and second_prob - third_prob < policy["triple_gap"] and evidence_choice is None:
+        # Risk protection is authoritative. Evidence may resolve a genuine
+        # double, but it cannot turn a protected triple into a double.
+        if third_prob >= policy["triple_third"] and second_prob - third_prob < policy["triple_gap"]:
             return ("3", "1", "0")
         return (top_outcome, evidence_choice or second_outcome)
     return ("3", "1", "0")
@@ -880,6 +917,8 @@ def _build_reasons(
     math_forecast: DixonColesForecast,
     market_probabilities: dict[str, float],
     blend_weights: tuple[float, float, float],
+    information_corrections: dict[str, float],
+    math_corrections: dict[str, float],
 ) -> list[str]:
     top, top_prob = ranked[0]
     second, second_prob = ranked[1]
@@ -889,9 +928,16 @@ def _build_reasons(
     ]
     if match.sources.get("odds") != "default_placeholder":
         reasons.append(
-            "市场基准与有效修正："
+            "市场基准与受限修正："
             f"去水胜/平/负 {market_probabilities['3']:.0%}/{market_probabilities['1']:.0%}/{market_probabilities['0']:.0%}；"
-            f"本场权重为市场 {market_weight:.0%}、信息 {information_weight:.0%}、数学 {math_weight:.0%}。"
+            f"基本面和独立数学证据仅在市场基准上作有上限的对数概率修正；"
+            f"配置参考份额为市场 {market_weight:.0%}、信息 {information_weight:.0%}、数学 {math_weight:.0%}。"
+        )
+        reasons.append(
+            "修正审计：基本面胜/平/负 "
+            f"{information_corrections['3']:+.3f}/{information_corrections['1']:+.3f}/{information_corrections['0']:+.3f}；"
+            "数学 "
+            f"{math_corrections['3']:+.3f}/{math_corrections['1']:+.3f}/{math_corrections['0']:+.3f}。"
         )
     else:
         reasons.append(
@@ -910,7 +956,7 @@ def _build_reasons(
     elif math_forecast.data_quality == "hybrid_fallback":
         reasons.append("仅一方取得可靠实力样本，另一方使用近期状态先验，数学权重已按数据质量调整。")
     elif math_forecast.data_quality == "signal_fallback":
-        reasons.append("数学模型未取得球队进失球或 xG 样本，仅保留低权重状态基线。")
+        reasons.append("数学模型未取得球队进失球或 xG 样本；状态兜底不是独立数学证据，本场数学修正归零，避免与基本面重复计权。")
 
     audit_reason = _collection_audit_reason(match)
     if audit_reason:

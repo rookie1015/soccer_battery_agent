@@ -14,6 +14,18 @@ from football_lottery_agent.strategy import build_ticket_plan
 
 
 class StandaloneApiTests(unittest.TestCase):
+    def test_review_refreshes_candidate_without_auto_promotion(self) -> None:
+        experiment = {
+            "experiment_id": "candidate-1",
+            "promotion": {"status": "eligible", "message": "等待人工确认"},
+            "artifacts": {"markdown": "candidate.md"},
+        }
+        with patch.object(standalone_api, "run_experiment", return_value=experiment) as run_experiment:
+            result = standalone_api._refresh_model_experiment(Path("workspace"))
+
+        run_experiment.assert_called_once_with(Path("workspace"), promote=False)
+        self.assertEqual(result["status"], "eligible")
+
     def test_recent_full_snapshot_is_reused_for_immediate_repeat(self) -> None:
         now = datetime.now().astimezone()
         snapshot = {

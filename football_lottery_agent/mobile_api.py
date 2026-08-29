@@ -11,6 +11,8 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     line_portfolio = getattr(plan, "line_portfolio", None)
     line_portfolio = line_portfolio if isinstance(line_portfolio, LinePortfolioPlan) else None
     main_cost_yuan = _int_plan_attr(plan, "main_cost_yuan")
+    limit_yuan = _int_plan_attr(plan, "max_ticket_cost_yuan")
+    total_cost_yuan = main_cost_yuan + (draw_hedge.cost_yuan if draw_hedge else 0)
     foreign_odds_status = plan.issue.metadata.get("foreign_odds_audit")
     if not isinstance(foreign_odds_status, dict) or not foreign_odds_status.get("requested"):
         foreign_odds_status = None
@@ -19,6 +21,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     ticket_singles = sum(1 for prediction in predictions if len(prediction.picks) == 1)
     forced_singles = sum(1 for prediction in predictions if prediction.budget_forced_single)
     tactical_draws = sum(1 for prediction in predictions if prediction.tactical_draw)
+    removed_draws = sum(1 for prediction in predictions if "1" in prediction.budget_removed_picks)
     avg_confidence = (
         sum(prediction.confidence for prediction in predictions) / len(predictions)
         if predictions
@@ -33,6 +36,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "draw_hedge_count": int(draw_hedge is not None),
         "line_portfolio_count": line_portfolio.line_count if line_portfolio else 0,
         "draw_candidate_count": len(line_portfolio.draw_coverages) if line_portfolio else 0,
+        "budget_removed_draw_count": removed_draws,
         "average_confidence": round(avg_confidence, 1),
     }
     if include_review_fields:
@@ -46,12 +50,17 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "analysis_mode_message": plan.issue.metadata.get("analysis_mode_message", ""),
         "foreign_odds_status": foreign_odds_status,
         "budget": {
-            "limit_yuan": _int_plan_attr(plan, "max_ticket_cost_yuan"),
+            "limit_yuan": limit_yuan,
             "main_allocated_yuan": _int_plan_attr(plan, "main_allocated_budget_yuan"),
             "main_cost_yuan": _int_plan_attr(plan, "main_cost_yuan"),
             "hedge_allocated_yuan": draw_hedge.allocated_budget_yuan if draw_hedge else 0,
             "hedge_cost_yuan": draw_hedge.cost_yuan if draw_hedge else 0,
-            "total_cost_yuan": main_cost_yuan + (draw_hedge.cost_yuan if draw_hedge else 0),
+            "total_cost_yuan": total_cost_yuan,
+            "unused_yuan": max(0, limit_yuan - total_cost_yuan),
+            "utilization_percent": round(
+                total_cost_yuan / max(limit_yuan, 1) * 100,
+                1,
+            ),
         },
         "draw_hedge": _serialize_draw_hedge(plan),
         "line_portfolio": _serialize_line_portfolio(plan),
@@ -208,6 +217,12 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
             "away": round(prediction.market_probabilities.get("0", 0.0) * 100, 1),
         },
         "blend_weights": dict(prediction.blend_weights),
+        "fundamental_audit": {
+            "features": dict(prediction.fundamental_features),
+            "reliability": dict(prediction.fundamental_reliability),
+            "corrections": dict(prediction.fundamental_corrections),
+        },
+        "mathematical_corrections": dict(prediction.mathematical_corrections),
         "reasons": list(prediction.reasons),
     }
     if include_review_fields:

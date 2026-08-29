@@ -89,6 +89,12 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append(
         f"- 组合总成本：{plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。"
     )
+    unused_budget = max(0, plan.max_ticket_cost_yuan - plan.total_cost_yuan)
+    if unused_budget:
+        lines.append(
+            f"- 未使用预算：{unused_budget} 元。当前十四场票为矩形组合，选项数乘积存在离散台阶；"
+            "未使用金额不代表模型降低了风险，预算删除项仍需单独审计。"
+        )
     lines.append("")
     lines.append("## 任九建议（独立优化）")
     lines.append("")

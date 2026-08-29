@@ -44,12 +44,14 @@ def build_ticket_plan(
     issue: Issue,
     max_ticket_cost_yuan: int = DEFAULT_MAX_TICKET_COST_YUAN,
     model_weights: dict[str, float] | None = None,
+    fundamental_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> TicketPlan:
     raw_predictions = predict_issue(
         issue.matches,
         model_weights=model_weights,
+        fundamental_coefficients=fundamental_coefficients,
         evidence_aware_secondary=evidence_aware_secondary,
         selection_policy=selection_policy,
     )

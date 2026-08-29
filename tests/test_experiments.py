@@ -9,6 +9,7 @@ from football_lottery_agent.experiments import (
     PredictionRecord,
     audit_snapshot,
     evaluate_records,
+    load_active_fundamental_coefficients,
     load_active_model_weights,
     load_active_selection_policy,
     run_experiment,
@@ -90,12 +91,14 @@ class ExperimentTests(unittest.TestCase):
             )
             active = load_active_model_weights(tmp)
             active_policy = load_active_selection_policy(tmp)
+            active_coefficients = load_active_fundamental_coefficients(tmp)
 
         self.assertEqual(result["promotion"]["status"], "promoted")
         self.assertIsNotNone(active)
         self.assertIsNotNone(active_policy)
+        self.assertIsNotNone(active_coefficients)
         self.assertGreater(active["dixon_coles"], active["odds"])
-        self.assertTrue(Path(result["artifacts"]["json"]).name.endswith("pure-1x2-v1.json"))
+        self.assertTrue(Path(result["artifacts"]["json"]).name.endswith("market-residual-1x2-v2.json"))
 
     def test_legacy_samples_remain_exploratory_and_cannot_promote(self) -> None:
         legacy = [

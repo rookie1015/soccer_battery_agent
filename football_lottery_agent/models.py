@@ -118,6 +118,10 @@ class Prediction:
     dixon_coles_quality_score: float = 0.0
     market_probabilities: dict[Outcome, float] = field(default_factory=dict)
     blend_weights: dict[str, float] = field(default_factory=dict)
+    fundamental_features: dict[str, float] = field(default_factory=dict)
+    fundamental_reliability: dict[str, float] = field(default_factory=dict)
+    fundamental_corrections: dict[Outcome, float] = field(default_factory=dict)
+    mathematical_corrections: dict[Outcome, float] = field(default_factory=dict)
     budget_adjusted: bool = False
     budget_forced_single: bool = False
     budget_removed_picks: tuple[Outcome, ...] = ()

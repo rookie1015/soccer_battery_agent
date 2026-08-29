@@ -5,13 +5,22 @@ import json
 import math
 import re
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 from .calibration import DEFAULT_WEIGHTS, CalibrationSample, fit_weights
 from .dixon_coles import forecast as dixon_coles_forecast
+from .fundamentals import (
+    DEFAULT_FUNDAMENTAL_COEFFICIENTS,
+    apply_logit_corrections,
+    build_fundamental_profile,
+    fit_fundamental_coefficients,
+    mathematical_corrections,
+    predict_with_fundamental_coefficients,
+    valid_fundamental_coefficients,
+)
 from .history import load_history_entries
 from .loader import load_issue
 from .models import Match
@@ -19,7 +28,7 @@ from .predictor import DEFAULT_SELECTION_POLICY, _odds_to_probabilities, _select
 
 
 OUTCOMES = ("3", "1", "0")
-MODEL_VERSION = "pure-1x2-v1"
+MODEL_VERSION = "market-residual-1x2-v2"
 SNAPSHOT_SCHEMA_VERSION = "1"
 DEFAULT_MIN_TRAIN_MATCHES = 84
 DEFAULT_MIN_TEST_MATCHES = 84
@@ -45,6 +54,8 @@ class ExperimentSample:
     components: dict[str, dict[str, float]]
     data_quality: str
     snapshot_status: str
+    fundamental_features: dict[str, float] = field(default_factory=dict)
+    data_quality_score: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -131,6 +142,7 @@ def run_experiment(
             "model_version": MODEL_VERSION,
             "activated_at": timestamp.isoformat(),
             "weights": strict_track["walk_forward"]["final_weights"],
+            "fundamental_coefficients": strict_track["walk_forward"]["final_fundamental_coefficients"],
             "selection_policy": ticket_strategy.get("final_policy", DEFAULT_SELECTION_POLICY),
             "gates": promotion["gates"],
             "strict_test_metrics": strict_track["walk_forward"]["models"]["walk_forward_blend"]["metrics"],
@@ -192,6 +204,7 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
             if outcome not in OUTCOMES:
                 continue
             math = dixon_coles_forecast(match)
+            profile = build_fundamental_profile(match)
             samples.append(
                 ExperimentSample(
                     issue=issue,
@@ -206,6 +219,8 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
                     },
                     data_quality=math.data_quality,
                     snapshot_status=snapshot_status,
+                    fundamental_features=dict(profile.features),
+                    data_quality_score=math.data_quality_score,
                 )
             )
     samples.sort(key=lambda item: (item.kickoff, item.issue, item.seq))
@@ -239,7 +254,15 @@ def evaluate_track(samples: Iterable[ExperimentSample], *, min_train_matches: in
     items = sorted(samples, key=lambda item: (item.kickoff, item.issue, item.seq))
     models: dict[str, Any] = {}
     for name, weights in STATIC_MODELS.items():
-        records = [_record(sample, _blend(sample.components, weights)) for sample in items]
+        records = [
+            _record(
+                sample,
+                _candidate_probabilities(sample, weights, DEFAULT_FUNDAMENTAL_COEFFICIENTS)
+                if name == "production_default"
+                else _blend(sample.components, weights),
+            )
+            for sample in items
+        ]
         models[name] = {"weights": weights, "metrics": evaluate_records(records)}
 
     walk_forward = walk_forward_evaluate(items, min_train_matches=min_train_matches)
@@ -250,7 +273,13 @@ def evaluate_track(samples: Iterable[ExperimentSample], *, min_train_matches: in
         "walk_forward": walk_forward,
         "slices": {
             "production_default": slice_metrics(
-                [_record(sample, _blend(sample.components, DEFAULT_WEIGHTS)) for sample in items]
+                [
+                    _record(
+                        sample,
+                        _candidate_probabilities(sample, DEFAULT_WEIGHTS, DEFAULT_FUNDAMENTAL_COEFFICIENTS),
+                    )
+                    for sample in items
+                ]
             ),
             "walk_forward_blend": slice_metrics(walk_forward["records_internal"]),
         },
@@ -278,8 +307,12 @@ def walk_forward_evaluate(
     for issue in order:
         test = sorted(grouped[issue], key=lambda item: item.seq)
         if len(training) >= min_train_matches:
-            weights = fit_weights(_calibration_samples(training))
-            fold_records = [_record(sample, _blend(sample.components, weights)) for sample in test]
+            coefficients = fit_fundamental_coefficients(_fundamental_training_samples(training))
+            weights = _fit_candidate_weights(training, coefficients)
+            fold_records = [
+                _record(sample, _candidate_probabilities(sample, weights, coefficients))
+                for sample in test
+            ]
             candidate_records.extend(fold_records)
             folds.append(
                 {
@@ -288,6 +321,7 @@ def walk_forward_evaluate(
                     "train_issues": len({sample.issue for sample in training}),
                     "test_matches": len(test),
                     "weights": weights,
+                    "fundamental_coefficients": coefficients,
                     "metrics": evaluate_records(fold_records),
                 }
             )
@@ -299,9 +333,22 @@ def walk_forward_evaluate(
     }
     for name in ("odds_only", "production_default"):
         weights = STATIC_MODELS[name]
-        records = [_record(sample, _blend(sample.components, weights)) for sample in test_samples]
+        records = [
+            _record(
+                sample,
+                _blend(sample.components, weights)
+                if name == "odds_only"
+                else _candidate_probabilities(sample, weights, DEFAULT_FUNDAMENTAL_COEFFICIENTS),
+            )
+            for sample in test_samples
+        ]
         compared_models[name] = {"weights": weights, "metrics": evaluate_records(records)}
-    final_weights = fit_weights(_calibration_samples(items)) if items else dict(DEFAULT_WEIGHTS)
+    final_coefficients = (
+        fit_fundamental_coefficients(_fundamental_training_samples(items))
+        if items
+        else dict(DEFAULT_FUNDAMENTAL_COEFFICIENTS)
+    )
+    final_weights = _fit_candidate_weights(items, final_coefficients) if items else dict(DEFAULT_WEIGHTS)
     return {
         "min_train_matches": min_train_matches,
         "fold_count": len(folds),
@@ -310,6 +357,7 @@ def walk_forward_evaluate(
         "folds": folds,
         "models": compared_models,
         "final_weights": final_weights,
+        "final_fundamental_coefficients": final_coefficients,
         "predictions": [_serialize_record(record) for record in candidate_records],
         "records_internal": candidate_records,
     }
@@ -480,6 +528,19 @@ def load_active_selection_policy(work_dir: str | Path) -> dict[str, float] | Non
     return result
 
 
+def load_active_fundamental_coefficients(work_dir: str | Path) -> dict[str, float] | None:
+    path = Path(work_dir) / "reports" / "experiments" / "active_model.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
+        return None
+    return valid_fundamental_coefficients(payload.get("fundamental_coefficients"))
+
+
 def evaluate_ticket_strategy(samples: Iterable[ExperimentSample]) -> dict[str, Any]:
     train, test = _strategy_train_test(list(samples))
     if len(train) < DEFAULT_MIN_TRAIN_MATCHES or len(test) < DEFAULT_MIN_TEST_MATCHES:
@@ -623,9 +684,19 @@ def _promotion_decision(
                     "detail": f"{candidate['log_loss']:.4f} vs {production['log_loss']:.4f}",
                 },
                 {
+                    "name": "Log Loss优于赔率基线",
+                    "passed": candidate["log_loss"] <= odds["log_loss"],
+                    "detail": f"{candidate['log_loss']:.4f} vs {odds['log_loss']:.4f}",
+                },
+                {
                     "name": "Top1命中率不明显退化",
                     "passed": candidate["accuracy"] + 0.01 >= production["accuracy"],
                     "detail": f"{candidate['accuracy']:.1%} vs {production['accuracy']:.1%}",
+                },
+                {
+                    "name": "Top2命中率不明显退化",
+                    "passed": candidate["top2_accuracy"] + 0.01 >= odds["top2_accuracy"],
+                    "detail": f"{candidate['top2_accuracy']:.1%} vs {odds['top2_accuracy']:.1%}",
                 },
                 _non_regression_gate("平局召回", candidate["draw_recall"], production["draw_recall"]),
                 _non_regression_gate("冷门召回", candidate["upset_recall"], production["upset_recall"]),
@@ -638,7 +709,7 @@ def _promotion_decision(
     return {
         "status": "eligible" if passed else ("hold" if enough_data else "collecting"),
         "message": (
-            "候选模型通过全部严格门禁，可以启用。"
+            "候选模型通过全部严格门禁，等待用户确认后才能启用。"
             if passed
             else "严格样本仍不足，继续收集赛前快照和真实赛果。"
             if not enough_data
@@ -696,10 +767,93 @@ def _blend(
     return {outcome: values[outcome] / total for outcome in OUTCOMES} if total > 0 else {outcome: 1 / 3 for outcome in OUTCOMES}
 
 
+def _candidate_probabilities(
+    sample: ExperimentSample,
+    weights: dict[str, float],
+    coefficients: dict[str, float],
+) -> dict[str, float]:
+    # Synthetic/legacy experiment rows have no auditable raw features. Keep
+    # their historical blend behaviour so older reports and tests remain
+    # readable; verified v2 snapshots always take this market-offset branch.
+    if not sample.fundamental_features:
+        return _blend(sample.components, weights)
+    market = sample.components["odds"]
+    signal_scale = max(0.0, float(weights.get("signals", 0.0))) / max(DEFAULT_WEIGHTS["signals"], 1e-9)
+    scaled_coefficients = {name: value * signal_scale for name, value in coefficients.items()}
+    probabilities = predict_with_fundamental_coefficients(
+        market,
+        sample.fundamental_features,
+        scaled_coefficients,
+    )
+    math_strength = max(0.0, float(weights.get("dixon_coles", 0.0))) * sample.data_quality_score
+    corrections = mathematical_corrections(
+        market,
+        sample.components["dixon_coles"],
+        strength=math_strength,
+        quality=sample.data_quality,
+    )
+    return apply_logit_corrections(probabilities, corrections)
+
+
+def _fit_candidate_weights(
+    samples: Iterable[ExperimentSample],
+    coefficients: dict[str, float],
+) -> dict[str, float]:
+    items = list(samples)
+    if not items:
+        return dict(DEFAULT_WEIGHTS)
+    if not any(sample.fundamental_features for sample in items):
+        return fit_weights(_calibration_samples(items))
+    best = dict(DEFAULT_WEIGHTS)
+    best_score = _candidate_brier(items, best, coefficients)
+    # In the residual architecture market is always the anchor. These values
+    # control correction strength and may legitimately shrink to zero.
+    for signal_step in range(0, 7):
+        for math_step in range(0, 7):
+            signals = signal_step * 0.05
+            dixon_coles = math_step * 0.05
+            if signals + dixon_coles > 0.60:
+                continue
+            weights = {
+                "odds": 1.0 - signals - dixon_coles,
+                "signals": signals,
+                "dixon_coles": dixon_coles,
+            }
+            score = _candidate_brier(items, weights, coefficients)
+            if score < best_score:
+                best, best_score = weights, score
+    return {name: round(value, 2) for name, value in best.items()}
+
+
+def _candidate_brier(
+    samples: list[ExperimentSample],
+    weights: dict[str, float],
+    coefficients: dict[str, float],
+) -> float:
+    total = 0.0
+    for sample in samples:
+        probabilities = _candidate_probabilities(sample, weights, coefficients)
+        total += sum(
+            (probabilities[outcome] - float(outcome == sample.outcome)) ** 2
+            for outcome in OUTCOMES
+        )
+    return total / (len(samples) * len(OUTCOMES))
+
+
 def _calibration_samples(samples: Iterable[ExperimentSample]) -> list[CalibrationSample]:
     return [
         CalibrationSample(kickoff=sample.kickoff, outcome=sample.outcome, components=sample.components)
         for sample in samples
+    ]
+
+
+def _fundamental_training_samples(
+    samples: Iterable[ExperimentSample],
+) -> list[tuple[dict[str, float], dict[str, float], str]]:
+    return [
+        (sample.fundamental_features, sample.components["odds"], sample.outcome)
+        for sample in samples
+        if sample.fundamental_features
     ]
 
 
@@ -786,6 +940,8 @@ def _dataset_fingerprint(samples: Iterable[ExperimentSample]) -> str:
             "components": item.components,
             "data_quality": item.data_quality,
             "snapshot_status": item.snapshot_status,
+            "fundamental_features": item.fundamental_features,
+            "data_quality_score": item.data_quality_score,
         }
         for item in samples
     ]

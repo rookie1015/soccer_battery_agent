@@ -81,7 +81,9 @@ Response includes the existing report links plus an app-ready `report` object:
 
 `choose9` 是独立任九方案：`selections` 只包含联合优化后入选的 9 场及各自票面，`line_count` 等于这 9 场选择数的乘积，`cost_yuan = line_count * 2`。任九与十四场共享基础概率，但使用独立的场次、票面和预算优化；`budget_scope` 为 `separate`，表示两种玩法的成本不合并，若同时购买应将两项成本相加。旧版客户端仍可使用兼容字段 `choose9_keep` 与 `choose9_drop`。
 
-`tactical_draw` 为 `true` 时表示本场是每期最多一场的高风险战术单平，不是稳胆。`market_probabilities` 是去水后的市场锚点，`blend_weights` 记录本场实际使用的市场、有效信息和数学模型权重。
+`tactical_draw` 为 `true` 时表示本场是每期最多一场的高风险战术单平，不是稳胆。`market_probabilities` 是去水后的市场锚点，`blend_weights` 记录本场配置参考份额。0.4.0 起，`fundamental_audit.features`、`reliability` 与 `corrections` 分别记录基本面原始特征、来源可靠度和对数概率修正；`mathematical_corrections` 记录独立数学证据的受限修正。缺少 xG/进失球而退化为状态兜底时，数学修正为零，避免重复计权。
+
+`budget.unused_yuan` 和 `budget.utilization_percent` 用于审计矩形票离散组合造成的未使用预算；`metrics.budget_removed_draw_count` 记录预算压缩删除平局的场数。它们只提供审计，不会机械地给所有平局加分。
 
 ## Single Prediction
 
