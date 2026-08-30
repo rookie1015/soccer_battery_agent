@@ -97,6 +97,11 @@ private enum class AppTab(val label: String) {
     Settings("设置"),
 }
 
+private enum class ReviewPlayType(val value: String, val label: String) {
+    Sfc14("sfc14", "14场胜平负"),
+    Choose9("choose9", "任九"),
+}
+
 private const val SETTINGS_PREFS = "football_lottery_settings"
 private const val PREF_THE_ODDS_API_KEY = "the_odds_api_key"
 private const val PREF_FOOTBALL_DATA_API_KEY = "football_data_api_key"
@@ -104,6 +109,7 @@ private const val PREF_FEISHU_WEBHOOK_URL = "feishu_webhook_url"
 private const val PREF_FEISHU_AUTO_SEND = "feishu_auto_send"
 private const val PREF_ANALYSIS_ISSUE = "analysis_issue"
 private const val PREF_ANALYSIS_MAX_TICKET_COST = "analysis_max_ticket_cost"
+private const val PREF_ANALYSIS_PLAY_TYPE = "analysis_play_type"
 private const val STRENGTH_XG_MATCHES = 20
 
 data class AnalysisReport(
@@ -114,6 +120,7 @@ data class AnalysisReport(
     val analysisMode: String,
     val analysisModeMessage: String,
     val foreignOddsStatus: ForeignOddsStatus?,
+    val budget: BudgetReport?,
     val drawHedge: DrawHedgeReport?,
     val linePortfolio: LinePortfolioReport?,
     val metrics: ReportMetrics,
@@ -123,6 +130,14 @@ data class AnalysisReport(
     val predictions: List<MatchPrediction>,
     val reviewDiagnostics: ReviewDiagnostics?,
     val modelCalibration: ModelCalibration?,
+    val reviewPlayType: String,
+)
+
+data class BudgetReport(
+    val limitYuan: Int,
+    val totalCostYuan: Int,
+    val overageYuan: Int,
+    val toleranceYuan: Int,
 )
 
 data class Choose9Report(
@@ -468,6 +483,8 @@ class AnalysisViewModel : ViewModel() {
         private set
     var maxTicketCostYuan by mutableStateOf("500")
         private set
+    var playType by mutableStateOf(ReviewPlayType.Sfc14.value)
+        private set
     var isLoading by mutableStateOf(false)
         private set
     var message by mutableStateOf("")
@@ -488,6 +505,9 @@ class AnalysisViewModel : ViewModel() {
         if (prefs.contains(PREF_ANALYSIS_MAX_TICKET_COST)) {
             maxTicketCostYuan = prefs.getString(PREF_ANALYSIS_MAX_TICKET_COST, maxTicketCostYuan).orEmpty()
         }
+        playType = prefs.getString(PREF_ANALYSIS_PLAY_TYPE, playType)
+            ?.takeIf { value -> ReviewPlayType.entries.any { it.value == value } }
+            ?: ReviewPlayType.Sfc14.value
         savedInputsLoaded = true
     }
 
@@ -504,6 +524,17 @@ class AnalysisViewModel : ViewModel() {
         context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(PREF_ANALYSIS_MAX_TICKET_COST, value)
+            .apply()
+    }
+
+    fun updatePlayType(value: String, context: Context) {
+        if (ReviewPlayType.entries.none { it.value == value }) {
+            return
+        }
+        playType = value
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_ANALYSIS_PLAY_TYPE, value)
             .apply()
     }
 
@@ -546,7 +577,9 @@ class AnalysisViewModel : ViewModel() {
                     cancelToken = requestId,
                 )
                 report = response
-                val generatedMessage = "${response.issue} 完整分析报告已生成。"
+                val playLabel = ReviewPlayType.entries.firstOrNull { it.value == playType }?.label
+                    ?: ReviewPlayType.Sfc14.label
+                val generatedMessage = "${response.issue} $playLabel 分析报告已生成。"
                 message = generatedMessage
                 if (feishuAutoSend) {
                     val webhook = feishuWebhookUrl.trim()
@@ -554,7 +587,7 @@ class AnalysisViewModel : ViewModel() {
                         error = "报告已生成，但未填写飞书 Webhook，无法自动推送。"
                     } else {
                         runCatching {
-                            engine.sendAnalysisToFeishu(webhook, response)
+                            engine.sendAnalysisToFeishu(webhook, response, playType)
                         }.onSuccess {
                             message = "$generatedMessage 出票建议已发送到飞书。"
                         }.onFailure { throwable ->
@@ -675,6 +708,8 @@ class ReviewViewModel : ViewModel() {
         private set
     var autoResults by mutableStateOf(true)
         private set
+    var playType by mutableStateOf(ReviewPlayType.Sfc14.value)
+        private set
     var resultsCsv by mutableStateOf("seq,score\n1,1-0\n2,0-0")
         private set
     var isLoading by mutableStateOf(false)
@@ -698,6 +733,10 @@ class ReviewViewModel : ViewModel() {
 
     fun updateAutoResults(value: Boolean) {
         autoResults = value
+    }
+
+    fun updatePlayType(value: String) {
+        playType = value
     }
 
     fun updateResultsCsv(value: String) {
@@ -737,6 +776,7 @@ class ReviewViewModel : ViewModel() {
                     autoResults,
                     resultsCsv,
                     selectedAnalysis?.id ?: matchingAnalyses.singleOrNull()?.id.orEmpty(),
+                    playType,
                 )
             }.onSuccess { response ->
                 report = response
@@ -896,8 +936,8 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         analysisCancellationFile(requestId).delete()
     }
 
-    suspend fun sendAnalysisToFeishu(webhookUrl: String, report: AnalysisReport) {
-        sendFeishuText(webhookUrl, feishuAnalysisText(report))
+    suspend fun sendAnalysisToFeishu(webhookUrl: String, report: AnalysisReport, playType: String) {
+        sendFeishuText(webhookUrl, feishuAnalysisText(report, playType))
     }
 
     suspend fun sendFeishuText(webhookUrl: String, text: String): Unit = withContext(Dispatchers.IO) {
@@ -944,12 +984,14 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         autoResults: Boolean,
         resultsCsv: String,
         analysisId: String = "",
+        playType: String = ReviewPlayType.Sfc14.value,
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("auto_results", autoResults)
             .put("results_csv", resultsCsv)
             .put("analysis_id", analysisId)
+            .put("play_type", playType)
         val json = JSONObject(bridge.callAttr("review", body.toString(), workDir).toString())
         if (!json.optBoolean("ok", false)) {
             throw IllegalStateException(json.optString("error", "本机复盘失败。"))
@@ -979,6 +1021,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
 
     private fun parseReport(json: JSONObject): AnalysisReport {
         val metrics = json.optJSONObject("metrics") ?: JSONObject()
+        val budget = json.optJSONObject("budget")
         return AnalysisReport(
             issue = json.optString("issue"),
             purchaseDeadline = json.optString("purchase_deadline"),
@@ -987,6 +1030,14 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             analysisMode = json.optString("analysis_mode", "full"),
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
+            budget = budget?.let {
+                BudgetReport(
+                    limitYuan = it.optInt("limit_yuan"),
+                    totalCostYuan = it.optInt("total_cost_yuan"),
+                    overageYuan = it.optInt("overage_yuan"),
+                    toleranceYuan = it.optInt("tolerance_yuan"),
+                )
+            },
             drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
             linePortfolio = parseLinePortfolio(json.optJSONObject("line_portfolio")),
             metrics = ReportMetrics(
@@ -1045,6 +1096,7 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
                     dixonColesWeight = weights.optDouble("dixon_coles"),
                 )
             },
+            reviewPlayType = json.optString("review_play_type", ReviewPlayType.Sfc14.value),
         )
     }
 
@@ -1169,12 +1221,14 @@ class FootballLotteryApi(private val baseUrl: String) {
         autoResults: Boolean,
         resultsCsv: String,
         analysisId: String = "",
+        playType: String = ReviewPlayType.Sfc14.value,
     ): AnalysisReport = withContext(Dispatchers.IO) {
         val body = JSONObject()
             .put("issue", issue)
             .put("auto_results", autoResults)
             .put("results_csv", resultsCsv)
             .put("analysis_id", analysisId)
+            .put("play_type", playType)
             .put("no_history", false)
         val json = requestJson("POST", "/api/review", body)
         parseReport(json.getJSONObject("report"))
@@ -1230,6 +1284,7 @@ class FootballLotteryApi(private val baseUrl: String) {
 
     private fun parseReport(json: JSONObject): AnalysisReport {
         val metrics = json.optJSONObject("metrics") ?: JSONObject()
+        val budget = json.optJSONObject("budget")
         return AnalysisReport(
             issue = json.optString("issue"),
             purchaseDeadline = json.optString("purchase_deadline"),
@@ -1238,6 +1293,14 @@ class FootballLotteryApi(private val baseUrl: String) {
             analysisMode = json.optString("analysis_mode", "full"),
             analysisModeMessage = json.optString("analysis_mode_message"),
             foreignOddsStatus = json.optJSONObject("foreign_odds_status")?.let(::parseForeignOddsStatus),
+            budget = budget?.let {
+                BudgetReport(
+                    limitYuan = it.optInt("limit_yuan"),
+                    totalCostYuan = it.optInt("total_cost_yuan"),
+                    overageYuan = it.optInt("overage_yuan"),
+                    toleranceYuan = it.optInt("tolerance_yuan"),
+                )
+            },
             drawHedge = parseDrawHedge(json.optJSONObject("draw_hedge")),
             linePortfolio = parseLinePortfolio(json.optJSONObject("line_portfolio")),
             metrics = ReportMetrics(
@@ -1296,6 +1359,7 @@ class FootballLotteryApi(private val baseUrl: String) {
                     dixonColesWeight = weights.optDouble("dixon_coles"),
                 )
             },
+            reviewPlayType = json.optString("review_play_type", ReviewPlayType.Sfc14.value),
         )
     }
 
@@ -1462,6 +1526,7 @@ fun AnalysisScreen(
                 viewModel = historyViewModel,
                 kind = "analysis",
                 title = "历史分析报告",
+                analysisPlayType = viewModel.playType,
             )
         }
     }
@@ -1473,6 +1538,7 @@ private fun HistorySection(
     viewModel: HistoryViewModel,
     kind: String,
     title: String,
+    analysisPlayType: String? = null,
 ) {
     var pendingDeletion by remember { mutableStateOf<List<HistoryEntry>>(emptyList()) }
     LaunchedEffect(Unit) {
@@ -1510,6 +1576,7 @@ private fun HistorySection(
                 } else {
                     null
                 },
+                analysisPlayType = analysisPlayType,
             )
         }
     }
@@ -1621,7 +1688,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.4.0（12） · 市场锚定与滚动候选模型",
+                        "App 版本 0.4.1（13） · 市场锚定与滚动候选模型",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1800,17 +1867,23 @@ private fun RequestCard(
                     modifier = Modifier.weight(1f),
                     singleLine = true,
                 )
-                OutlinedTextField(
-                    value = viewModel.maxTicketCostYuan,
-                    onValueChange = { viewModel.updateMaxTicketCostYuan(it, context) },
-                    label = { Text("最高购彩金额") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                PlayTypeDropdown(
+                    selectedValue = viewModel.playType,
+                    onSelect = { viewModel.updatePlayType(it, context) },
+                    label = "分析玩法",
                     modifier = Modifier.weight(1f),
-                    singleLine = true,
                 )
             }
+            OutlinedTextField(
+                value = viewModel.maxTicketCostYuan,
+                onValueChange = { viewModel.updateMaxTicketCostYuan(it, context) },
+                label = { Text("最高购彩金额") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
             Text(
-                "始终执行完整分析，增强样本固定为最近 20 场；关键资料源大范围不可用时会停止分析，并用中文说明问题，不会生成不完整报告。",
+                "一次完整分析会同时保留十四场与任九方案，切换玩法无需重新计算；增强样本固定为最近 20 场。",
                 color = Color(0xFF667085),
                 style = MaterialTheme.typography.bodySmall,
             )
@@ -1901,14 +1974,22 @@ private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("生成复盘", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
-            OutlinedTextField(
-                value = viewModel.issue,
-                onValueChange = viewModel::updateIssue,
-                label = { Text("期号") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth(),
-                singleLine = true,
-            )
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = viewModel.issue,
+                    onValueChange = viewModel::updateIssue,
+                    label = { Text("期号") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                )
+                PlayTypeDropdown(
+                    selectedValue = viewModel.playType,
+                    onSelect = viewModel::updatePlayType,
+                    label = "复盘玩法",
+                    modifier = Modifier.weight(1f),
+                )
+            }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(
                     checked = viewModel.autoResults,
@@ -1940,6 +2021,49 @@ private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel
             ) {
                 LoadingPrefix(viewModel.isLoading)
                 Text(if (viewModel.isLoading) "复盘中" else "生成复盘报告")
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PlayTypeDropdown(
+    selectedValue: String,
+    onSelect: (String) -> Unit,
+    label: String,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = ReviewPlayType.entries.firstOrNull { it.value == selectedValue } ?: ReviewPlayType.Sfc14
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = selected.label,
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(label) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .menuAnchor()
+                .fillMaxWidth(),
+            singleLine = true,
+        )
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+        ) {
+            ReviewPlayType.entries.forEach { playType ->
+                DropdownMenuItem(
+                    text = { Text(playType.label) },
+                    onClick = {
+                        onSelect(playType.value)
+                        expanded = false
+                    },
+                )
             }
         }
     }
@@ -2020,16 +2144,45 @@ private fun HeaderCard(
     }
 }
 
+private fun AnalysisReport.predictionsForPlayType(playType: String, isReview: Boolean): List<MatchPrediction> {
+    if (isReview || playType != ReviewPlayType.Choose9.value) {
+        return predictions
+    }
+    val selectionsBySeq = choose9?.selections?.associateBy { it.seq }.orEmpty()
+    return predictions.mapNotNull { prediction ->
+        selectionsBySeq[prediction.seq]?.let { selection ->
+            prediction.copy(
+                pickText = selection.pickText,
+                pickLabels = selection.pickLabels,
+                analysisPickText = selection.pickText,
+                analysisPickLabels = selection.pickLabels,
+                budgetAdjusted = false,
+                budgetForcedSingle = false,
+                tacticalDraw = false,
+            )
+        }
+    }
+}
+
 @Composable
-private fun SummaryCard(report: AnalysisReport) {
+private fun SummaryCard(report: AnalysisReport, displayPlayType: String = report.reviewPlayType) {
     val isReview = report.purchaseDeadlineSource == "复盘报告"
+    val isChoose9Display = displayPlayType == ReviewPlayType.Choose9.value
+    val isChoose9Review = isReview && isChoose9Display
+    val displayPredictions = report.predictionsForPlayType(displayPlayType, isReview)
     val keepSet = report.choose9Keep.toSet()
-    val choose9Total = report.choose9Keep.size
-    val choose9Hits = report.predictions.count { prediction ->
+    val choose9Total = displayPredictions.size
+    val choose9Hits = displayPredictions.count { prediction ->
         prediction.seq in keepSet && prediction.choose9OutcomeHit
     }
     val choose9Rate = if (choose9Total > 0) choose9Hits * 100.0 / choose9Total else 0.0
-    val purchaseCostText = purchaseCostText(report)
+    val displayAverageConfidence = displayPredictions.map { it.confidence }.average().takeUnless { it.isNaN() } ?: 0.0
+    val displaySingleCount = if (isChoose9Display) {
+        report.choose9?.selections?.count { recommendedChoiceCount(it.pickText) == 1 } ?: 0
+    } else {
+        report.metrics.singleCount
+    }
+    val purchaseCostText = purchaseCostText(report, displayPlayType)
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2049,10 +2202,17 @@ private fun SummaryCard(report: AnalysisReport) {
                 }
             }
             Text(
-                text = if (isReview) "赛后复盘结果" else deadlineText(report),
+                text = if (isReview) {
+                    "赛后复盘结果 · " + if (isChoose9Review) "任九" else "14场胜平负"
+                } else {
+                    "赛前分析方案 · " + if (isChoose9Display) "任九" else "14场胜平负"
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF667085),
             )
+            if (!isReview) {
+                Text(deadlineText(report), style = MaterialTheme.typography.bodySmall, color = Color(0xFF667085))
+            }
             if (!isReview && report.analysisModeMessage.isNotBlank()) {
                 Text(
                     text = report.analysisModeMessage,
@@ -2066,17 +2226,21 @@ private fun SummaryCard(report: AnalysisReport) {
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MetricTile("比赛", report.metrics.matchCount.toString(), Modifier.weight(1f))
-                MetricTile(if (isReview) "模型单选命中" else "模型单选", report.metrics.singleCount.toString(), Modifier.weight(1f))
+                MetricTile(if (isChoose9Display) "任九场次" else "比赛", displayPredictions.size.toString(), Modifier.weight(1f))
+                MetricTile(
+                    if (isChoose9Review) "任九命中" else if (isReview) "模型单选命中" else "票面单选",
+                    if (isChoose9Review) report.metrics.lowRiskCount.toString() else displaySingleCount.toString(),
+                    Modifier.weight(1f),
+                )
             }
-            if (!isReview && report.metrics.budgetForcedSingleCount > 0) {
+            if (!isReview && !isChoose9Display && report.metrics.budgetForcedSingleCount > 0) {
                 Text(
                     text = "预算票面含 ${report.metrics.budgetForcedSingleCount} 场强制单选；这些场次不属于模型胆材。",
                     color = Color(0xFFB54708),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            if (!isReview && report.metrics.tacticalDrawCount > 0) {
+            if (!isReview && !isChoose9Display && report.metrics.tacticalDrawCount > 0) {
                 Text(
                     text = "本期含 ${report.metrics.tacticalDrawCount} 场战术单平；这是高风险主动博取，不属于稳胆。",
                     color = Color(0xFFB54708),
@@ -2084,16 +2248,18 @@ private fun SummaryCard(report: AnalysisReport) {
                 )
             }
             if (!isReview) {
-                val ticketUnits = report.predictions.fold(1L) { total, prediction ->
-                    total * recommendedChoiceCount(prediction).toLong()
+                if (!isChoose9Display) {
+                    val ticketUnits = report.predictions.fold(1L) { total, prediction ->
+                        total * recommendedChoiceCount(prediction).toLong()
+                    }
+                    Text(
+                        text = "正规复式：各场预算票面选择数相乘，共 $ticketUnits 注 × 2 元 = ${ticketUnits * 2L} 元。",
+                        color = Color(0xFF2364AA),
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
-                Text(
-                    text = "正规复式：各场预算票面选择数相乘，共 $ticketUnits 注 × 2 元 = ${ticketUnits * 2L} 元。",
-                    color = Color(0xFF2364AA),
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Bold,
-                )
-                report.choose9?.let { choose9 ->
+                report.choose9?.takeIf { isChoose9Display }?.let { choose9 ->
                     Text(
                         text = "任九独立复式：${choose9.lineCount} 注 × 2 元 = ${choose9.costYuan} 元" +
                             "（独立上限 ${choose9.limitYuan} 元）。",
@@ -2108,14 +2274,14 @@ private fun SummaryCard(report: AnalysisReport) {
                         color = Color(0xFF344054),
                         style = MaterialTheme.typography.bodySmall,
                     )
-                    Text(
-                        text = "理论联合覆盖率 ${"%.2f".format(choose9.jointCoverageProbability)}%；" +
-                            "任九与十四场分别计价，若同时购买金额需要相加。",
+                        Text(
+                            text = "理论联合覆盖率 ${"%.2f".format(choose9.jointCoverageProbability)}%；" +
+                            "当前仅展示任九独立票面。",
                         color = Color(0xFF667085),
                         style = MaterialTheme.typography.bodySmall,
                     )
                 }
-                report.drawHedge?.let { hedge ->
+                report.drawHedge?.takeIf { !isChoose9Display }?.let { hedge ->
                     Text(
                         text = "平局对冲：第 ${hedge.candidateSeq} 场 ${hedge.home} vs ${hedge.away} 固定单选平；" +
                             "主票 ${hedge.mainCostYuan} 元 + 对冲 ${hedge.costYuan} 元（${hedge.lineCount} 注）" +
@@ -2138,7 +2304,7 @@ private fun SummaryCard(report: AnalysisReport) {
                     }
                 }
             }
-            report.linePortfolio?.let { portfolio ->
+            report.linePortfolio?.takeIf { !isChoose9Display }?.let { portfolio ->
                 Text(
                     text = "预算组合：${portfolio.lineCount} 注，共 ${portfolio.costYuan} 元；" +
                         "${portfolio.multiDrawLines} 注包含至少两个候选平局，任意两场候选同时为平至少 " +
@@ -2164,31 +2330,37 @@ private fun SummaryCard(report: AnalysisReport) {
                 }
             }
             if (isReview) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricTile("胜平负命中", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
-                    MetricTile("胜平负命中率", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricTile("任选九命中", "$choose9Hits/$choose9Total", Modifier.weight(1f))
-                    MetricTile("任选九命中率", "%.1f%%".format(choose9Rate), Modifier.weight(1f))
+                if (isChoose9Review) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MetricTile("任九票面命中", "$choose9Hits/$choose9Total", Modifier.weight(1f))
+                        MetricTile("任九命中率", "%.1f%%".format(choose9Rate), Modifier.weight(1f))
+                    }
+                } else {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MetricTile("十四场命中", report.metrics.lowRiskCount.toString(), Modifier.weight(1f))
+                        MetricTile("十四场命中率", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
+                    }
                 }
                 report.reviewDiagnostics?.let { diagnostics ->
-                    ReviewDiagnosticsCard(diagnostics)
+                    ReviewDiagnosticsCard(diagnostics, report.reviewPlayType)
                 }
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MetricTile("平均置信度", "%.1f%%".format(report.metrics.averageConfidence), Modifier.weight(1f))
+                    MetricTile("平均置信度", "%.1f%%".format(displayAverageConfidence), Modifier.weight(1f))
                 }
             }
             if (!isReview) {
-                SequenceLine("任选九保留", report.choose9Keep, Color(0xFF16845B))
-                SequenceLine("建议剔除", report.choose9Drop, Color(0xFFB42318))
-                report.modelCalibration?.let { calibration ->
-                    Text(
-                        text = calibrationText(calibration),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFF667085),
-                    )
+                if (isChoose9Display) {
+                    SequenceLine("任九选场", report.choose9Keep, Color(0xFF16845B))
+                    SequenceLine("未选场次", report.choose9Drop, Color(0xFF667085))
+                } else {
+                    report.modelCalibration?.let { calibration ->
+                        Text(
+                            text = calibrationText(calibration),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = Color(0xFF667085),
+                        )
+                    }
                 }
             }
         }
@@ -2255,11 +2427,12 @@ private fun calibrationText(calibration: ModelCalibration): String {
 }
 
 @Composable
-private fun ReviewDiagnosticsCard(diagnostics: ReviewDiagnostics) {
+private fun ReviewDiagnosticsCard(diagnostics: ReviewDiagnostics, playType: String) {
+    val playLabel = if (playType == ReviewPlayType.Choose9.value) "任九票面" else "十四场票面"
     val issueText = if (diagnostics.issueMissCount == 0) {
-        "本期胜平负推荐全部覆盖"
+        "本期${playLabel}全部覆盖"
     } else {
-        "本期 ${diagnostics.issueMissCount} 场未中：" + diagnostics.issueTags.joinToString(" · ") {
+        "本期${playLabel} ${diagnostics.issueMissCount} 场未中：" + diagnostics.issueTags.joinToString(" · ") {
             "${it.label} ${it.count}"
         }
     }
@@ -2479,6 +2652,7 @@ private fun HistoryGroupCard(
     onToggle: () -> Unit,
     onSelect: (HistoryEntry) -> Unit,
     onRequestDelete: ((List<HistoryEntry>) -> Unit)?,
+    analysisPlayType: String? = null,
 ) {
     var allPredictionsExpanded by remember(selectedEntry?.id) { mutableStateOf(false) }
     var predictionExpandRevision by remember(selectedEntry?.id) { mutableStateOf(0) }
@@ -2525,13 +2699,25 @@ private fun HistoryGroupCard(
                     )
                     if (selectedEntry?.id == entry.id) {
                         entry.report?.let { report ->
-                            SummaryCard(report)
+                            val displayPlayType = if (entry.kind == "review") {
+                                report.reviewPlayType
+                            } else {
+                                analysisPlayType ?: ReviewPlayType.Sfc14.value
+                            }
+                            val displayPredictions = report.predictionsForPlayType(displayPlayType, entry.kind == "review")
+                            SummaryCard(report, displayPlayType)
                             Row(
                                 modifier = Modifier.fillMaxWidth(),
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text(
-                                    text = if (entry.kind == "review") "逐场复盘" else "逐场预测",
+                                    text = if (entry.kind == "review") {
+                                        "逐场复盘"
+                                    } else if (displayPlayType == ReviewPlayType.Choose9.value) {
+                                        "任九逐场预测"
+                                    } else {
+                                        "十四场逐场预测"
+                                    },
                                     style = MaterialTheme.typography.titleMedium,
                                     fontWeight = FontWeight.Bold,
                                     modifier = Modifier.weight(1f),
@@ -2547,7 +2733,7 @@ private fun HistoryGroupCard(
                                     }
                                 }
                             }
-                            report.predictions.forEach { prediction ->
+                            displayPredictions.forEach { prediction ->
                                 PredictionCard(
                                     prediction = prediction,
                                     isReview = entry.kind == "review",
@@ -2645,7 +2831,10 @@ private fun resultText(prediction: MatchPrediction): String {
     }
 }
 
-private fun purchaseCostText(report: AnalysisReport): String {
+private fun purchaseCostText(report: AnalysisReport, playType: String = ReviewPlayType.Sfc14.value): String {
+    if (playType == ReviewPlayType.Choose9.value) {
+        return report.choose9?.let { "任九 ¥${"%,d".format(it.costYuan)}" }.orEmpty()
+    }
     report.linePortfolio?.let { portfolio ->
         return "购彩 ¥${"%,d".format(portfolio.costYuan)}"
     }
@@ -2656,33 +2845,40 @@ private fun purchaseCostText(report: AnalysisReport): String {
         return ""
     }
     val fourteenCost = "¥${"%,d".format(units * 2L)}"
-    val choose9Cost = report.choose9?.let { " · 任九 ¥${"%,d".format(it.costYuan)}" }.orEmpty()
-    return "十四场 $fourteenCost$choose9Cost"
+    val toleranceText = report.budget?.takeIf { it.overageYuan > 0 }?.let {
+        "（超额${it.overageYuan}元，容差${it.toleranceYuan}元）"
+    }.orEmpty()
+    return "十四场 $fourteenCost$toleranceText"
 }
 
-private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
-    appendLine("足球彩票分析 · 第 ${report.issue} 期")
+private fun feishuAnalysisText(report: AnalysisReport, playType: String): String = buildString {
+    val isChoose9 = playType == ReviewPlayType.Choose9.value
+    val playLabel = if (isChoose9) "任九" else "14场胜平负"
+    appendLine("足球彩票分析 · $playLabel · 第 ${report.issue} 期")
     appendLine(deadlineText(report))
-    purchaseCostText(report).takeIf { it.isNotBlank() }?.let(::appendLine)
-    appendLine("任九保留：${report.choose9Keep.joinToString("、")}")
-    appendLine("任九剔除：${report.choose9Drop.joinToString("、")}")
-    report.choose9?.let { choose9 ->
-        appendLine("任九独立票：${choose9.lineCount} 注 / ${choose9.costYuan} 元")
-        appendLine(
-            "任九票面：" + choose9.selections.joinToString(" · ") { selection ->
-                "${selection.seq}:${selection.pickText}"
-            },
-        )
-    }
+    purchaseCostText(report, playType).takeIf { it.isNotBlank() }?.let(::appendLine)
     appendLine()
-    report.linePortfolio?.let { portfolio ->
-        appendLine("预算组合：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")
-        appendLine("平局配额：${portfolio.drawCoverages.joinToString("；") { "${it.seq}场${it.actualLines}注" }}")
-    } ?: run {
-        appendLine("14 场出票建议")
-        report.predictions.forEach { prediction ->
-            val selection = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }.joinToString("/")
-            appendLine("${prediction.seq}. ${prediction.home} vs ${prediction.away}：$selection（${prediction.pickText}）")
+    if (isChoose9) {
+        appendLine("任九选场：${report.choose9Keep.joinToString("、")}")
+        appendLine("未选场次：${report.choose9Drop.joinToString("、")}")
+        report.choose9?.let { choose9 ->
+            appendLine("任九独立票：${choose9.lineCount} 注 / ${choose9.costYuan} 元")
+            appendLine(
+                "任九票面：" + choose9.selections.joinToString(" · ") { selection ->
+                    "${selection.seq}:${selection.pickText}"
+                },
+            )
+        }
+    } else {
+        report.linePortfolio?.let { portfolio ->
+            appendLine("预算组合：${portfolio.lineCount} 注 / ${portfolio.costYuan} 元")
+            appendLine("平局配额：${portfolio.drawCoverages.joinToString("；") { "${it.seq}场${it.actualLines}注" }}")
+        } ?: run {
+            appendLine("14 场出票建议")
+            report.predictions.forEach { prediction ->
+                val selection = prediction.pickLabels.ifEmpty { prediction.pickText.split("/") }.joinToString("/")
+                appendLine("${prediction.seq}. ${prediction.home} vs ${prediction.away}：$selection（${prediction.pickText}）")
+            }
         }
     }
     appendLine()
@@ -2690,14 +2886,16 @@ private fun feishuAnalysisText(report: AnalysisReport): String = buildString {
 }
 
 private fun recommendedChoiceCount(prediction: MatchPrediction): Int {
-    val pickCount = prediction.pickText
-        .split("/")
-        .count { it.isNotBlank() }
+    val pickCount = recommendedChoiceCount(prediction.pickText)
     if (pickCount > 0) {
         return pickCount
     }
     return prediction.pickLabels.size.coerceAtLeast(1)
 }
+
+private fun recommendedChoiceCount(pickText: String): Int = pickText
+    .split("/")
+    .count { it.isNotBlank() }
 
 private fun historyGroups(entries: List<HistoryEntry>): List<HistoryGroup> {
     return entries

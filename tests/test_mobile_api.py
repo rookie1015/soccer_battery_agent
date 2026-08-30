@@ -30,7 +30,10 @@ class MobileApiTests(unittest.TestCase):
         self.assertEqual(report["choose9"]["budget_scope"], "separate")
         self.assertEqual(len(report["choose9"]["selections"]), 9)
         self.assertEqual(report["choose9"]["cost_yuan"], report["choose9"]["line_count"] * 2)
-        self.assertLessEqual(report["choose9"]["cost_yuan"], report["choose9"]["limit_yuan"])
+        self.assertLessEqual(
+            report["choose9"]["cost_yuan"],
+            report["choose9"]["allowed_limit_yuan"],
+        )
         self.assertEqual(len(report["predictions"]), 14)
 
         first = report["predictions"][0]
@@ -57,7 +60,15 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("tactical_draw_count", report["metrics"])
         self.assertIn("draw_hedge_count", report["metrics"])
         self.assertIn("budget", report)
-        self.assertLessEqual(report["budget"]["total_cost_yuan"], report["budget"]["limit_yuan"])
+        self.assertLessEqual(
+            report["budget"]["total_cost_yuan"],
+            report["budget"]["allowed_limit_yuan"],
+        )
+        self.assertEqual(report["budget"]["tolerance_yuan"], 50)
+        self.assertEqual(
+            report["budget"]["overage_yuan"],
+            max(0, report["budget"]["total_cost_yuan"] - report["budget"]["limit_yuan"]),
+        )
         self.assertIsNone(report["draw_hedge"])
         self.assertIsNone(report["line_portfolio"])
         expected_units = 1

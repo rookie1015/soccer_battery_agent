@@ -35,7 +35,14 @@ from .models import (
 from .notifier import send_text
 from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
-from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
+from .review import (
+    REVIEW_PLAY_CHOOSE9,
+    REVIEW_PLAY_SFC14,
+    build_review,
+    fetch_results_with_fallbacks,
+    load_results,
+    write_review_report,
+)
 from .review_diagnostics import record_review_diagnostics
 from .post_match_context import find_post_match_evidence, normalize_evidence
 from .strategy import DEFAULT_MAX_TICKET_COST_YUAN, build_ticket_plan
@@ -668,6 +675,11 @@ def _parse_choose9_markdown(
         return None
     section = markdown_text.split(heading, 1)[1].split("\n## ", 1)[0]
     probability_match = re.search(r"^- 理论联合覆盖率：([\d.]+)%", section, re.MULTILINE)
+    tolerance_match = re.search(
+        r"^- 任九容差出票：超出名义上限 \d+ 元，未超过允许容差 (\d+) 元。?$",
+        section,
+        re.MULTILINE,
+    )
     matches = {
         int(prediction["seq"]): (str(prediction["home"]), str(prediction["away"]))
         for prediction in predictions
@@ -705,6 +717,7 @@ def _parse_choose9_markdown(
         "limit_yuan": int(summary.group(3)),
         "line_count": int(summary.group(1)),
         "cost_yuan": int(summary.group(2)),
+        "tolerance_yuan": int(tolerance_match.group(1)) if tolerance_match else 0,
         "joint_coverage_probability": (
             float(probability_match.group(1)) if probability_match else 0.0
         ),
@@ -730,6 +743,11 @@ def _parse_analysis_budget(
             "total_cost_yuan": cost,
         }
     total_match = re.search(r"^- 组合总成本：(\d+)/(\d+) 元。?$", markdown_text, re.MULTILINE)
+    tolerance_match = re.search(
+        r"^- 容差出票：超出名义上限 \d+ 元，未超过允许容差 (\d+) 元。?$",
+        markdown_text,
+        re.MULTILINE,
+    )
     cost = int(total_match.group(1)) if total_match else 0
     limit = int(total_match.group(2)) if total_match else cost
     return {
@@ -739,6 +757,7 @@ def _parse_analysis_budget(
         "hedge_allocated_yuan": 0,
         "hedge_cost_yuan": 0,
         "total_cost_yuan": cost,
+        "tolerance_yuan": int(tolerance_match.group(1)) if tolerance_match else 0,
     }
 
 
@@ -902,6 +921,8 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
 
     issue_match = re.search(r"^# 足球彩票复盘报告：(.+)$", markdown_text, re.MULTILINE)
     issue = issue_match.group(1).strip() if issue_match else fallback_issue
+    play_match = re.search(r"^- 复盘玩法：(14场胜平负|任九)$", markdown_text, re.MULTILINE)
+    play_type = REVIEW_PLAY_CHOOSE9 if play_match and play_match.group(1) == "任九" else REVIEW_PLAY_SFC14
     overview = _parse_review_overview(markdown_text)
     predictions = []
     keep: list[int] = []
@@ -919,7 +940,7 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
         seq = int(cells[0])
         home, away = _split_matchup(cells[1])
         analysis_pick_text, pick_text = _parse_review_selection(cells[4])
-        if cells[7] == "任九保留":
+        if cells[7] in {"任九保留", "任九选择"}:
             keep.append(seq)
         elif cells[7] == "任九剔除":
             drop.append(seq)
@@ -963,6 +984,7 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
         "issue": issue,
         "purchase_deadline": "",
         "purchase_deadline_source": "复盘报告",
+        "review_play_type": play_type,
         "sale_begin_time": "",
         "metrics": {
             "match_count": len(predictions),
@@ -993,7 +1015,10 @@ def _parse_review_selection(value: str) -> tuple[str, str]:
 
 def _parse_review_overview(markdown_text: str) -> dict[str, float]:
     overview: dict[str, float] = {}
-    outcome = re.search(r"- 胜平负命中：(\d+)/(\d+)（([0-9.]+)%", markdown_text)
+    outcome = re.search(
+        r"- (?:胜平负|14场胜平负|任九胜平负)命中：(\d+)/(\d+)（([0-9.]+)%",
+        markdown_text,
+    )
     if outcome:
         overview["outcome_hits"] = float(outcome.group(1))
         overview["outcome_rate"] = float(outcome.group(3))
@@ -1087,6 +1112,9 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
 
     issue_path = _resolve_local_issue_path(data_dir, issue)
     analysis_id = str(payload.get("analysis_id") or "").strip()
+    play_type = str(payload.get("play_type") or REVIEW_PLAY_SFC14).strip().lower()
+    if play_type not in {REVIEW_PLAY_SFC14, REVIEW_PLAY_CHOOSE9}:
+        raise ValueError("复盘玩法必须是十四场胜平负或任九。")
     plan = _load_analysis_plan(issue_path, history_dir, issue, analysis_id)
     auto_results = bool(payload.get("auto_results", True))
     results_csv = str(payload.get("results_csv") or "").strip()
@@ -1112,7 +1140,7 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         missing_text = "、".join(str(item) for item in missing)
         raise ValueError(f"{results_source} 赛果不完整，缺少第 {missing_text} 场。")
 
-    review = build_review(plan, results)
+    review = build_review(plan, results, play_type=play_type)
     post_match_evidence = find_post_match_evidence(review, cache_dir / "post_match_evidence")
     diagnostics = record_review_diagnostics(review, report_dir)
     markdown_path = report_dir / f"{_slug(plan.issue.issue)}_review.md"
@@ -1126,6 +1154,7 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         markdown_path,
         history_dir=history_dir,
         snapshot_path=_resolve_analysis_snapshot(history_dir, issue, analysis_id, issue_path),
+        condition_key=f"review|issue={issue}|play_type={play_type}|analysis_id={analysis_id}",
     )
     experiment = _refresh_model_experiment(root)
 
@@ -1303,6 +1332,9 @@ def _restore_analysis_recommendations(
         draw_hedge=restored_hedge,
         line_portfolio=restored_portfolio,
         choose9_plan=restored_choose9,
+        budget_tolerance_yuan=int(
+            budget.get("tolerance_yuan") or plan.budget_tolerance_yuan
+        ),
     )
 
 
@@ -1333,6 +1365,10 @@ def _restore_choose9(plan: TicketPlan, value: object) -> Choose9Plan | None:
             cost_yuan=int(value.get("cost_yuan") or 0),
             joint_coverage_probability=(
                 float(value.get("joint_coverage_probability") or 0.0) / 100.0
+            ),
+            budget_tolerance_yuan=int(
+                value.get("tolerance_yuan")
+                or (plan.choose9_plan.budget_tolerance_yuan if plan.choose9_plan else 0)
             ),
         )
     except (KeyError, TypeError, ValueError):
@@ -1444,12 +1480,24 @@ def _serialize_review_report(
     post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
 ) -> dict[str, object]:
     report = serialize_ticket_plan(review.plan, include_review_fields=True)
+    report["review_play_type"] = review.play_type
+    if review.play_type == REVIEW_PLAY_CHOOSE9:
+        report["draw_hedge"] = None
+        report["line_portfolio"] = None
     by_seq = {row.prediction.match.seq: row for row in review.rows}
-    predictions = []
+    serialized_predictions = []
     for prediction in report["predictions"]:
         row = by_seq.get(int(prediction["seq"]))
         if row:
             prediction = dict(prediction)
+            if review.play_type == REVIEW_PLAY_CHOOSE9:
+                prediction["pick_text"] = row.prediction.pick_text
+                prediction["picks"] = list(row.prediction.picks)
+                prediction["pick_labels"] = [OUTCOME_LABELS[pick] for pick in row.prediction.picks]
+                prediction["analysis_pick_text"] = row.prediction.pick_text
+                prediction["analysis_pick_labels"] = prediction["pick_labels"]
+                prediction["budget_adjusted"] = False
+                prediction["budget_forced_single"] = False
             prediction["final_score"] = row.result.score_text
             prediction["final_result"] = row.result.outcome
             prediction["final_result_label"] = row.result.outcome_label
@@ -1460,8 +1508,10 @@ def _serialize_review_report(
             prediction["post_match_evidence"] = normalize_evidence(
                 (post_match_evidence or {}).get(row.prediction.match.seq)
             )
-        predictions.append(prediction)
-    report["predictions"] = predictions
+            serialized_predictions.append(prediction)
+        elif review.play_type != REVIEW_PLAY_CHOOSE9:
+            serialized_predictions.append(prediction)
+    report["predictions"] = serialized_predictions
     report["purchase_deadline_source"] = "复盘报告"
     report["metrics"] = {
         "match_count": review.total,
@@ -1470,10 +1520,20 @@ def _serialize_review_report(
             1 for row in review.rows if len(row.prediction.picks) == 1 and row.outcome_hit
         ),
         "budget_forced_single_count": review.budget_caused_misses,
-        "draw_hedge_count": int(review.plan.draw_hedge is not None),
-        "line_portfolio_count": review.plan.line_portfolio.line_count if review.plan.line_portfolio else 0,
-        "line_portfolio_best_hits": review.line_portfolio_best_hits,
-        "actual_draw_combination_lines": review.actual_draw_combination_lines,
+        "draw_hedge_count": int(
+            review.play_type == REVIEW_PLAY_SFC14 and review.plan.draw_hedge is not None
+        ),
+        "line_portfolio_count": (
+            review.plan.line_portfolio.line_count
+            if review.play_type == REVIEW_PLAY_SFC14 and review.plan.line_portfolio
+            else 0
+        ),
+        "line_portfolio_best_hits": (
+            review.line_portfolio_best_hits if review.play_type == REVIEW_PLAY_SFC14 else 0
+        ),
+        "actual_draw_combination_lines": (
+            review.actual_draw_combination_lines if review.play_type == REVIEW_PLAY_SFC14 else 0
+        ),
         "low_risk_count": review.outcome_hits,
         "average_confidence": round(review.outcome_hits / review.total * 100, 1) if review.total else 0.0,
     }

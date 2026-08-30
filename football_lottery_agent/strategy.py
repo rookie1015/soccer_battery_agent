@@ -28,6 +28,7 @@ from .predictor import (
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
 STAKE_PER_LINE_YUAN = 2
+DEFAULT_BUDGET_OVERAGE_TOLERANCE_YUAN = 50
 MIN_SAFE_BUDGET_SINGLE_PROBABILITY = 0.60
 TACTICAL_DRAW_MIN_PROBABILITY = 0.29
 TACTICAL_DRAW_MAX_TOP_GAP = 0.06
@@ -43,6 +44,7 @@ DRAW_HEDGE_MAX_TOP_GAP = 0.12
 def build_ticket_plan(
     issue: Issue,
     max_ticket_cost_yuan: int = DEFAULT_MAX_TICKET_COST_YUAN,
+    budget_overage_tolerance_yuan: int = DEFAULT_BUDGET_OVERAGE_TOLERANCE_YUAN,
     model_weights: dict[str, float] | None = None,
     fundamental_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
@@ -58,10 +60,12 @@ def build_ticket_plan(
     ticket_predictions = _fit_predictions_to_budget(
         raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
+        budget_overage_tolerance_yuan=budget_overage_tolerance_yuan,
     )
     choose9_plan = _build_choose9_plan(
         raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
+        budget_overage_tolerance_yuan=budget_overage_tolerance_yuan,
     )
     choose9_keep = choose9_plan.keep
     choose9_drop = tuple(
@@ -84,6 +88,7 @@ def build_ticket_plan(
         draw_hedge=None,
         line_portfolio=None,
         choose9_plan=choose9_plan,
+        budget_tolerance_yuan=max(0, budget_overage_tolerance_yuan),
     )
 
 
@@ -652,6 +657,7 @@ def _build_choose9_plan(
     predictions: tuple[Prediction, ...],
     *,
     max_ticket_cost_yuan: int,
+    budget_overage_tolerance_yuan: int = 0,
 ) -> Choose9Plan:
     """Jointly optimize the nine fixtures and their rectangular selections.
 
@@ -661,7 +667,8 @@ def _build_choose9_plan(
     choice counts that fits the choose-nine budget while maximizing estimated
     joint coverage.
     """
-    max_units = max(1, max_ticket_cost_yuan // STAKE_PER_LINE_YUAN)
+    effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
+    max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
     # (selected fixture count, ticket units) -> (log coverage, predictions)
     states: dict[tuple[int, int], tuple[float, tuple[Prediction, ...]]] = {
         (0, 1): (0.0, ())
@@ -702,6 +709,7 @@ def _build_choose9_plan(
         line_count=units,
         cost_yuan=units * STAKE_PER_LINE_YUAN,
         joint_coverage_probability=round(exp(score), 8),
+        budget_tolerance_yuan=max(0, budget_overage_tolerance_yuan),
     )
 
 
@@ -774,11 +782,13 @@ def ticket_units(predictions: tuple[Prediction, ...]) -> int:
 def _fit_predictions_to_budget(
     predictions: tuple[Prediction, ...],
     max_ticket_cost_yuan: int,
+    budget_overage_tolerance_yuan: int = 0,
 ) -> tuple[Prediction, ...]:
     if max_ticket_cost_yuan <= 0:
         return predictions
 
-    max_units = max(1, max_ticket_cost_yuan // STAKE_PER_LINE_YUAN)
+    effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
+    max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
     if ticket_units(predictions) <= max_units:
         return predictions
 

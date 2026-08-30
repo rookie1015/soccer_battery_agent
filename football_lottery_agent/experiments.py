@@ -165,6 +165,8 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
     for entry in load_history_entries(history_dir):
         if entry.get("kind") != "review":
             continue
+        if "play_type=choose9" in str(entry.get("condition_key") or ""):
+            continue
         issue = str(entry.get("issue") or "").strip()
         if issue and issue not in latest_reviews:
             latest_reviews[issue] = entry

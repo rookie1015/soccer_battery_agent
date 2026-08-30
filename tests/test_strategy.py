@@ -33,11 +33,17 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(plan.choose9_plan.keep, plan.choose9_keep)
         self.assertEqual(plan.choose9_plan.line_count, prod(len(item.picks) for item in plan.choose9_plan.predictions))
         self.assertEqual(plan.choose9_plan.cost_yuan, plan.choose9_plan.line_count * 2)
-        self.assertLessEqual(plan.choose9_plan.cost_yuan, plan.choose9_plan.allocated_budget_yuan)
-        self.assertLessEqual(plan.total_cost_yuan, 2000)
+        self.assertLessEqual(
+            plan.choose9_plan.cost_yuan,
+            plan.choose9_plan.allocated_budget_yuan + plan.choose9_plan.budget_tolerance_yuan,
+        )
+        self.assertLessEqual(plan.total_cost_yuan, 2050)
         self.assertTrue(all(prediction.reasons[0].startswith("选择依据：") for prediction in plan.predictions))
         self.assertFalse(any(prediction.tactical_draw for prediction in plan.predictions))
-        self.assertLessEqual(plan.total_cost_yuan, plan.max_ticket_cost_yuan)
+        self.assertLessEqual(
+            plan.total_cost_yuan,
+            plan.max_ticket_cost_yuan + plan.budget_tolerance_yuan,
+        )
         self.assertEqual(plan.total_cost_yuan, ticket_cost_yuan(plan.predictions))
         self.assertIsNone(plan.line_portfolio)
 
@@ -98,7 +104,18 @@ class StrategyTests(unittest.TestCase):
         self.assertIsNone(plan.line_portfolio)
         self.assertEqual(plan.main_cost_yuan, expected_units * 2)
         self.assertEqual(plan.total_cost_yuan, expected_units * 2)
+        self.assertLessEqual(plan.total_cost_yuan, 550)
+        self.assertEqual(plan.total_cost_yuan, 512)
+
+    def test_budget_tolerance_can_be_disabled(self) -> None:
+        plan = build_ticket_plan(
+            load_issue("data/sample_issue.json"),
+            max_ticket_cost_yuan=500,
+            budget_overage_tolerance_yuan=0,
+        )
+
         self.assertLessEqual(plan.total_cost_yuan, 500)
+        self.assertEqual(plan.budget_tolerance_yuan, 0)
 
     def test_line_portfolio_preserves_draw_quotas_in_small_combination_space(self) -> None:
         base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2)
@@ -171,7 +188,7 @@ class StrategyTests(unittest.TestCase):
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
 
-        self.assertLessEqual(plan.total_cost_yuan, 128)
+        self.assertLessEqual(plan.total_cost_yuan, 178)
         self.assertEqual(plan.total_cost_yuan, ticket_cost_yuan(plan.predictions))
         self.assertIsNone(plan.line_portfolio)
 

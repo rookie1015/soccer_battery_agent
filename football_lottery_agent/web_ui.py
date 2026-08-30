@@ -21,7 +21,14 @@ from .models import Match, Odds, Signals
 from .notifier import NotifyError, send_report, send_text
 from .predictor import OUTCOME_LABELS, predict_match
 from .report import write_report
-from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
+from .review import (
+    REVIEW_PLAY_CHOOSE9,
+    REVIEW_PLAY_SFC14,
+    build_review,
+    fetch_results_with_fallbacks,
+    load_results,
+    write_review_report,
+)
 from .strategy import build_ticket_plan
 
 
@@ -106,7 +113,7 @@ def render_ui() -> str:
       font-weight: 700;
       font-size: 12px;
     }
-    input, textarea {
+    input, textarea, select {
       width: 100%;
       border: 1px solid var(--line);
       border-radius: 6px;
@@ -274,8 +281,19 @@ def render_ui() -> str:
       <article class="panel">
         <h2>生成赛后复盘</h2>
         <p class="hint">填写期号后，会优先使用该期已生成的赛前数据并从多个来源自动拉取赛果；如果来源未更新，再取消自动拉取并粘贴 CSV。</p>
-        <label for="reviewIssue">期号</label>
-        <input id="reviewIssue" value="26087" autocomplete="off" required>
+        <div class="row">
+          <div>
+            <label for="reviewIssue">期号</label>
+            <input id="reviewIssue" value="26087" autocomplete="off" required>
+          </div>
+          <div>
+            <label for="reviewPlayType">复盘玩法</label>
+            <select id="reviewPlayType">
+              <option value="sfc14">14场胜平负</option>
+              <option value="choose9">任九</option>
+            </select>
+          </div>
+        </div>
         <label class="check"><input id="autoResults" type="checkbox" checked> 多来源自动拉取赛果</label>
         <label for="resultsCsv">赛果 CSV</label>
         <textarea id="resultsCsv">seq,score
@@ -467,6 +485,7 @@ def render_ui() -> str:
       try {
         const data = await postJson("/api/review", {
           issue: document.getElementById("reviewIssue").value.trim(),
+          play_type: document.getElementById("reviewPlayType").value,
           auto_results: autoResults,
           results_csv: document.getElementById("resultsCsv").value,
           no_history: document.getElementById("reviewNoHistory").checked,
@@ -735,6 +754,9 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
     issue_path = _resolve_review_issue_path(requested_issue, payload)
     results_csv = str(payload.get("results_csv") or "").strip()
     auto_results = bool(payload.get("auto_results", True))
+    play_type = str(payload.get("play_type") or REVIEW_PLAY_SFC14).strip().lower()
+    if play_type not in {REVIEW_PLAY_SFC14, REVIEW_PLAY_CHOOSE9}:
+        raise ValueError("复盘玩法必须是十四场胜平负或任九。")
     if not auto_results and not results_csv:
         raise ValueError("请粘贴赛果 CSV。")
 
@@ -768,13 +790,20 @@ def _run_review(payload: dict[str, object]) -> dict[str, object]:
             results = load_results(temp_results)
         finally:
             temp_results.unlink(missing_ok=True)
-    review = build_review(plan, results)
+    review = build_review(plan, results, play_type=play_type)
 
     write_review_report(review, markdown_path)
     write_review_html(review, html_path)
     history_path = None
     if not bool(payload.get("no_history", False)):
-        history_path = archive_report("review", issue.issue, html_path, markdown_path, history_dir=history_dir)
+        history_path = archive_report(
+            "review",
+            issue.issue,
+            html_path,
+            markdown_path,
+            history_dir=history_dir,
+            condition_key=f"review|issue={issue.issue}|play_type={play_type}",
+        )
     delivery = _feishu_delivery_suffix(payload, report_path=markdown_path)
 
     return {

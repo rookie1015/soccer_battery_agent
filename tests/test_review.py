@@ -7,6 +7,7 @@ from unittest.mock import patch
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.review import (
     MatchResult,
+    REVIEW_PLAY_CHOOSE9,
     _diagnostic_tags,
     build_review,
     fetch_sporttery_results,
@@ -21,6 +22,29 @@ from football_lottery_agent.strategy import _build_line_portfolio, _fit_predicti
 
 
 class ReviewTests(unittest.TestCase):
+    def test_choose9_review_uses_only_independent_nine_match_ticket(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=500)
+        assert plan.choose9_plan is not None
+        choose9_by_seq = {
+            prediction.match.seq: prediction
+            for prediction in plan.choose9_plan.predictions
+        }
+        results = {}
+        for prediction in plan.predictions:
+            chosen = choose9_by_seq.get(prediction.match.seq, prediction)
+            outcome = chosen.picks[0]
+            score = (1, 0) if outcome == "3" else (0, 0) if outcome == "1" else (0, 1)
+            results[prediction.match.seq] = MatchResult(prediction.match.seq, *score)
+
+        review = build_review(plan, results, play_type=REVIEW_PLAY_CHOOSE9)
+        markdown = render_review_markdown(review)
+
+        self.assertEqual(review.total, 9)
+        self.assertEqual(review.outcome_hits, 9)
+        self.assertTrue(all(row.bucket == "任九选择" for row in review.rows))
+        self.assertIn("复盘玩法：任九", markdown)
+        self.assertIn("任九胜平负命中：9/9", markdown)
+
     def test_load_results_accepts_score_column(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "results.csv"

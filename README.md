@@ -6,7 +6,7 @@
 
 ## 当前版本
 
-- Android：`0.4.0`（versionCode `12`）
+- Android：`0.4.1`（versionCode `13`）
 - 更新日期：`2026-08-29`
 - Python：`3.10+`
 - 自动测试：`223` 项
@@ -57,7 +57,7 @@ android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-App 版本 0.4.0（12） · 市场锚定与滚动候选模型
+App 版本 0.4.1（13） · 市场锚定与滚动候选模型
 ```
 
 ## 数据来源

@@ -89,6 +89,12 @@ def render_markdown(plan: TicketPlan) -> str:
     lines.append(
         f"- 组合总成本：{plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元。"
     )
+    overage = max(0, plan.total_cost_yuan - plan.max_ticket_cost_yuan)
+    if overage:
+        lines.append(
+            f"- 容差出票：超出名义上限 {overage} 元，未超过允许容差 "
+            f"{plan.budget_tolerance_yuan} 元。"
+        )
     unused_budget = max(0, plan.max_ticket_cost_yuan - plan.total_cost_yuan)
     if unused_budget:
         lines.append(
@@ -104,6 +110,12 @@ def render_markdown(plan: TicketPlan) -> str:
             f"- 任九票：独立选择 9 场，{choose9.line_count} 注，每注 2 元，"
             f"实际 {choose9.cost_yuan}/{choose9.allocated_budget_yuan} 元。"
         )
+        choose9_overage = max(0, choose9.cost_yuan - choose9.allocated_budget_yuan)
+        if choose9_overage:
+            lines.append(
+                f"- 任九容差出票：超出名义上限 {choose9_overage} 元，未超过允许容差 "
+                f"{choose9.budget_tolerance_yuan} 元。"
+            )
         lines.append(
             "- 预算口径：任九与十四场共享基础概率，但场次和票面分别优化；"
             "两种玩法的金额各自计算，若同时购买需要相加。"

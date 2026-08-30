@@ -13,6 +13,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     main_cost_yuan = _int_plan_attr(plan, "main_cost_yuan")
     limit_yuan = _int_plan_attr(plan, "max_ticket_cost_yuan")
     total_cost_yuan = main_cost_yuan + (draw_hedge.cost_yuan if draw_hedge else 0)
+    tolerance_yuan = max(0, _int_plan_attr(plan, "budget_tolerance_yuan"))
     foreign_odds_status = plan.issue.metadata.get("foreign_odds_audit")
     if not isinstance(foreign_odds_status, dict) or not foreign_odds_status.get("requested"):
         foreign_odds_status = None
@@ -57,6 +58,9 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
             "hedge_cost_yuan": draw_hedge.cost_yuan if draw_hedge else 0,
             "total_cost_yuan": total_cost_yuan,
             "unused_yuan": max(0, limit_yuan - total_cost_yuan),
+            "overage_yuan": max(0, total_cost_yuan - limit_yuan),
+            "tolerance_yuan": tolerance_yuan,
+            "allowed_limit_yuan": limit_yuan + tolerance_yuan,
             "utilization_percent": round(
                 total_cost_yuan / max(limit_yuan, 1) * 100,
                 1,
@@ -82,6 +86,9 @@ def _serialize_choose9(plan: TicketPlan) -> dict[str, object] | None:
         "mode": "independent",
         "budget_scope": "separate",
         "limit_yuan": choose9.allocated_budget_yuan,
+        "tolerance_yuan": choose9.budget_tolerance_yuan,
+        "allowed_limit_yuan": choose9.allocated_budget_yuan + choose9.budget_tolerance_yuan,
+        "overage_yuan": max(0, choose9.cost_yuan - choose9.allocated_budget_yuan),
         "line_count": choose9.line_count,
         "cost_yuan": choose9.cost_yuan,
         "joint_coverage_probability": round(choose9.joint_coverage_probability * 100, 2),

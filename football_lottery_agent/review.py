@@ -5,7 +5,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .json_utils import loads_json
@@ -18,6 +18,8 @@ SPORTTERY_HISTORY_URL = "https://webapi.sporttery.cn/gateway/lottery/getHistoryP
 EASTMONEY_SFC_URL = "https://caipiao.eastmoney.com/Result/Category/sfc"
 EASTMONEY_HISTORY_URL = "https://caipiao.eastmoney.com/Result/History/sfc"
 WUBAI_SFC_URL = "https://kaijiang.500.com/sfc.shtml"
+REVIEW_PLAY_SFC14 = "sfc14"
+REVIEW_PLAY_CHOOSE9 = "choose9"
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ class MatchReview:
 class ReviewReport:
     plan: TicketPlan
     rows: tuple[MatchReview, ...]
+    play_type: str = REVIEW_PLAY_SFC14
 
     @property
     def total(self) -> int:
@@ -372,7 +375,13 @@ def parse_sporttery_result_row(row: dict[str, object]) -> dict[int, MatchResult]
     return {seq: _result_from_outcome(seq, outcome) for seq, outcome in enumerate(outcomes[:14], start=1)}
 
 
-def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewReport:
+def build_review(
+    plan: TicketPlan,
+    results: dict[int, MatchResult],
+    play_type: str = REVIEW_PLAY_SFC14,
+) -> ReviewReport:
+    if play_type not in {REVIEW_PLAY_SFC14, REVIEW_PLAY_CHOOSE9}:
+        raise ValueError("复盘玩法必须是十四场胜平负或任九。")
     rows: list[MatchReview] = []
     missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
     if missing:
@@ -387,10 +396,30 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
         for prediction in plan.predictions
         if prediction.match.seq in keep
     }
-    for prediction in plan.predictions:
+    review_predictions = plan.predictions
+    if play_type == REVIEW_PLAY_CHOOSE9:
+        if not plan.choose9_plan:
+            raise ValueError("该分析记录没有任九票面，无法进行任九复盘。")
+        review_predictions = tuple(
+            replace(
+                prediction,
+                original_picks=prediction.picks,
+                budget_adjusted=False,
+                budget_forced_single=False,
+                budget_removed_picks=(),
+            )
+            for prediction in plan.choose9_plan.predictions
+        )
+    for prediction in review_predictions:
         result = results[prediction.match.seq]
         score_texts = tuple(item.text for item in prediction.scorelines)
-        bucket = "任九保留" if result.seq in keep else "任九剔除"
+        bucket = (
+            "任九选择"
+            if play_type == REVIEW_PLAY_CHOOSE9
+            else "任九保留"
+            if result.seq in keep
+            else "任九剔除"
+        )
         rows.append(
             MatchReview(
                 prediction=prediction,
@@ -412,7 +441,7 @@ def build_review(plan: TicketPlan, results: dict[int, MatchResult]) -> ReviewRep
                 diagnostic_tags=_diagnostic_tags(prediction, result),
             )
         )
-    return ReviewReport(plan=plan, rows=tuple(rows))
+    return ReviewReport(plan=plan, rows=tuple(rows), play_type=play_type)
 
 
 def render_review_markdown(
@@ -428,13 +457,18 @@ def render_review_markdown(
     lines.append("")
     lines.append("> 复盘只用于校验模型与记录决策质量，不代表后续场次必然延续同样表现。")
     lines.append("")
+    lines.append(
+        f"- 复盘玩法：{'任九' if report.play_type == REVIEW_PLAY_CHOOSE9 else '14场胜平负'}"
+    )
+    lines.append("")
     lines.append("## 总览")
     lines.append("")
-    lines.append(f"- 胜平负命中：{report.outcome_hits}/{report.total}（{_rate(report.outcome_hits, report.total)}）")
+    outcome_title = "任九胜平负命中" if report.play_type == REVIEW_PLAY_CHOOSE9 else "14场胜平负命中"
+    lines.append(f"- {outcome_title}：{report.outcome_hits}/{report.total}（{_rate(report.outcome_hits, report.total)}）")
     lines.append(f"- 单选命中：{report.single_hits}/{single_total}（{_rate(report.single_hits, single_total)}）")
     lines.append(f"- 预算压缩导致漏判：{report.budget_caused_misses} 场")
     lines.append(f"- 其中预算删平导致漏判：{report.budget_draw_caused_misses} 场")
-    if report.plan.draw_hedge:
+    if report.play_type == REVIEW_PLAY_SFC14 and report.plan.draw_hedge:
         candidate_mark = (
             "未结算"
             if report.draw_hedge_candidate_hit is None
@@ -453,7 +487,7 @@ def render_review_markdown(
             f"- 平局对冲：候选单平{candidate_mark}；分支覆盖 "
             f"{report.draw_hedge_outcome_hits}/{report.total}，整支{full_mark}。"
         )
-    if report.plan.line_portfolio:
+    if report.play_type == REVIEW_PLAY_SFC14 and report.plan.line_portfolio:
         lines.append(
             f"- 独立线路：最佳一注命中 {report.line_portfolio_best_hits}/{report.total}；"
             f"整注{'命中' if report.line_portfolio_hit else '未中'}。"

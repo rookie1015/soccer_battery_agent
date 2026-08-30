@@ -5,7 +5,7 @@ from pathlib import Path
 
 from .models import Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
-from .review import ReviewReport
+from .review import REVIEW_PLAY_CHOOSE9, ReviewReport
 
 
 def write_analysis_html(plan: TicketPlan, output_path: str | Path) -> Path:
@@ -199,9 +199,10 @@ def render_review_html(report: ReviewReport) -> str:
     single_total = len(report.single_rows)
     keep_total = len(report.keep_rows)
     drop_total = len(report.drop_rows)
+    play_label = "任九" if report.play_type == REVIEW_PLAY_CHOOSE9 else "14场胜平负"
     cards = "\n".join(
         [
-            _rate_card("胜平负命中", report.outcome_hits, total),
+            _rate_card(f"{play_label}命中", report.outcome_hits, total),
             _rate_card("单选命中", report.single_hits, single_total),
             _rate_card("预算漏判", report.budget_caused_misses, total),
             _rate_card("预算删平漏判", report.budget_draw_caused_misses, total),
@@ -212,7 +213,7 @@ def render_review_html(report: ReviewReport) -> str:
         ]
     )
     hedge_review = ""
-    if report.plan.draw_hedge:
+    if report.play_type != REVIEW_PLAY_CHOOSE9 and report.plan.draw_hedge:
         candidate_mark = (
             "未结算"
             if report.draw_hedge_candidate_hit is None
@@ -228,7 +229,7 @@ def render_review_html(report: ReviewReport) -> str:
         </section>
         """
     portfolio_review = ""
-    if report.plan.line_portfolio:
+    if report.play_type != REVIEW_PLAY_CHOOSE9 and report.plan.line_portfolio:
         portfolio_review = f"""
         <section class="panel">
           <div class="section-title"><h2>独立线路复盘</h2><span>{report.plan.line_portfolio.line_count} 注</span></div>
@@ -242,7 +243,7 @@ def render_review_html(report: ReviewReport) -> str:
         <section class="hero">
           <div>
             <p class="eyebrow">Review Dashboard</p>
-            <h1>足球彩票复盘报告：{escape(report.plan.issue.issue)}</h1>
+            <h1>足球彩票复盘报告：{escape(report.plan.issue.issue)} · {play_label}</h1>
             <p class="subtle">复盘用于校验模型与记录决策质量，不代表后续场次必然延续同样表现。</p>
           </div>
         </section>

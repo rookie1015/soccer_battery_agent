@@ -210,6 +210,7 @@ class Choose9Plan:
     line_count: int
     cost_yuan: int
     joint_coverage_probability: float
+    budget_tolerance_yuan: int = 0
 
     @property
     def keep(self) -> tuple[int, ...]:
@@ -228,6 +229,7 @@ class TicketPlan:
     draw_hedge: DrawHedgePlan | None = None
     line_portfolio: LinePortfolioPlan | None = None
     choose9_plan: Choose9Plan | None = None
+    budget_tolerance_yuan: int = 0
 
     @property
     def total_cost_yuan(self) -> int:
