@@ -53,6 +53,7 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("blend_weights", first)
         self.assertIn("fundamental_audit", first)
         self.assertIn("mathematical_corrections", first)
+        self.assertIn("draw_calibration", first)
         self.assertIn("unused_yuan", report["budget"])
         self.assertIn("utilization_percent", report["budget"])
         self.assertIn("ticket_single_count", report["metrics"])

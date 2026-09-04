@@ -14,6 +14,7 @@ from football_lottery_agent.strength_model import (
     _learn_one_sided_provider_aliases,
     _learn_bilingual_provider_aliases,
     _learn_unique_context_provider_aliases,
+    _league_fixture_to_match_stat,
     _match_fotmob_event,
     _match_details_payload,
     _read_json_object,
@@ -29,6 +30,30 @@ from football_lottery_agent.team_identity import (
 
 
 class StrengthModelTests(unittest.TestCase):
+    def test_league_fixture_is_converted_to_canonical_training_row(self) -> None:
+        row = _league_fixture_to_match_stat(
+            {
+                "id": "501",
+                "home": {"id": "10", "name": "Home"},
+                "away": {"id": "20", "name": "Away"},
+                "status": {
+                    "type": "finished",
+                    "finished": True,
+                    "utcTime": "2026-08-20T18:00:00Z",
+                    "scoreStr": "2 - 1",
+                },
+            },
+            47,
+            "Premier League",
+        )
+
+        self.assertIsNotNone(row)
+        self.assertEqual(row.home_team_id, 10)
+        self.assertEqual(row.away_team_id, 20)
+        self.assertEqual(row.goals_for, 2)
+        self.assertEqual(row.goals_against, 1)
+        self.assertEqual(row.league_id, 47)
+
     def test_match_details_payload_is_reused_within_fixture(self) -> None:
         shared = {}
         expected = {"general": {"matchId": 99}}

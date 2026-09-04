@@ -12,6 +12,7 @@ import urllib.parse
 from .collectors import collect_issue
 from .calibration import build_calibration
 from .experiments import (
+    load_active_draw_calibration_coefficients,
     load_active_fundamental_coefficients,
     load_active_model_weights,
     load_active_selection_policy,
@@ -272,6 +273,7 @@ def _run_analysis(
     calibration = build_calibration(root)
     active_weights = load_active_model_weights(root)
     active_fundamental_coefficients = load_active_fundamental_coefficients(root)
+    active_draw_coefficients = load_active_draw_calibration_coefficients(root)
     active_selection_policy = load_active_selection_policy(root)
     if active_weights is not None:
         calibration = {
@@ -292,6 +294,8 @@ def _run_analysis(
         strategy_options["model_weights"] = active_weights
     if active_fundamental_coefficients is not None:
         strategy_options["fundamental_coefficients"] = active_fundamental_coefficients
+    if active_draw_coefficients is not None:
+        strategy_options["draw_calibration_coefficients"] = active_draw_coefficients
     if active_selection_policy is not None:
         strategy_options["selection_policy"] = active_selection_policy
     strategy_options["evidence_aware_secondary"] = True
@@ -491,8 +495,10 @@ def _record_analysis_mode(
 
 
 def run_history(work_dir: str | Path) -> dict[str, object]:
-    history_dir = Path(work_dir) / "reports" / "history"
+    root = Path(work_dir)
+    history_dir = root / "reports" / "history"
     entries = []
+    analysis_calibration: dict[str, object] | None = None
     for item in load_history_entries(history_dir):
         entry = dict(item)
         markdown = str(entry.get("markdown") or "")
@@ -507,7 +513,14 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
             str(entry.get("kind") or ""),
         )
         if report is not None and str(entry.get("kind") or "") == "analysis":
-            report = _restore_history_metadata(report, Path(work_dir), str(entry.get("issue") or ""))
+            report = _restore_history_metadata(report, root, str(entry.get("issue") or ""))
+            # Archived reports are rebuilt from Markdown, which predates the
+            # structured model-status field returned by run_analysis.  Attach
+            # the same current, version-checked status here so Android does not
+            # silently lose it as soon as the history list is refreshed.
+            if analysis_calibration is None:
+                analysis_calibration = build_calibration(root)
+            report["model_calibration"] = analysis_calibration
         entry["report"] = report
         entries.append(entry)
     return {"ok": True, "entries": entries}

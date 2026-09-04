@@ -186,6 +186,7 @@ def collect_issue(
         )
     check_cancelled()
     finish_stage("strength")
+    pooled_strength_history = _strength_history_pool(strength_by_seq.values())
     foreign_requested = foreign_odds_requested or foreign_odds
     foreign_odds_audit: dict[str, Any] = {
         "provider": "the_odds_api",
@@ -399,7 +400,7 @@ def collect_issue(
         # overwritten when FotMob/SofaScore matched both teams.
         signals = _apply_strength_to_signals(signals, strength)
         signals = _apply_sina_detail_to_signals(signals, detail)
-        strength_source = _strength_source(strength)
+        strength_source = _strength_source(strength, pooled_strength_history)
         selected_market = _selected_market_source(detail, foreign)
         if not foreign and item.seq not in odds_by_seq and odds_reconciliation.status in {
             "mirrored_primary_corrected",
@@ -473,7 +474,7 @@ def collect_issue(
         "foreign_odds_audit": foreign_odds_audit,
         "free_auxiliary_sources_audit": auxiliary_result.audit,
         "snapshot_collected_at": datetime.now(timezone.utc).isoformat(),
-        "snapshot_schema_version": "1",
+        "snapshot_schema_version": "2",
         "collection_timings_seconds": timings,
     }
     output.write_text(
@@ -1490,7 +1491,10 @@ def _polymarket_notes(signal: Any) -> list[str]:
     return [f"Polymarket预测市场：{question}；市场概率 {summary}{volume_text}。"]
 
 
-def _strength_source(strength: Any) -> dict[str, Any]:
+def _strength_source(
+    strength: Any,
+    pooled_recent_matches: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if not strength:
         return {}
     home = getattr(strength, "home", None)
@@ -1498,6 +1502,27 @@ def _strength_source(strength: Any) -> dict[str, Any]:
     home_squad = getattr(strength, "home_squad", None)
     away_squad = getattr(strength, "away_squad", None)
     source = dict(getattr(strength, "source", {}) or {})
+    candidate_league_id = int(source.get("candidate_league_id") or 0)
+    candidate_league = str(source.get("candidate_league") or "").strip().casefold()
+    pooled_league_matches = [
+        row
+        for row in (pooled_recent_matches or [])
+        if (
+            candidate_league_id
+            and int(row.get("league_id") or 0) == candidate_league_id
+        )
+        or (
+            not candidate_league_id
+            and candidate_league
+            and str(row.get("league") or "").strip().casefold() == candidate_league
+        )
+    ]
+    league_recent_matches = _deduplicate_strength_rows(
+        [
+            *_strength_match_rows(getattr(strength, "league_history", ())),
+            *pooled_league_matches,
+        ]
+    )
     identity_matched = bool(
         source.get("matched_event_id")
         and source.get("home_team_id")
@@ -1539,6 +1564,9 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "home_goals_against": getattr(home, "goals_against_per_match", None),
         "away_goals_for": getattr(away, "goals_for_per_match", None),
         "away_goals_against": getattr(away, "goals_against_per_match", None),
+        "home_recent_matches": _strength_recent_matches(home),
+        "away_recent_matches": _strength_recent_matches(away),
+        "league_recent_matches": league_recent_matches,
         "home_squad_paper_rating": getattr(home_squad, "paper_rating", None),
         "away_squad_paper_rating": getattr(away_squad, "paper_rating", None),
         "home_squad_current_rating": getattr(home_squad, "current_rating", None),
@@ -1554,6 +1582,60 @@ def _strength_source(strength: Any) -> dict[str, Any]:
         "home_squad_availability_penalty": getattr(home_squad, "availability_penalty", None),
         "away_squad_availability_penalty": getattr(away_squad, "availability_penalty", None),
     }
+
+
+def _strength_recent_matches(profile: Any) -> list[dict[str, Any]]:
+    return _strength_match_rows(getattr(profile, "recent_matches", ()) if profile is not None else ())
+
+
+def _strength_match_rows(items: Any) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for item in items:
+        is_home = bool(getattr(item, "is_home", False))
+        xg_for = getattr(item, "xg_for", None)
+        xg_against = getattr(item, "xg_against", None)
+        result.append(
+            {
+                "match_id": int(getattr(item, "match_id", 0) or 0),
+                "kickoff": str(getattr(item, "date", "") or ""),
+                "league_id": int(getattr(item, "league_id", 0) or 0),
+                "league": str(getattr(item, "league", "") or ""),
+                "home_team_id": int(getattr(item, "home_team_id", 0) or 0),
+                "away_team_id": int(getattr(item, "away_team_id", 0) or 0),
+                "home_team": str(getattr(item, "home_team", "") or ""),
+                "away_team": str(getattr(item, "away_team", "") or ""),
+                "home_goals": int(getattr(item, "goals_for" if is_home else "goals_against", 0) or 0),
+                "away_goals": int(getattr(item, "goals_against" if is_home else "goals_for", 0) or 0),
+                "home_xg": xg_for if is_home else xg_against,
+                "away_xg": xg_against if is_home else xg_for,
+                "neutral_venue": bool(getattr(item, "neutral_venue", False)),
+            }
+        )
+    return result
+
+
+def _deduplicate_strength_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_match: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("match_id") or "").strip() or (
+            f"{row.get('kickoff')}|{row.get('home_team_id')}|{row.get('away_team_id')}"
+        )
+        previous = by_match.get(key)
+        if previous is None or (
+            previous.get("home_xg") is None
+            and row.get("home_xg") is not None
+            and row.get("away_xg") is not None
+        ):
+            by_match[key] = row
+    return list(by_match.values())
+
+
+def _strength_history_pool(strengths: Any) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for strength in strengths:
+        for profile in (getattr(strength, "home", None), getattr(strength, "away", None)):
+            rows.extend(_strength_recent_matches(profile))
+    return _deduplicate_strength_rows(rows)
 
 
 def _selected_market_source(detail: SinaDetail, foreign: Any) -> dict[str, Any]:
@@ -1717,19 +1799,9 @@ def _apply_strength_to_signals(signals: dict[str, float], strength: Any) -> dict
     away = strength.away
     updated["home_form"] = _clamp_signal(home.rating)
     updated["away_form"] = _clamp_signal(away.rating)
-    home_xg_edge = _xg_edge(home)
-    away_xg_edge = _xg_edge(away)
-    if home_xg_edge is not None:
-        updated["home_motivation"] = _clamp_signal(updated["home_motivation"] + home_xg_edge * 0.08)
-    if away_xg_edge is not None:
-        updated["away_motivation"] = _clamp_signal(updated["away_motivation"] + away_xg_edge * 0.08)
+    # xG belongs to Dixon-Coles. It must not leak into the separately weighted
+    # motivation feature, where it would become a second copy of the same data.
     return updated
-
-
-def _xg_edge(profile: Any) -> float | None:
-    if profile.xg_for_per_match is None or profile.xg_against_per_match is None:
-        return None
-    return profile.xg_for_per_match - profile.xg_against_per_match
 
 
 def _clamp_signal(value: float) -> float:

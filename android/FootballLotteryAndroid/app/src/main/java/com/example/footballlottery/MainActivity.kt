@@ -1688,7 +1688,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.4.1（13） · 市场锚定与滚动候选模型",
+                        "App 版本 0.5.0（14） · 市场残差与拟合式 Dixon-Coles",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -2420,9 +2420,9 @@ private fun ForeignOddsStatusCard(status: ForeignOddsStatus) {
 
 private fun calibrationText(calibration: ModelCalibration): String {
     return if (calibration.status == "experiment_active") {
-        "纯胜平负权重已通过严格赛前走步回测：赔率 ${"%.0f".format(calibration.oddsWeight * 100)}% · 基本面 ${"%.0f".format(calibration.signalsWeight * 100)}% · Dixon-Coles ${"%.0f".format(calibration.dixonColesWeight * 100)}%"
+        "市场残差模型已通过严格赛前走步回测：市场基线 ${"%.0f".format(calibration.oddsWeight * 100)}% · 基本面修正强度 ${"%.0f".format(calibration.signalsWeight * 100)}% · 数学修正强度 ${"%.0f".format(calibration.dixonColesWeight * 100)}%"
     } else {
-        "纯胜平负回测：已收集 ${calibration.sampleCount}/${calibration.minimumSamples} 场真实复盘，未通过晋级门槛前使用默认权重。"
+        "市场残差模型回测：严格赛前样本 ${calibration.sampleCount}/${calibration.minimumSamples} 场；未完成独立测试并通过晋级门槛前使用默认修正强度。"
     }
 }
 

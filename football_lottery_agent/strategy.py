@@ -6,6 +6,7 @@ from itertools import product
 from math import exp, log
 from random import Random
 
+from .fundamentals import build_fundamental_profile
 from .models import (
     Choose9Plan,
     DrawHedgePlan,
@@ -20,7 +21,6 @@ from .predictor import (
     SELECTION_OUTCOME_LABELS,
     SELECTION_REASON_PREFIX,
     _draw_context,
-    _has_informative_signals,
     predict_issue,
     selection_reason,
 )
@@ -47,6 +47,7 @@ def build_ticket_plan(
     budget_overage_tolerance_yuan: int = DEFAULT_BUDGET_OVERAGE_TOLERANCE_YUAN,
     model_weights: dict[str, float] | None = None,
     fundamental_coefficients: dict[str, float] | None = None,
+    draw_calibration_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> TicketPlan:
@@ -54,6 +55,7 @@ def build_ticket_plan(
         issue.matches,
         model_weights=model_weights,
         fundamental_coefficients=fundamental_coefficients,
+        draw_calibration_coefficients=draw_calibration_coefficients,
         evidence_aware_secondary=evidence_aware_secondary,
         selection_policy=selection_policy,
     )
@@ -467,34 +469,15 @@ def _draw_hedge_assessment(prediction: Prediction) -> tuple[float | None, tuple[
     if information_support:
         evidence.append(information_text)
 
-    # Candidate ranking remains market anchored.  Context and the goal model
-    # qualify a candidate but are not added as independent bonuses because
-    # they often originate from overlapping match data.
-    score = (
-        0.80 * market_draw
-        + 0.20 * draw_probability
-        + 0.10 * max(0.0, draw_probability - market_draw)
-        - 0.05 * top_gap
-    )
+    # The gates above may veto unsupported candidates, but ranking uses the
+    # final model output once. Market and mathematical values are already in
+    # that probability and must not be added again as separate bonuses.
+    score = draw_probability - 0.05 * top_gap
     return score, tuple(evidence)
 
 
 def _draw_hedge_information_support(prediction: Prediction) -> tuple[bool, str]:
-    if not _has_informative_signals(prediction.match):
-        return False, ""
-    expected_total, recent_draw_rate = _draw_context(prediction.match)
-    # Values below 1.2 were observed when incomplete xG inputs collapsed.  They
-    # are not credible enough to qualify a hedge candidate.
-    credible_low_scoring = expected_total is not None and 1.20 <= expected_total <= 2.40
-    draw_prone = recent_draw_rate is not None and recent_draw_rate >= 0.30
-    if not credible_low_scoring and not draw_prone:
-        return False, ""
-    details = []
-    if credible_low_scoring:
-        details.append(f"预期总进球 {expected_total:.2f}")
-    if draw_prone:
-        details.append(f"近期/交锋平局率 {recent_draw_rate:.1%}")
-    return True, "信息支持：" + "、".join(details)
+    return _independent_draw_information_support(prediction, minimum_total=1.20)
 
 
 def _fix_draw_hedge_candidate(
@@ -590,14 +573,9 @@ def _tactical_draw_assessment(prediction: Prediction) -> tuple[float | None, tup
     if not market_support and not information_support:
         return None, ()
 
-    market_draw = market.get("1", 0.0)
-    score = (
-        draw_probability
-        - 0.60 * top_gap
-        + 0.35 * max(0.0, math_draw - market_draw)
-        + 0.008 * int(market_support)
-        + 0.008 * int(information_support)
-    )
+    # Supporting sources are admission gates only. The final probability has
+    # already blended them, so candidate ranking must not award them again.
+    score = draw_probability - 0.60 * top_gap
     return score, tuple(evidence)
 
 
@@ -631,11 +609,32 @@ def _tactical_market_draw_support(prediction: Prediction) -> tuple[bool, str]:
 
 
 def _tactical_information_draw_support(prediction: Prediction) -> tuple[bool, str]:
-    if not _has_informative_signals(prediction.match):
-        return False, ""
+    return _independent_draw_information_support(prediction)
+
+
+def _independent_draw_information_support(
+    prediction: Prediction,
+    *,
+    minimum_total: float = 0.0,
+) -> tuple[bool, str]:
+    """Return only draw context owned by the information layer.
+
+    Reliability is zero for xG/goals and draw-rate features already assigned
+    to Dixon-Coles, preventing those values from qualifying twice under two
+    different labels.
+    """
+    profile = build_fundamental_profile(prediction.match)
     expected_total, recent_draw_rate = _draw_context(prediction.match)
-    low_scoring = expected_total is not None and expected_total <= 2.40
-    draw_prone = recent_draw_rate is not None and recent_draw_rate >= 0.30
+    low_scoring = (
+        profile.reliabilities.get("low_total", 0.0) > 0
+        and expected_total is not None
+        and minimum_total <= expected_total <= 2.40
+    )
+    draw_prone = (
+        profile.reliabilities.get("draw_rate", 0.0) > 0
+        and recent_draw_rate is not None
+        and recent_draw_rate >= 0.30
+    )
     if not low_scoring and not draw_prone:
         return False, ""
     details = []

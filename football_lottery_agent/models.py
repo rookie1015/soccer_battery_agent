@@ -122,6 +122,11 @@ class Prediction:
     fundamental_reliability: dict[str, float] = field(default_factory=dict)
     fundamental_corrections: dict[Outcome, float] = field(default_factory=dict)
     mathematical_corrections: dict[Outcome, float] = field(default_factory=dict)
+    draw_calibration_features: dict[str, float] = field(default_factory=dict)
+    draw_calibration_available: dict[str, bool] = field(default_factory=dict)
+    draw_calibration_contributions: dict[str, float] = field(default_factory=dict)
+    draw_calibration_corrections: dict[Outcome, float] = field(default_factory=dict)
+    draw_calibration_evidence: tuple[str, ...] = ()
     budget_adjusted: bool = False
     budget_forced_single: bool = False
     budget_removed_picks: tuple[Outcome, ...] = ()

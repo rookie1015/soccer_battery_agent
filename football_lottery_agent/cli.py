@@ -9,6 +9,7 @@ from .experiments import (
     DEFAULT_MIN_TEST_ISSUES,
     DEFAULT_MIN_TEST_MATCHES,
     DEFAULT_MIN_TRAIN_MATCHES,
+    load_active_draw_calibration_coefficients,
     load_active_fundamental_coefficients,
     load_active_model_weights,
     run_experiment,
@@ -200,11 +201,14 @@ def _generate_report(
     issue = load_issue(input_path)
     active_weights = load_active_model_weights(Path.cwd())
     active_coefficients = load_active_fundamental_coefficients(Path.cwd())
+    active_draw_coefficients = load_active_draw_calibration_coefficients(Path.cwd())
     options = {}
     if active_weights:
         options["model_weights"] = active_weights
     if active_coefficients:
         options["fundamental_coefficients"] = active_coefficients
+    if active_draw_coefficients:
+        options["draw_calibration_coefficients"] = active_draw_coefficients
     plan = build_ticket_plan(issue, **options)
     output = write_report(plan, output_path)
     print(f"Report written: {output}")

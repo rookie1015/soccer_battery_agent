@@ -686,6 +686,31 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertIn("双方近期状态接近", reasons[2])
         self.assertTrue(all(not reason.startswith("比赛：") for reason in reasons))
 
+    def test_history_attaches_current_versioned_model_status(self) -> None:
+        calibration = {
+            "status": "collecting",
+            "model_version": "market-residual-1x2-v4",
+            "sample_count": 14,
+            "minimum_samples": 168,
+            "weights": {"odds": 0.55, "signals": 0.22, "dixon_coles": 0.23},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            report = root / "report.html"
+            markdown = root / "report.md"
+            report.write_text("<h1>report</h1>", encoding="utf-8")
+            markdown.write_text(
+                _analysis_markdown("26090", "3", tuple(range(1, 10))),
+                encoding="utf-8",
+            )
+            archive_report("analysis", "26090", report, markdown, history_dir=root / "reports" / "history")
+
+            with patch.object(standalone_api, "build_calibration", return_value=calibration) as build_calibration:
+                result = standalone_api.run_history(root)
+
+        build_calibration.assert_called_once_with(root)
+        self.assertEqual(result["entries"][0]["report"]["model_calibration"], calibration)
+
     def test_history_parser_supports_separate_model_and_budget_selections(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=128)
 

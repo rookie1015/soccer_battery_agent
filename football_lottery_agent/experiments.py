@@ -12,6 +12,13 @@ from typing import Any, Iterable
 
 from .calibration import DEFAULT_WEIGHTS, CalibrationSample, fit_weights
 from .dixon_coles import forecast as dixon_coles_forecast
+from .draw_calibration import (
+    DEFAULT_DRAW_CALIBRATION_COEFFICIENTS,
+    build_draw_calibration_profile,
+    draw_calibration_corrections_from_features,
+    fit_draw_calibration_coefficients,
+    valid_draw_calibration_coefficients,
+)
 from .fundamentals import (
     DEFAULT_FUNDAMENTAL_COEFFICIENTS,
     apply_logit_corrections,
@@ -28,7 +35,7 @@ from .predictor import DEFAULT_SELECTION_POLICY, _odds_to_probabilities, _select
 
 
 OUTCOMES = ("3", "1", "0")
-MODEL_VERSION = "market-residual-1x2-v2"
+MODEL_VERSION = "market-residual-1x2-v5"
 SNAPSHOT_SCHEMA_VERSION = "1"
 DEFAULT_MIN_TRAIN_MATCHES = 84
 DEFAULT_MIN_TEST_MATCHES = 84
@@ -56,12 +63,132 @@ class ExperimentSample:
     snapshot_status: str
     fundamental_features: dict[str, float] = field(default_factory=dict)
     data_quality_score: float = 0.0
+    draw_calibration_features: dict[str, float] = field(default_factory=dict)
+    draw_calibration_available: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
 class PredictionRecord:
     sample: ExperimentSample
     probabilities: dict[str, float]
+
+
+def build_current_model_status(work_dir: str | Path) -> dict[str, Any]:
+    """Return production-facing status for the current experiment architecture.
+
+    Older releases displayed the result of ``calibration.py``'s linear blend
+    beside predictions produced by the residual model.  Apart from giving the
+    same weights two different meanings, that allowed a stale v1 experiment
+    report to look like evidence for v2.  The production status now comes from
+    the same versioned walk-forward experiment which owns model promotion.
+
+    A missing report, a report from another model version, or a review newer
+    than the report is refreshed without promotion.  Promotion remains an
+    explicit action and still has to pass every out-of-sample gate.
+    """
+    root = Path(work_dir)
+    latest_path = root / "reports" / "experiments" / "latest.json"
+    payload = _read_experiment_payload(latest_path)
+    refresh_reason = _experiment_refresh_reason(root, latest_path, payload)
+    if refresh_reason:
+        try:
+            payload = run_experiment(root, promote=False)
+        except Exception as exc:
+            return {
+                "status": "experiment_refresh_error",
+                "model_version": MODEL_VERSION,
+                "sample_count": 0,
+                "minimum_samples": DEFAULT_MIN_TRAIN_MATCHES + DEFAULT_MIN_TEST_MATCHES,
+                "minimum_train_samples": DEFAULT_MIN_TRAIN_MATCHES,
+                "minimum_test_samples": DEFAULT_MIN_TEST_MATCHES,
+                "minimum_test_issues": DEFAULT_MIN_TEST_ISSUES,
+                "test_matches": 0,
+                "test_issues": 0,
+                "weights": dict(DEFAULT_WEIGHTS),
+                "message": f"当前模型回测刷新失败，继续使用默认参数：{exc}",
+                "refresh_reason": refresh_reason,
+            }
+
+    if not isinstance(payload, dict):
+        payload = {}
+    audit = ((payload.get("dataset") or {}).get("audit") or {})
+    strict = payload.get("strict") or {}
+    walk = strict.get("walk_forward") or {}
+    promotion = payload.get("promotion") or {}
+    active_weights = load_active_model_weights(root)
+    promotion_status = str(promotion.get("status") or "collecting")
+    if active_weights is not None:
+        status = "experiment_active"
+        weights = active_weights
+        message = "当前残差模型参数已通过严格赛前、按期走步回测的晋级门槛。"
+    else:
+        status = {
+            "eligible": "experiment_eligible",
+            "hold": "experiment_pending_gate",
+        }.get(promotion_status, "collecting")
+        weights = dict(DEFAULT_WEIGHTS)
+        message = str(
+            promotion.get("message")
+            or "严格赛前样本不足，当前残差模型继续使用默认修正强度。"
+        )
+    return {
+        "status": status,
+        "model_version": MODEL_VERSION,
+        "experiment_id": str(payload.get("experiment_id") or ""),
+        "sample_count": int(audit.get("strict_sample_count") or strict.get("sample_count") or 0),
+        # Passing the production gate requires both the initial training window
+        # and a genuinely unseen test window.  Reporting only 84 here made the
+        # old UI imply that fitting alone was enough.
+        "minimum_samples": DEFAULT_MIN_TRAIN_MATCHES + DEFAULT_MIN_TEST_MATCHES,
+        "minimum_train_samples": DEFAULT_MIN_TRAIN_MATCHES,
+        "minimum_test_samples": DEFAULT_MIN_TEST_MATCHES,
+        "minimum_test_issues": DEFAULT_MIN_TEST_ISSUES,
+        "test_matches": int(walk.get("test_matches") or 0),
+        "test_issues": int(walk.get("test_issues") or 0),
+        "weights": weights,
+        "message": message,
+        "refresh_reason": refresh_reason or "current",
+    }
+
+
+def _read_experiment_payload(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _experiment_refresh_reason(
+    root: Path,
+    latest_path: Path,
+    payload: dict[str, Any] | None,
+) -> str:
+    if payload is None:
+        return "missing_or_invalid_latest_experiment"
+    if payload.get("model_version") != MODEL_VERSION:
+        return "model_version_changed"
+    try:
+        experiment_mtime = latest_path.stat().st_mtime_ns
+    except OSError:
+        return "missing_or_invalid_latest_experiment"
+    history_dir = root / "reports" / "history"
+    for entry in load_history_entries(history_dir):
+        if entry.get("kind") != "review":
+            continue
+        for field in ("markdown", "snapshot"):
+            relative = str(entry.get(field) or "").strip()
+            if not relative:
+                continue
+            review_path = history_dir / relative
+            try:
+                if review_path.stat().st_mtime_ns > experiment_mtime:
+                    return "review_data_changed"
+            except OSError:
+                continue
+    return ""
 
 
 def run_experiment(
@@ -143,6 +270,7 @@ def run_experiment(
             "activated_at": timestamp.isoformat(),
             "weights": strict_track["walk_forward"]["final_weights"],
             "fundamental_coefficients": strict_track["walk_forward"]["final_fundamental_coefficients"],
+            "draw_calibration_coefficients": strict_track["walk_forward"]["final_draw_calibration_coefficients"],
             "selection_policy": ticket_strategy.get("final_policy", DEFAULT_SELECTION_POLICY),
             "gates": promotion["gates"],
             "strict_test_metrics": strict_track["walk_forward"]["models"]["walk_forward_blend"]["metrics"],
@@ -207,6 +335,7 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
                 continue
             math = dixon_coles_forecast(match)
             profile = build_fundamental_profile(match)
+            draw_profile = build_draw_calibration_profile(match, math)
             samples.append(
                 ExperimentSample(
                     issue=issue,
@@ -223,6 +352,8 @@ def load_experiment_samples(root: str | Path) -> tuple[list[ExperimentSample], d
                     snapshot_status=snapshot_status,
                     fundamental_features=dict(profile.features),
                     data_quality_score=math.data_quality_score,
+                    draw_calibration_features=dict(draw_profile.features),
+                    draw_calibration_available=dict(draw_profile.available),
                 )
             )
     samples.sort(key=lambda item: (item.kickoff, item.issue, item.seq))
@@ -249,7 +380,13 @@ def audit_snapshot(metadata: dict[str, Any], matches: Iterable[Match]) -> tuple[
     first_kickoff = min(_as_utc(match.kickoff) for match in items)
     if _as_utc(collected) >= first_kickoff:
         return "post_kickoff_excluded", "快照生成时已有比赛开赛，存在赛后信息泄漏风险。"
-    return "verified_pre_match", "采集时间早于本期全部比赛。"
+    try:
+        schema_version = int(metadata.get("snapshot_schema_version") or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    if schema_version < 2:
+        return "legacy_unverified", "旧快照没有逐场拟合历史，只进入探索性回测。"
+    return "verified_pre_match", "采集时间早于本期全部比赛，且包含当前模型所需的逐场历史结构。"
 
 
 def evaluate_track(samples: Iterable[ExperimentSample], *, min_train_matches: int) -> dict[str, Any]:
@@ -311,8 +448,12 @@ def walk_forward_evaluate(
         if len(training) >= min_train_matches:
             coefficients = fit_fundamental_coefficients(_fundamental_training_samples(training))
             weights = _fit_candidate_weights(training, coefficients)
+            draw_coefficients = _fit_draw_coefficients(training, weights, coefficients)
             fold_records = [
-                _record(sample, _candidate_probabilities(sample, weights, coefficients))
+                _record(
+                    sample,
+                    _candidate_probabilities(sample, weights, coefficients, draw_coefficients),
+                )
                 for sample in test
             ]
             candidate_records.extend(fold_records)
@@ -324,6 +465,7 @@ def walk_forward_evaluate(
                     "test_matches": len(test),
                     "weights": weights,
                     "fundamental_coefficients": coefficients,
+                    "draw_calibration_coefficients": draw_coefficients,
                     "metrics": evaluate_records(fold_records),
                 }
             )
@@ -351,6 +493,11 @@ def walk_forward_evaluate(
         else dict(DEFAULT_FUNDAMENTAL_COEFFICIENTS)
     )
     final_weights = _fit_candidate_weights(items, final_coefficients) if items else dict(DEFAULT_WEIGHTS)
+    final_draw_coefficients = (
+        _fit_draw_coefficients(items, final_weights, final_coefficients)
+        if items
+        else dict(DEFAULT_DRAW_CALIBRATION_COEFFICIENTS)
+    )
     return {
         "min_train_matches": min_train_matches,
         "fold_count": len(folds),
@@ -360,6 +507,7 @@ def walk_forward_evaluate(
         "models": compared_models,
         "final_weights": final_weights,
         "final_fundamental_coefficients": final_coefficients,
+        "final_draw_calibration_coefficients": final_draw_coefficients,
         "predictions": [_serialize_record(record) for record in candidate_records],
         "records_internal": candidate_records,
     }
@@ -541,6 +689,19 @@ def load_active_fundamental_coefficients(work_dir: str | Path) -> dict[str, floa
     if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
         return None
     return valid_fundamental_coefficients(payload.get("fundamental_coefficients"))
+
+
+def load_active_draw_calibration_coefficients(work_dir: str | Path) -> dict[str, float] | None:
+    path = Path(work_dir) / "reports" / "experiments" / "active_model.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("status") != "active" or payload.get("model_version") != MODEL_VERSION:
+        return None
+    return valid_draw_calibration_coefficients(payload.get("draw_calibration_coefficients"))
 
 
 def evaluate_ticket_strategy(samples: Iterable[ExperimentSample]) -> dict[str, Any]:
@@ -773,10 +934,28 @@ def _candidate_probabilities(
     sample: ExperimentSample,
     weights: dict[str, float],
     coefficients: dict[str, float],
+    draw_coefficients: dict[str, float] | None = None,
 ) -> dict[str, float]:
     # Synthetic/legacy experiment rows have no auditable raw features. Keep
     # their historical blend behaviour so older reports and tests remain
-    # readable; verified v2 snapshots always take this market-offset branch.
+    # readable; verified current-version snapshots always take this market-offset branch.
+    if not sample.fundamental_features:
+        return _blend(sample.components, weights)
+    probabilities = _candidate_probabilities_without_draw(sample, weights, coefficients)
+    draw_corrections = draw_calibration_corrections_from_features(
+        sample.draw_calibration_features,
+        sample.draw_calibration_available,
+        mathematical_quality=sample.data_quality_score,
+        coefficients=draw_coefficients or DEFAULT_DRAW_CALIBRATION_COEFFICIENTS,
+    )
+    return apply_logit_corrections(probabilities, draw_corrections)
+
+
+def _candidate_probabilities_without_draw(
+    sample: ExperimentSample,
+    weights: dict[str, float],
+    coefficients: dict[str, float],
+) -> dict[str, float]:
     if not sample.fundamental_features:
         return _blend(sample.components, weights)
     market = sample.components["odds"]
@@ -795,6 +974,24 @@ def _candidate_probabilities(
         quality=sample.data_quality,
     )
     return apply_logit_corrections(probabilities, corrections)
+
+
+def _fit_draw_coefficients(
+    samples: Iterable[ExperimentSample],
+    weights: dict[str, float],
+    fundamental_coefficients: dict[str, float],
+) -> dict[str, float]:
+    return fit_draw_calibration_coefficients(
+        (
+            sample.draw_calibration_features,
+            sample.draw_calibration_available,
+            _candidate_probabilities_without_draw(sample, weights, fundamental_coefficients),
+            sample.outcome,
+            sample.data_quality_score,
+        )
+        for sample in samples
+        if sample.fundamental_features
+    )
 
 
 def _fit_candidate_weights(

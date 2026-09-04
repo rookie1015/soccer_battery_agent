@@ -28,9 +28,18 @@ class CalibrationSample:
 
 
 def build_calibration(work_dir: str | Path) -> dict[str, object]:
+    """Build the production-facing status from the versioned experiment.
+
+    ``calibrate`` and ``fit_weights`` below remain available for legacy
+    exploratory comparisons, but their linear-blend weights are not production
+    parameters for the market-residual model.
+    """
+    # Local import avoids a module cycle: experiments retains the legacy
+    # calibration types solely for old/synthetic comparison rows.
+    from .experiments import build_current_model_status
+
     root = Path(work_dir)
-    samples = load_review_samples(root)
-    result = calibrate(samples)
+    result = build_current_model_status(root)
     path = root / "reports" / "model_calibration.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")

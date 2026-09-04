@@ -1,14 +1,15 @@
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 from football_lottery_agent.dixon_coles import forecast
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.models import Match, Odds
 from football_lottery_agent.predictor import (
-    _apply_venue_form_adjustment,
     _blend_weights,
     _cap_market_anchor_shift,
     _effective_blend_weights,
+    _full_analysis_selection_scores,
     _select_picks,
     _signal_scores,
     predict_match,
@@ -16,9 +17,123 @@ from football_lottery_agent.predictor import (
 
 
 class DixonColesTests(unittest.TestCase):
-    def test_venue_form_uses_shrunk_residual_instead_of_raw_home_away_comparison(self) -> None:
+    @staticmethod
+    def _history_row(
+        match_id: int,
+        kickoff: datetime,
+        home_id: int,
+        away_id: int,
+        home_xg: float,
+        away_xg: float,
+        *,
+        league_id: int = 10,
+        neutral: bool = False,
+    ) -> dict[str, object]:
+        return {
+            "match_id": match_id,
+            "kickoff": kickoff.isoformat(),
+            "league_id": league_id,
+            "league": f"League {league_id}",
+            "home_team_id": home_id,
+            "away_team_id": away_id,
+            "home_team": f"Team {home_id}",
+            "away_team": f"Team {away_id}",
+            "home_goals": round(home_xg),
+            "away_goals": round(away_xg),
+            "home_xg": home_xg,
+            "away_xg": away_xg,
+            "neutral_venue": neutral,
+        }
+
+    def test_recent_match_history_uses_fitted_dixon_coles_model(self) -> None:
+        kickoff = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        home_history = [
+            self._history_row(index, kickoff - timedelta(days=index * 7), 1, 100 + index, 2.2, 0.7)
+            for index in range(1, 9)
+        ]
+        away_history = [
+            self._history_row(100 + index, kickoff - timedelta(days=index * 7 + 2), 200 + index, 2, 1.6, 0.8)
+            for index in range(1, 9)
+        ]
+        match = replace(
+            load_issue("data/sample_issue.json").matches[0],
+            kickoff=kickoff,
+            sources={
+                "strength_model": {
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "candidate_league_id": 10,
+                    "home_recent_matches": home_history,
+                    "away_recent_matches": away_history,
+                }
+            },
+        )
+
+        result = forecast(match)
+
+        self.assertEqual(result.model_version, "fitted-dixon-coles-v1")
+        self.assertEqual(result.data_quality, "fitted")
+        self.assertEqual(result.fit_sample_count, 16)
+        self.assertGreater(result.home_xg, result.away_xg)
+        self.assertGreater(result.probabilities["3"], result.probabilities["0"])
+
+    def test_league_scoring_environment_is_fitted_separately(self) -> None:
+        kickoff = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        history = []
+        for index in range(1, 9):
+            history.append(self._history_row(index, kickoff - timedelta(days=index * 5), 1, 2, 2.4, 1.8, league_id=10))
+            history.append(self._history_row(100 + index, kickoff - timedelta(days=index * 5 + 1), 1, 2, 0.9, 0.6, league_id=20))
+        base = replace(load_issue("data/sample_issue.json").matches[0], kickoff=kickoff)
+
+        high = forecast(
+            replace(
+                base,
+                sources={"strength_model": {
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "candidate_league_id": 10,
+                    "home_recent_matches": history,
+                }},
+            )
+        )
+        low = forecast(
+            replace(
+                base,
+                sources={"strength_model": {
+                    "home_team_id": 1,
+                    "away_team_id": 2,
+                    "candidate_league_id": 20,
+                    "home_recent_matches": history,
+                }},
+            )
+        )
+
+        self.assertGreater(high.league_goal_rate, low.league_goal_rate)
+        self.assertGreater(high.home_xg + high.away_xg, low.home_xg + low.away_xg)
+
+    def test_neutral_ground_removes_fitted_home_advantage(self) -> None:
+        kickoff = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        history = [
+            self._history_row(index, kickoff - timedelta(days=index * 6), 1, 2, 1.7, 1.1)
+            for index in range(1, 17)
+        ]
+        source = {
+            "home_team_id": 1,
+            "away_team_id": 2,
+            "candidate_league_id": 10,
+            "home_recent_matches": history,
+        }
+        base = replace(load_issue("data/sample_issue.json").matches[0], kickoff=kickoff)
+
+        ordinary = forecast(replace(base, sources={"strength_model": source}))
+        neutral = forecast(replace(base, sources={"strength_model": {**source, "neutral_venue": True}}))
+
+        self.assertGreater(ordinary.home_advantage, 1.0)
+        self.assertEqual(neutral.home_advantage, 1.0)
+        self.assertLess(neutral.home_xg, ordinary.home_xg)
+
+    def test_venue_win_rates_are_not_applied_again_after_model_fusion(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
-        probabilities = {"3": 0.20, "1": 0.20, "0": 0.60}
         venue_match = replace(
             match,
             sources={
@@ -32,34 +147,40 @@ class DixonColesTests(unittest.TestCase):
                 }
             },
         )
+        without_venue = replace(venue_match, sources={})
 
-        adjusted, details = _apply_venue_form_adjustment(venue_match, probabilities)
+        prediction = predict_match(venue_match)
+        baseline = predict_match(without_venue)
 
-        self.assertGreater(adjusted["3"], probabilities["3"])
-        self.assertLess(adjusted["0"], probabilities["0"])
-        self.assertLessEqual(abs(details["shift"]), 0.04)
+        self.assertEqual(prediction.probabilities, baseline.probabilities)
+        self.assertFalse(any("同场地近期表现" in reason for reason in prediction.reasons))
 
-    def test_venue_form_ignores_one_match_samples(self) -> None:
+    def test_injury_and_schedule_do_not_modify_dixon_coles_twice(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
-        probabilities = {"3": 0.20, "1": 0.20, "0": 0.60}
-        tiny_sample = replace(
+        source = {
+            "home_xg_for": 1.6,
+            "home_xg_against": 1.0,
+            "away_xg_for": 1.1,
+            "away_xg_against": 1.4,
+            "home_xg_matches": 8,
+            "away_xg_matches": 8,
+        }
+        baseline = forecast(replace(match, sources={"strength_model": source}))
+        stressed = forecast(replace(
             match,
-            sources={
-                "strength_model": {
-                    "home_overall_win_rate": 0.45,
-                    "home_venue_win_rate": 1.0,
-                    "home_venue_matches": 1,
-                    "away_overall_win_rate": 0.70,
-                    "away_venue_win_rate": 0.0,
-                    "away_venue_matches": 1,
-                }
-            },
-        )
+            signals=replace(
+                match.signals,
+                home_injury_impact=0.45,
+                away_injury_impact=0.30,
+                schedule_pressure_home=0.40,
+                schedule_pressure_away=0.35,
+            ),
+            sources={"strength_model": source},
+        ))
 
-        adjusted, details = _apply_venue_form_adjustment(tiny_sample, probabilities)
-
-        self.assertEqual(adjusted, probabilities)
-        self.assertEqual(details, {})
+        self.assertEqual(stressed.home_xg, baseline.home_xg)
+        self.assertEqual(stressed.away_xg, baseline.away_xg)
+        self.assertEqual(stressed.probabilities, baseline.probabilities)
 
     def test_large_first_leg_lead_prevents_benfica_away_single(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
@@ -97,7 +218,7 @@ class DixonColesTests(unittest.TestCase):
         self.assertIn("0", prediction.picks)
         self.assertIn("1", prediction.picks)
         self.assertTrue(any("次回合单选保护" in reason for reason in prediction.reasons))
-        self.assertTrue(any("同场地近期表现" in reason for reason in prediction.reasons))
+        self.assertFalse(any("同场地近期表现" in reason for reason in prediction.reasons))
 
     def test_forecast_returns_normalized_outcome_probabilities(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
@@ -199,6 +320,35 @@ class DixonColesTests(unittest.TestCase):
 
         self.assertGreater(high_draw.probabilities["1"], low_draw.probabilities["1"])
 
+    def test_fitted_model_exposes_low_score_and_league_draw_audit(self) -> None:
+        kickoff = datetime(2026, 9, 10, tzinfo=timezone.utc)
+        history = []
+        for index in range(1, 17):
+            row = self._history_row(index, kickoff - timedelta(days=index * 5), 1, 2, 1.0, 1.0)
+            row["home_goals"] = 1
+            row["away_goals"] = 1
+            history.append(row)
+        match = replace(
+            load_issue("data/sample_issue.json").matches[0],
+            kickoff=kickoff,
+            sources={"strength_model": {
+                "home_team_id": 1,
+                "away_team_id": 2,
+                "candidate_league_id": 10,
+                "league_recent_matches": history,
+            }},
+        )
+
+        result = forecast(match)
+
+        self.assertGreater(result.league_draw_rate, 0.50)
+        self.assertAlmostEqual(
+            result.low_score_draw_probability,
+            result.zero_zero_probability + result.one_one_probability,
+            places=5,
+        )
+        self.assertLessEqual(result.low_score_draw_probability, result.probabilities["1"])
+
     def test_predictor_includes_math_model_reason(self) -> None:
         prediction = predict_match(load_issue("data/sample_issue.json").matches[0])
 
@@ -251,7 +401,7 @@ class DixonColesTests(unittest.TestCase):
         self.assertIn("无法取得球队ID和xG样本", reason)
         self.assertIn("当前赔率源没有提供大小球盘口", reason)
 
-    def test_squad_strength_and_absence_adjust_the_xg_prior(self) -> None:
+    def test_squad_paper_strength_applies_but_absence_is_not_counted_twice(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         base_sources = {
             "strength_model": {
@@ -269,7 +419,15 @@ class DixonColesTests(unittest.TestCase):
         )
 
         self.assertGreater(strong_home.home_xg, strong_home.away_xg)
-        self.assertLess(weakened_home.home_xg, strong_home.home_xg)
+        self.assertEqual(weakened_home.home_xg, strong_home.home_xg)
+        self.assertEqual(weakened_home.away_xg, strong_home.away_xg)
+
+    def test_full_analysis_ticket_scores_reuse_final_probabilities(self) -> None:
+        probabilities = {"3": 0.48, "1": 0.27, "0": 0.25}
+
+        scores = _full_analysis_selection_scores(probabilities)
+
+        self.assertEqual(scores, probabilities)
 
     def test_low_scoring_balanced_teams_raise_draw_signal(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]

@@ -53,6 +53,51 @@ class FundamentalModelTests(unittest.TestCase):
         probabilities = apply_logit_corrections({"3": 0.4, "1": 0.3, "0": 0.3}, corrections)
         self.assertAlmostEqual(sum(probabilities.values()), 1.0)
 
+    def test_source_backed_math_owns_overlapping_recent_match_features(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        audited = replace(
+            match,
+            signals=Signals(
+                home_form=0.78,
+                away_form=0.39,
+                home_motivation=0.72,
+                away_motivation=0.45,
+                home_injury_impact=0.18,
+                away_injury_impact=0.04,
+                schedule_pressure_home=0.20,
+                schedule_pressure_away=0.02,
+            ),
+            sources={
+                **match.sources,
+                "strength_model": {
+                    "home_xg_for": 0.9,
+                    "home_xg_against": 0.8,
+                    "away_xg_for": 0.8,
+                    "away_xg_against": 0.9,
+                    "home_draw_rate": 0.42,
+                    "away_draw_rate": 0.38,
+                },
+                "collection_audit": {
+                    "mode": "full",
+                    "strength": {"status": "complete"},
+                    "intelligence": {"status": "available", "count": 3},
+                    "injuries": {"status": "available", "count": 2},
+                    "history": {"status": "available", "count": 6},
+                    "schedule": {"status": "available"},
+                    "xg": {"status": "complete"},
+                    "totals": {"status": "available"},
+                },
+            },
+        )
+
+        profile = build_fundamental_profile(audited)
+
+        for name in ("form", "draw_balance", "low_total", "draw_rate"):
+            self.assertEqual(profile.reliabilities[name], 0.0)
+            self.assertEqual(profile.features[name], 0.0)
+        for name in ("motivation", "injury", "schedule"):
+            self.assertGreater(profile.reliabilities[name], 0.0)
+
     def test_signal_fallback_is_not_independent_math_evidence(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         math = forecast(match)

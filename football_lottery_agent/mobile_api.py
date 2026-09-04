@@ -230,6 +230,13 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
             "corrections": dict(prediction.fundamental_corrections),
         },
         "mathematical_corrections": dict(prediction.mathematical_corrections),
+        "draw_calibration": {
+            "features": dict(prediction.draw_calibration_features),
+            "available": dict(prediction.draw_calibration_available),
+            "contributions": dict(prediction.draw_calibration_contributions),
+            "corrections": dict(prediction.draw_calibration_corrections),
+            "evidence": list(prediction.draw_calibration_evidence),
+        },
         "reasons": list(prediction.reasons),
     }
     if include_review_fields:

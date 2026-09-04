@@ -1,3 +1,4 @@
+import json
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -5,9 +6,12 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from football_lottery_agent.experiments import (
+    DEFAULT_WEIGHTS,
     ExperimentSample,
+    MODEL_VERSION,
     PredictionRecord,
     audit_snapshot,
+    build_current_model_status,
     evaluate_records,
     load_active_fundamental_coefficients,
     load_active_model_weights,
@@ -19,12 +23,70 @@ from football_lottery_agent.loader import load_issue
 
 
 class ExperimentTests(unittest.TestCase):
+    def test_current_model_status_refreshes_stale_version_without_promotion(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "reports" / "experiments"
+            target.mkdir(parents=True)
+            (target / "latest.json").write_text(
+                '{"model_version":"pure-1x2-v1"}',
+                encoding="utf-8",
+            )
+            refreshed = {
+                "experiment_id": "current-v2",
+                "model_version": MODEL_VERSION,
+                "dataset": {"audit": {"strict_sample_count": 14}},
+                "strict": {"sample_count": 14, "walk_forward": {"test_matches": 0, "test_issues": 0}},
+                "promotion": {"status": "collecting", "message": "继续收集。"},
+            }
+            with patch("football_lottery_agent.experiments.run_experiment", return_value=refreshed) as run:
+                status = build_current_model_status(root)
+
+        run.assert_called_once_with(root, promote=False)
+        self.assertEqual(status["model_version"], MODEL_VERSION)
+        self.assertEqual(status["status"], "collecting")
+        self.assertEqual(status["weights"], DEFAULT_WEIGHTS)
+        self.assertEqual(status["refresh_reason"], "model_version_changed")
+        self.assertEqual(status["minimum_samples"], 168)
+
+    def test_current_model_status_uses_only_current_active_weights(self) -> None:
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            target = root / "reports" / "experiments"
+            target.mkdir(parents=True)
+            current = {
+                "experiment_id": "current-v2",
+                "model_version": MODEL_VERSION,
+                "dataset": {"audit": {"strict_sample_count": 196}},
+                "strict": {"sample_count": 196, "walk_forward": {"test_matches": 112, "test_issues": 8}},
+                "promotion": {"status": "eligible", "message": "等待晋级。"},
+            }
+            (target / "latest.json").write_text(json.dumps(current), encoding="utf-8")
+            active_weights = {"odds": 0.7, "signals": 0.1, "dixon_coles": 0.2}
+            (target / "active_model.json").write_text(
+                json.dumps({
+                    "status": "active",
+                    "model_version": MODEL_VERSION,
+                    "weights": active_weights,
+                }),
+                encoding="utf-8",
+            )
+
+            status = build_current_model_status(root)
+
+        self.assertEqual(status["status"], "experiment_active")
+        self.assertEqual(status["weights"], active_weights)
+        self.assertEqual(status["test_matches"], 112)
+
     def test_snapshot_audit_separates_verified_legacy_and_late_data(self) -> None:
         issue = load_issue("data/sample_issue.json")
         first_kickoff = min(match.kickoff for match in issue.matches)
 
         verified = audit_snapshot(
-            {"snapshot_collected_at": (first_kickoff - timedelta(hours=2)).isoformat()},
+            {
+                "snapshot_collected_at": (first_kickoff - timedelta(hours=2)).isoformat(),
+                "snapshot_schema_version": "2",
+            },
             issue.matches,
         )
         legacy = audit_snapshot({}, issue.matches)
@@ -36,6 +98,12 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(verified[0], "verified_pre_match")
         self.assertEqual(legacy[0], "legacy_unverified")
         self.assertEqual(late[0], "post_kickoff_excluded")
+
+        old_schema = audit_snapshot(
+            {"snapshot_collected_at": (first_kickoff - timedelta(hours=2)).isoformat()},
+            issue.matches,
+        )
+        self.assertEqual(old_schema[0], "legacy_unverified")
 
     def test_metrics_cover_probability_and_special_outcomes(self) -> None:
         samples = [
@@ -98,7 +166,7 @@ class ExperimentTests(unittest.TestCase):
         self.assertIsNotNone(active_policy)
         self.assertIsNotNone(active_coefficients)
         self.assertGreater(active["dixon_coles"], active["odds"])
-        self.assertTrue(Path(result["artifacts"]["json"]).name.endswith("market-residual-1x2-v2.json"))
+        self.assertTrue(Path(result["artifacts"]["json"]).name.endswith("market-residual-1x2-v5.json"))
 
     def test_legacy_samples_remain_exploratory_and_cannot_promote(self) -> None:
         legacy = [

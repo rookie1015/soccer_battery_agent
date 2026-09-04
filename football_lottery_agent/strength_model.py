@@ -9,8 +9,8 @@ import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Any, Callable
@@ -82,6 +82,15 @@ class MatchStat:
     goals_against: int
     result: str
     opponent: str
+    home_team_id: int = 0
+    away_team_id: int = 0
+    home_team: str = ""
+    away_team: str = ""
+    league_id: int = 0
+    league: str = ""
+    neutral_venue: bool = False
+    xg_for: float | None = None
+    xg_against: float | None = None
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,7 @@ class StrengthProfile:
     notes: tuple[str, ...]
     xg_matches_used: int = 0
     xg_provider: str = ""
+    recent_matches: tuple[MatchStat, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -132,6 +142,7 @@ class FixtureStrength:
     away_squad: SquadProfile | None
     h2h: tuple[str, ...]
     source: dict[str, Any]
+    league_history: tuple[MatchStat, ...] = ()
 
 
 def build_strength_for_matches(
@@ -195,6 +206,7 @@ def build_strength_for_matches(
     check_cancelled()
     for match in matches:
         result[match.seq] = _merge_sofascore_strength(result.get(match.seq), sofascore.get(match.seq))
+    _attach_league_histories(result, matches, cache, cancel_check=cancel_check)
     return result
 
 
@@ -268,14 +280,162 @@ def _build_fixture_strength(
             "away_team_id": away_ref.id if away_ref else "",
             "lookback": lookback,
             "xg_matches": xg_matches,
+            "candidate_league_id": _event_league_id(event) if event else 0,
+            "neutral_venue": _event_is_neutral(event) if event else False,
             **match_diagnostic,
         },
+        league_history=(),
     )
 
 
 def _fetch_team_data(team: TeamRef, cache: Path) -> dict[str, Any] | None:
     payload = _fetch_json(f"{FOTMOB_BASE}/teams?{urllib.parse.urlencode({'id': team.id})}", cache, 86400)
     return payload if isinstance(payload, dict) else None
+
+
+def _attach_league_histories(
+    fixtures: dict[int, FixtureStrength],
+    matches: list[RawMatch],
+    cache: Path,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> None:
+    by_league: dict[int, tuple[MatchStat, ...]] = {}
+    for match in matches:
+        if cancel_check is not None:
+            cancel_check()
+        fixture = fixtures.get(match.seq)
+        if fixture is None:
+            continue
+        league_id = _event_league_id(fixture.source)
+        if not league_id:
+            continue
+        if league_id not in by_league:
+            by_league[league_id] = _fetch_league_history(
+                league_id,
+                match.kickoff,
+                cache,
+                cancel_check=cancel_check,
+            )
+        fixtures[match.seq] = replace(fixture, league_history=by_league[league_id])
+
+
+def _fetch_league_history(
+    league_id: int,
+    target_kickoff: str,
+    cache: Path,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[MatchStat, ...]:
+    base_query = {"id": league_id, "ccode3": "CHN"}
+    current = _fetch_json(
+        f"{FOTMOB_BASE}/leagues?{urllib.parse.urlencode(base_query)}",
+        cache,
+        21600,
+        cancel_check=cancel_check,
+    )
+    if not isinstance(current, dict):
+        return ()
+    seasons = [str(item) for item in (current.get("allAvailableSeasons") or [])[:2] if str(item).strip()]
+    selected = str((current.get("details") or {}).get("selectedSeason") or "")
+    payloads = [current]
+    for season in seasons:
+        if cancel_check is not None:
+            cancel_check()
+        if season == selected:
+            continue
+        query = {**base_query, "season": season}
+        payload = _fetch_json(
+            f"{FOTMOB_BASE}/leagues?{urllib.parse.urlencode(query)}",
+            cache,
+            86400,
+            cancel_check=cancel_check,
+        )
+        if isinstance(payload, dict):
+            payloads.append(payload)
+
+    target = _parse_iso_datetime(target_kickoff)
+    earliest = target - timedelta(days=540) if target is not None else None
+    by_match: dict[int, MatchStat] = {}
+    for payload in payloads:
+        details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
+        resolved_league_id = int(details.get("id") or league_id)
+        league_name = str(details.get("name") or "")
+        rows = ((payload.get("fixtures") or {}).get("allMatches") or [])
+        for raw in rows:
+            item = _league_fixture_to_match_stat(raw, resolved_league_id, league_name)
+            if item is None:
+                continue
+            played = _parse_iso_datetime(item.date)
+            if target is not None and (played is None or played >= target):
+                continue
+            if earliest is not None and played is not None and played < earliest:
+                continue
+            by_match[item.match_id] = item
+    return tuple(sorted(by_match.values(), key=lambda item: item.date, reverse=True)[:360])
+
+
+def _league_fixture_to_match_stat(
+    item: object,
+    league_id: int,
+    league_name: str,
+) -> MatchStat | None:
+    if not isinstance(item, dict) or not _is_finished(item):
+        return None
+    home = item.get("home") if isinstance(item.get("home"), dict) else {}
+    away = item.get("away") if isinstance(item.get("away"), dict) else {}
+    scores = _fixture_score(item, home, away)
+    if scores is None:
+        return None
+    try:
+        match_id = int(item.get("id") or 0)
+        home_id = int(home.get("id") or 0)
+        away_id = int(away.get("id") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not match_id or not home_id or not away_id:
+        return None
+    home_goals, away_goals = scores
+    result = "W" if home_goals > away_goals else "D" if home_goals == away_goals else "L"
+    return MatchStat(
+        match_id=match_id,
+        date=str((item.get("status") or {}).get("utcTime") or ""),
+        is_home=True,
+        goals_for=home_goals,
+        goals_against=away_goals,
+        result=result,
+        opponent=str(away.get("name") or ""),
+        home_team_id=home_id,
+        away_team_id=away_id,
+        home_team=str(home.get("name") or ""),
+        away_team=str(away.get("name") or ""),
+        league_id=league_id,
+        league=league_name,
+        neutral_venue=_event_is_neutral(item),
+    )
+
+
+def _fixture_score(
+    item: dict[str, Any],
+    home: dict[str, Any],
+    away: dict[str, Any],
+) -> tuple[int, int] | None:
+    try:
+        if home.get("score") is not None and away.get("score") is not None:
+            return int(home["score"]), int(away["score"])
+    except (TypeError, ValueError):
+        pass
+    score_text = str((item.get("status") or {}).get("scoreStr") or "")
+    found = re.match(r"\s*(\d+)\s*[-:]\s*(\d+)", score_text)
+    return (int(found.group(1)), int(found.group(2))) if found else None
+
+
+def _parse_iso_datetime(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
 
 
 def _build_team_profile(
@@ -298,11 +458,23 @@ def _build_team_profile(
 
     xg_for = []
     xg_against = []
+    xg_by_match: dict[int, tuple[float, float]] = {}
     for item in recent[:xg_matches]:
         xg = _fetch_match_xg(item.match_id, team.id, cache, match_details)
         if xg:
             xg_for.append(xg[0])
             xg_against.append(xg[1])
+            xg_by_match[item.match_id] = xg
+    recent = [
+        replace(
+            item,
+            xg_for=xg_by_match[item.match_id][0],
+            xg_against=xg_by_match[item.match_id][1],
+        )
+        if item.match_id in xg_by_match
+        else item
+        for item in recent
+    ]
 
     wins = sum(1 for item in recent if item.result == "W")
     draws = sum(1 for item in recent if item.result == "D")
@@ -338,6 +510,7 @@ def _build_team_profile(
         notes=notes,
         xg_matches_used=len(xg_for),
         xg_provider="fotmob" if xg_for else "",
+        recent_matches=tuple(recent),
     )
 
 
@@ -361,6 +534,7 @@ def _merge_sofascore_strength(primary: FixtureStrength | None, sofascore: Any) -
         away_squad=primary.away_squad,
         h2h=primary.h2h,
         source={**primary.source, "provider": provider or "sofascore", "sofascore": sofa_source},
+        league_history=primary.league_history,
     )
 
 
@@ -394,6 +568,7 @@ def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) ->
             notes=sofascore.notes,
             xg_matches_used=sofascore.xg_matches_used,
             xg_provider="sofascore" if sofascore.xg_matches_used else "",
+            recent_matches=(),
         )
 
     primary_has_xg = primary.xg_for_per_match is not None and primary.xg_against_per_match is not None
@@ -432,6 +607,7 @@ def _merge_sofascore_profile(primary: StrengthProfile | None, sofascore: Any) ->
         notes=notes,
         xg_matches_used=xg_matches,
         xg_provider=xg_provider,
+        recent_matches=primary.recent_matches,
     )
 
 
@@ -973,6 +1149,7 @@ def _fixture_to_match_stat(item: dict[str, Any], team_id: int) -> MatchStat | No
     ga = int(away["score"] if is_home else home["score"])
     result = "W" if gf > ga else "D" if gf == ga else "L"
     opponent = (away if is_home else home).get("name", "")
+    tournament = item.get("tournament") if isinstance(item.get("tournament"), dict) else {}
     return MatchStat(
         match_id=int(item["id"]),
         date=str((item.get("status") or {}).get("utcTime", "")),
@@ -981,7 +1158,34 @@ def _fixture_to_match_stat(item: dict[str, Any], team_id: int) -> MatchStat | No
         goals_against=ga,
         result=result,
         opponent=str(opponent),
+        home_team_id=int(home.get("id") or 0),
+        away_team_id=int(away.get("id") or 0),
+        home_team=str(home.get("name") or ""),
+        away_team=str(away.get("name") or ""),
+        league_id=int(tournament.get("leagueId") or 0),
+        league=str(tournament.get("name") or ""),
+        neutral_venue=_event_is_neutral(item),
     )
+
+
+def _event_league_id(event: dict[str, Any]) -> int:
+    tournament = event.get("tournament") if isinstance(event.get("tournament"), dict) else {}
+    try:
+        return int(event.get("candidate_league_id") or event.get("leagueId") or tournament.get("leagueId") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _event_is_neutral(event: dict[str, Any]) -> bool:
+    for key in ("neutralGround", "neutralVenue", "isNeutral", "neutral_venue"):
+        value = event.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str) and value.strip().casefold() in {"true", "yes", "1"}:
+            return True
+    return False
 
 
 def _fetch_match_xg(

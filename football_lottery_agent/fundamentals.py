@@ -11,6 +11,7 @@ OUTCOMES = ("3", "1", "0")
 EDGE_FEATURES = ("form", "motivation", "injury", "schedule")
 DRAW_FEATURES = ("draw_balance", "low_total", "draw_rate")
 FEATURE_NAMES = (*EDGE_FEATURES, *DRAW_FEATURES)
+MATHEMATICAL_OVERLAP_FEATURES = ("form", "draw_balance", "low_total", "draw_rate")
 
 # Conservative production priors.  They are deliberately small because the
 # market is the probability baseline.  Walk-forward experiments may learn a
@@ -62,6 +63,14 @@ def build_fundamental_profile(match: Match) -> FundamentalProfile:
         ),
     }
     reliability = _feature_reliabilities(match, raw)
+    if _has_source_backed_mathematical_rates(match):
+        # Dixon-Coles already owns recent strength, scoring level and draw
+        # history whenever real xG/goals inputs are available. Keeping these
+        # four derived features in the information layer would count the same
+        # match sample twice. Raw values remain visible for audit, but their
+        # effective correction is zero in this branch.
+        for name in MATHEMATICAL_OVERLAP_FEATURES:
+            reliability[name] = 0.0
     effective = {name: raw[name] * reliability[name] for name in FEATURE_NAMES}
     return FundamentalProfile(raw_features=raw, reliabilities=reliability, features=effective)
 
@@ -200,7 +209,7 @@ def _feature_reliabilities(match: Match, raw: Mapping[str, float]) -> dict[str, 
             "motivation": 0.35 if abs(raw["motivation"]) >= 0.02 else 0.0,
             "injury": 0.40 if abs(raw["injury"]) >= 0.02 else 0.0,
             "schedule": 0.35 if abs(raw["schedule"]) >= 0.02 else 0.0,
-            "draw_balance": 0.35,
+            "draw_balance": 0.35 if abs(raw["form"]) >= 0.02 else 0.0,
             "low_total": 0.40 if raw["low_total"] else 0.0,
             "draw_rate": 0.35 if raw["draw_rate"] else 0.0,
         }
@@ -211,7 +220,6 @@ def _feature_reliabilities(match: Match, raw: Mapping[str, float]) -> dict[str, 
     history = _audit_section(audit, "history")
     schedule = _audit_section(audit, "schedule")
     xg = _audit_section(audit, "xg")
-    totals = _audit_section(audit, "totals")
     strength_status = str(strength.get("status") or "")
     history_available = history.get("status") == "available" and _count(history) > 0
     form_reliability = {
@@ -236,8 +244,6 @@ def _feature_reliabilities(match: Match, raw: Mapping[str, float]) -> dict[str, 
         if xg_status == "complete"
         else 0.65
         if xg_status == "partial"
-        else 0.55
-        if totals.get("status") == "available"
         else 0.0
     )
     history_reliability = 0.65 if history_available else 0.0
@@ -247,7 +253,7 @@ def _feature_reliabilities(match: Match, raw: Mapping[str, float]) -> dict[str, 
         "motivation": motivation_reliability if abs(raw["motivation"]) >= 0.02 else 0.0,
         "injury": injury_reliability if abs(raw["injury"]) >= 0.02 else 0.0,
         "schedule": schedule_reliability if abs(raw["schedule"]) >= 0.02 else 0.0,
-        "draw_balance": form_reliability,
+        "draw_balance": form_reliability if abs(raw["form"]) >= 0.02 else 0.0,
         "low_total": total_reliability if raw["low_total"] else 0.0,
         "draw_rate": history_reliability if raw["draw_rate"] else 0.0,
     }
@@ -271,11 +277,6 @@ def _draw_context(match: Match) -> tuple[float | None, float | None]:
             home_for, home_against, away_for, away_against = values
             expected_total = (home_for * away_against) ** 0.5 + (away_for * home_against) ** 0.5
             break
-    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
-    market = market if isinstance(market, dict) else {}
-    if expected_total is None:
-        expected_total = _positive_number(market.get("total_points"))
-
     draw_rates = [
         value
         for value in (
@@ -285,6 +286,17 @@ def _draw_context(match: Match) -> tuple[float | None, float | None]:
         if value is not None
     ]
     return expected_total, (sum(draw_rates) / len(draw_rates) if draw_rates else None)
+
+
+def _has_source_backed_mathematical_rates(match: Match) -> bool:
+    source = match.sources.get("strength_model") if isinstance(match.sources, dict) else {}
+    source = source if isinstance(source, dict) else {}
+    return any(
+        _positive_number(source.get(f"{side}_{prefix}_{direction}")) is not None
+        for side in ("home", "away")
+        for prefix in ("xg", "goals")
+        for direction in ("for", "against")
+    )
 
 
 def _audit_section(audit: Mapping[str, object], name: str) -> Mapping[str, object]:

@@ -9,6 +9,7 @@ from football_lottery_agent.collectors import (
     RawMatch,
     SinaDetail,
     _apply_sina_detail_to_signals,
+    _apply_strength_to_signals,
     _injury_signal_summary,
     _infer_two_leg_context,
     _media_item_matches_match,
@@ -16,6 +17,7 @@ from football_lottery_agent.collectors import (
     _odds_market_summary,
     _parse_rss,
     _collection_audit,
+    _strength_history_pool,
     _strength_source,
     fetch_sina_sfc,
     fetch_sporttery_issue_metadata,
@@ -27,6 +29,53 @@ from football_lottery_agent.collectors import (
 
 
 class CollectorTests(unittest.TestCase):
+    def test_strength_history_is_serialized_and_deduplicated_for_fitting(self) -> None:
+        recent = SimpleNamespace(
+            match_id=77,
+            date="2026-09-01T12:00:00+00:00",
+            is_home=False,
+            goals_for=2,
+            goals_against=1,
+            home_team_id=20,
+            away_team_id=10,
+            home_team="Opponent",
+            away_team="Target",
+            league_id=55,
+            league="Test League",
+            neutral_venue=False,
+            xg_for=1.8,
+            xg_against=0.9,
+        )
+        profile = SimpleNamespace(recent_matches=(recent,))
+        strength = SimpleNamespace(home=profile, away=profile)
+
+        pooled = _strength_history_pool([strength])
+
+        self.assertEqual(len(pooled), 1)
+        self.assertEqual(pooled[0]["home_goals"], 1)
+        self.assertEqual(pooled[0]["away_goals"], 2)
+        self.assertEqual(pooled[0]["home_xg"], 0.9)
+        self.assertEqual(pooled[0]["away_xg"], 1.8)
+
+    def test_strength_xg_does_not_leak_into_motivation_signal(self) -> None:
+        signals = {
+            "home_form": 0.5,
+            "away_form": 0.5,
+            "home_motivation": 0.61,
+            "away_motivation": 0.44,
+        }
+        strength = SimpleNamespace(
+            home=SimpleNamespace(rating=0.72, xg_for_per_match=2.4, xg_against_per_match=0.7),
+            away=SimpleNamespace(rating=0.38, xg_for_per_match=0.6, xg_against_per_match=2.1),
+        )
+
+        adjusted = _apply_strength_to_signals(signals, strength)
+
+        self.assertEqual(adjusted["home_motivation"], 0.61)
+        self.assertEqual(adjusted["away_motivation"], 0.44)
+        self.assertEqual(adjusted["home_form"], 0.72)
+        self.assertEqual(adjusted["away_form"], 0.38)
+
     def test_infer_two_leg_context_reorders_first_leg_into_current_home_away_order(self) -> None:
         match = RawMatch(
             seq=13,

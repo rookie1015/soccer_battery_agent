@@ -3,6 +3,7 @@ from __future__ import annotations
 from math import exp, factorial, sqrt
 
 from .dixon_coles import DixonColesForecast, forecast as dixon_coles_forecast
+from .draw_calibration import build_draw_calibration_profile
 from .fundamentals import (
     DEFAULT_FUNDAMENTAL_COEFFICIENTS,
     apply_logit_corrections,
@@ -17,9 +18,6 @@ OUTCOME_LABELS = {"3": "主胜", "1": "平", "0": "客胜"}
 SELECTION_OUTCOME_LABELS = {"3": "主胜", "1": "平局", "0": "客胜"}
 SECONDARY_RAW_GAP_LIMIT = 0.04
 SECONDARY_EVIDENCE_MARGIN = 0.015
-MAX_SECONDARY_SCORE_ADJUSTMENT = 0.03
-VENUE_FORM_PRIOR_MATCHES = 6.0
-MAX_VENUE_PROBABILITY_SHIFT = 0.04
 MAX_KNOCKOUT_PROBABILITY_SHIFT = 0.07
 MAX_MARKET_ANCHOR_SHIFT = 0.12
 DEFAULT_SELECTION_POLICY = {
@@ -42,11 +40,17 @@ def predict_match(
     match: Match,
     model_weights: dict[str, float] | None = None,
     fundamental_coefficients: dict[str, float] | None = None,
+    draw_calibration_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> Prediction:
     odds_probs = _odds_to_probabilities(match)
     math_forecast = dixon_coles_forecast(match)
+    draw_profile = build_draw_calibration_profile(
+        match,
+        math_forecast,
+        coefficients=draw_calibration_coefficients,
+    )
     odds_weight, signal_weight, math_weight = _effective_blend_weights(
         match,
         math_forecast,
@@ -72,6 +76,10 @@ def predict_match(
             signal_scores,
             math_corrections,
         )
+        probabilities = apply_logit_corrections(
+            probabilities,
+            draw_profile.corrections,
+        )
         probabilities = _cap_market_anchor_shift(probabilities, odds_probs)
     else:
         # Without a real market there is no offset to correct. Preserve the
@@ -79,12 +87,14 @@ def predict_match(
         signal_scores = _signal_scores(match)
         information_corrections = {outcome: 0.0 for outcome in ("3", "1", "0")}
         math_corrections = {outcome: 0.0 for outcome in ("3", "1", "0")}
+        draw_corrections = {outcome: 0.0 for outcome in ("3", "1", "0")}
         mixed = {
             outcome: signal_weight * signal_scores[outcome] + math_weight * math_forecast.probabilities[outcome]
             for outcome in ("3", "1", "0")
         }
         probabilities = _normalize(mixed)
-    probabilities, venue_adjustment = _apply_venue_form_adjustment(match, probabilities)
+    if match.sources.get("odds") != "default_placeholder":
+        draw_corrections = draw_profile.corrections
     probabilities, knockout_adjustment = _apply_knockout_adjustment(match, probabilities)
     ranked = sorted(probabilities.items(), key=lambda item: item[1], reverse=True)
 
@@ -93,13 +103,7 @@ def predict_match(
     spread = top_prob - second_prob
 
     selection_scores = (
-        _full_analysis_selection_scores(
-            match,
-            probabilities,
-            odds_probs,
-            signal_scores,
-            math_forecast,
-        )
+        _full_analysis_selection_scores(probabilities)
         if evidence_aware_secondary
         else {}
     )
@@ -123,9 +127,9 @@ def predict_match(
         (odds_weight, signal_weight, math_weight),
         information_corrections,
         math_corrections,
+        draw_profile.logit_shift,
+        draw_profile.evidence,
     )
-    if venue_adjustment:
-        reasons.append(_venue_adjustment_reason(match, venue_adjustment))
     if knockout_adjustment:
         reasons.append(_knockout_adjustment_reason(match, knockout_adjustment))
     if selection_scores:
@@ -176,6 +180,11 @@ def predict_match(
         fundamental_reliability={key: round(value, 4) for key, value in profile.reliabilities.items()},
         fundamental_corrections={key: round(value, 6) for key, value in information_corrections.items()},
         mathematical_corrections={key: round(value, 6) for key, value in math_corrections.items()},
+        draw_calibration_features=dict(draw_profile.features),
+        draw_calibration_available=dict(draw_profile.available),
+        draw_calibration_contributions=dict(draw_profile.contributions),
+        draw_calibration_corrections={key: round(value, 6) for key, value in draw_corrections.items()},
+        draw_calibration_evidence=draw_profile.evidence,
         draw_guard=draw_guard,
     )
 
@@ -238,7 +247,7 @@ def _selection_reason(
     )
     evidence_text = ""
     if selection_scores and len(picks) == 2:
-        evidence_text = "第二选项还结合赔率、基本面和数学模型的证据排序复核。"
+        evidence_text = "第二选项直接按同一组最终综合概率复核，未再次累计各证据层。"
 
     if len(picks) == 2:
         weakest_selected = min(probabilities.get(outcome, 0.0) for outcome in picks)
@@ -274,6 +283,7 @@ def predict_issue(
     matches: tuple[Match, ...],
     model_weights: dict[str, float] | None = None,
     fundamental_coefficients: dict[str, float] | None = None,
+    draw_calibration_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
 ) -> tuple[Prediction, ...]:
@@ -282,6 +292,7 @@ def predict_issue(
             match,
             model_weights=model_weights,
             fundamental_coefficients=fundamental_coefficients,
+            draw_calibration_coefficients=draw_calibration_coefficients,
             evidence_aware_secondary=evidence_aware_secondary,
             selection_policy=selection_policy,
         )
@@ -345,54 +356,6 @@ def _favorite_draw_guard(
     )
 
 
-def _apply_venue_form_adjustment(
-    match: Match,
-    probabilities: dict[str, float],
-) -> tuple[dict[str, float], dict[str, float]]:
-    """Apply a shrunk team-specific home/away residual to the 1X2 blend.
-
-    The comparison is venue form versus the same team's overall form, not raw
-    home versus away win rates.  This avoids treating a strong club's normal
-    away record as weak and keeps one or two matches from dominating.
-    """
-    source = match.sources.get("strength_model") if isinstance(match.sources, dict) else {}
-    source = source if isinstance(source, dict) else {}
-    home_overall = _probability_number(source.get("home_overall_win_rate"))
-    away_overall = _probability_number(source.get("away_overall_win_rate"))
-    home_venue = _probability_number(source.get("home_venue_win_rate"))
-    away_venue = _probability_number(source.get("away_venue_win_rate"))
-    home_samples = _nonnegative_number(source.get("home_venue_matches"))
-    away_samples = _nonnegative_number(source.get("away_venue_matches"))
-    if None in (home_overall, away_overall, home_venue, away_venue, home_samples, away_samples):
-        return probabilities, {}
-    if home_samples < 2 or away_samples < 2:
-        return probabilities, {}
-
-    home_reliability = home_samples / (home_samples + VENUE_FORM_PRIOR_MATCHES)
-    away_reliability = away_samples / (away_samples + VENUE_FORM_PRIOR_MATCHES)
-    home_residual = (home_venue - home_overall) * home_reliability
-    away_residual = (away_venue - away_overall) * away_reliability
-    shift = max(
-        -MAX_VENUE_PROBABILITY_SHIFT,
-        min(MAX_VENUE_PROBABILITY_SHIFT, (home_residual - away_residual) * 0.14),
-    )
-    if abs(shift) < 0.002:
-        return probabilities, {}
-
-    adjusted = dict(probabilities)
-    adjusted["3"] = max(0.01, adjusted["3"] + shift)
-    adjusted["0"] = max(0.01, adjusted["0"] - shift)
-    return _normalize(adjusted), {
-        "shift": shift,
-        "home_samples": home_samples,
-        "away_samples": away_samples,
-        "home_venue": home_venue,
-        "away_venue": away_venue,
-        "home_overall": home_overall,
-        "away_overall": away_overall,
-    }
-
-
 def _apply_knockout_adjustment(
     match: Match,
     probabilities: dict[str, float],
@@ -443,17 +406,6 @@ def _knockout_context(match: Match) -> dict[str, object]:
     return context if isinstance(context, dict) and context.get("is_second_leg") else {}
 
 
-def _venue_adjustment_reason(match: Match, values: dict[str, float]) -> str:
-    shift = values["shift"]
-    direction = f"{match.home}主胜" if shift > 0 else f"{match.away}客胜"
-    return (
-        "同场地近期表现："
-        f"{match.home}主场胜率 {values['home_venue']:.1%}（{int(values['home_samples'])}场，整体 {values['home_overall']:.1%}），"
-        f"{match.away}客场胜率 {values['away_venue']:.1%}（{int(values['away_samples'])}场，整体 {values['away_overall']:.1%}）；"
-        f"经6场先验收缩后，{direction}概率调整 {abs(shift):.1%}。"
-    )
-
-
 def _knockout_adjustment_reason(match: Match, values: dict[str, float]) -> str:
     favorite = match.home if values["favorite"] == "3" else match.away
     return (
@@ -481,127 +433,24 @@ def _resolved_secondary_choice(
     return ranked[0] if margin >= evidence_margin else None
 
 
-def _full_analysis_selection_scores(
-    match: Match,
-    probabilities: dict[str, float],
-    odds_probabilities: dict[str, float],
-    signal_probabilities: dict[str, float],
-    math_forecast: DixonColesForecast,
-) -> dict[str, float]:
-    """Build secondary-pick scores only when full analysis found real evidence.
+def _full_analysis_selection_scores(probabilities: dict[str, float]) -> dict[str, float]:
+    """Use the calibrated result once for both prediction and ticket selection.
 
-    These scores do not replace or relabel the calibrated 1X2 probabilities. They
-    only resolve close second/third choices and guide budget downgrades. At least
-    one non-market evidence family is required, so a failed full-data collection
-    cannot silently turn into a different odds-only strategy.
+    Older versions rebuilt a second consensus from market, information and
+    Dixon-Coles outputs after those inputs had already produced ``probabilities``.
+    That could count the same evidence twice and even make the ticket disagree
+    with the displayed probabilities.  Close-choice and budget logic now consume
+    the one final probability vector without another weighted pass.
     """
-    contributors: list[tuple[float, dict[str, float]]] = []
-    if match.sources.get("odds") != "default_placeholder":
-        market = _market_selection_probabilities(match, odds_probabilities)
-        contributors.append((_market_evidence_weight(match), market))
-    if _has_informative_signals(match):
-        contributors.append((0.25, signal_probabilities))
-    if math_forecast.data_quality_score >= 0.50 and math_forecast.data_quality != "signal_fallback":
-        contributors.append((0.40 * math_forecast.data_quality_score, math_forecast.probabilities))
-
-    if len(contributors) < 2:
-        return {}
-
-    total_weight = sum(weight for weight, _ in contributors)
-    consensus = {
-        outcome: sum(weight * values[outcome] for weight, values in contributors) / total_weight
-        for outcome in ("3", "1", "0")
-    }
-    top_outcome = max(probabilities, key=probabilities.get)
-    scores = dict(probabilities)
-    for outcome in ("3", "1", "0"):
-        if outcome == top_outcome:
-            continue
-        # Keep the primary outcome anchored to the calibrated blend. Only close
-        # secondary candidates receive a bounded evidence-based adjustment.
-        adjustment = 0.45 * (consensus[outcome] - probabilities[outcome])
-        adjustment = max(-MAX_SECONDARY_SCORE_ADJUSTMENT, min(MAX_SECONDARY_SCORE_ADJUSTMENT, adjustment))
-        scores[outcome] = probabilities[outcome] + adjustment
-    return {outcome: round(score, 6) for outcome, score in scores.items()}
+    return {outcome: round(float(probabilities[outcome]), 6) for outcome in ("3", "1", "0")}
 
 
 def _has_informative_signals(match: Match) -> bool:
-    audit = match.sources.get("collection_audit") if isinstance(match.sources, dict) else None
-    if isinstance(audit, dict) and audit.get("mode") == "full":
-        injuries = audit.get("injuries") if isinstance(audit.get("injuries"), dict) else {}
-        intelligence = audit.get("intelligence") if isinstance(audit.get("intelligence"), dict) else {}
-        history = audit.get("history") if isinstance(audit.get("history"), dict) else {}
-        strength = audit.get("strength") if isinstance(audit.get("strength"), dict) else {}
-        xg = audit.get("xg") if isinstance(audit.get("xg"), dict) else {}
-        return bool(
-            (injuries.get("status") == "available" and int(injuries.get("count") or 0) > 0)
-            or intelligence.get("status") == "available"
-            or history.get("status") == "available"
-            or strength.get("status") in {"complete", "partial"}
-            or xg.get("status") in {"complete", "partial"}
-        )
-
-    signals = match.signals
-    return any(
-        abs(value - baseline) >= 0.02
-        for value, baseline in (
-            (signals.home_form, 0.5),
-            (signals.away_form, 0.5),
-            (signals.home_motivation, 0.5),
-            (signals.away_motivation, 0.5),
-            (signals.home_injury_impact, 0.0),
-            (signals.away_injury_impact, 0.0),
-            (signals.schedule_pressure_home, 0.0),
-            (signals.schedule_pressure_away, 0.0),
-        )
-    )
-
-
-def _market_evidence_weight(match: Match) -> float:
-    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
-    market = market if isinstance(market, dict) else {}
-    dispersion = market.get("market_dispersion")
-    if not isinstance(dispersion, dict):
-        return 0.35
-    values = [_probability_number(dispersion.get(outcome)) for outcome in ("3", "1", "0")]
-    available = [value for value in values if value is not None]
-    average = sum(available) / len(available) if available else 0.0
-    return 0.35 * max(0.60, 1.0 - average * 2.0)
-
-
-def _market_selection_probabilities(match: Match, fallback: dict[str, float]) -> dict[str, float]:
-    market = match.sources.get("odds_market") if isinstance(match.sources, dict) else {}
-    market = market if isinstance(market, dict) else {}
-    consensus = market.get("market_consensus")
-    values = dict(fallback)
-    if isinstance(consensus, dict):
-        parsed = {outcome: _probability_number(consensus.get(outcome)) for outcome in ("3", "1", "0")}
-        if all(value is not None for value in parsed.values()):
-            values = _normalize({outcome: float(value) for outcome, value in parsed.items()})
-
-    movement = market.get("market_movement")
-    if isinstance(movement, dict):
-        for outcome in ("3", "1", "0"):
-            try:
-                shift = float(movement.get(outcome) or 0.0)
-            except (TypeError, ValueError):
-                shift = 0.0
-            values[outcome] += max(-0.012, min(0.012, shift * 0.30))
-
-    try:
-        handicap = float(
-            market.get("asian_current_line")
-            if market.get("asian_current_line") is not None
-            else market.get("spread_home_point") or 0.0
-        )
-        price_edge = float(market.get("asian_home_price_edge") or 0.0)
-    except (TypeError, ValueError):
-        handicap = 0.0
-        price_edge = 0.0
-    home_adjustment = max(-0.015, min(0.015, -handicap * 0.009 + price_edge * 0.025))
-    values["3"] += home_adjustment
-    values["0"] -= home_adjustment
-    return _normalize({outcome: max(0.01, value) for outcome, value in values.items()})
+    # Use only features which survive reliability checks and source ownership.
+    # In particular, strength/xG availability alone is mathematical evidence;
+    # it must not reserve a second information-layer share.
+    profile = build_fundamental_profile(match)
+    return any(abs(value) >= 1e-9 for value in profile.features.values())
 
 
 def _selection_score_reason(selection_scores: dict[str, float]) -> str:
@@ -610,7 +459,7 @@ def _selection_score_reason(selection_scores: dict[str, float]) -> str:
         f"{OUTCOME_LABELS[outcome]} {selection_scores[outcome]:.1%}"
         for outcome in ordered
     )
-    return f"完整分析第二选项复核：赔率、基本面与数学模型的证据排序分为 {summary}。"
+    return f"完整分析取舍复核：直接使用最终综合概率 {summary}，不再重复累计各证据层。"
 
 
 def _blend_weights(
@@ -621,13 +470,15 @@ def _blend_weights(
     placeholder_odds = match.sources.get("odds") == "default_placeholder"
     if not model_weights:
         if placeholder_odds:
-            if math_forecast.data_quality == "strength":
+            if math_forecast.data_quality in {"fitted", "strength"}:
                 return (0.20, 0.52, 0.28)
-            if math_forecast.data_quality in {"partial_strength", "hierarchical"}:
+            if math_forecast.data_quality in {"partial_fitted", "partial_strength", "hierarchical"}:
                 return (0.20, 0.56, 0.24)
             return (0.20, 0.60, 0.20)
         return {
+            "fitted": (0.55, 0.22, 0.23),
             "strength": (0.55, 0.22, 0.23),
+            "partial_fitted": (0.58, 0.23, 0.19),
             "partial_strength": (0.58, 0.23, 0.19),
             "hierarchical": (0.59, 0.23, 0.18),
             "hybrid_fallback": (0.61, 0.24, 0.15),
@@ -794,14 +645,6 @@ def _positive_number(value: object) -> float | None:
     return number if number > 0 else None
 
 
-def _nonnegative_number(value: object) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if number >= 0 else None
-
-
 def _probability_number(value: object) -> float | None:
     try:
         number = float(value)
@@ -919,6 +762,8 @@ def _build_reasons(
     blend_weights: tuple[float, float, float],
     information_corrections: dict[str, float],
     math_corrections: dict[str, float],
+    draw_logit_shift: float,
+    draw_evidence: tuple[str, ...],
 ) -> list[str]:
     top, top_prob = ranked[0]
     second, second_prob = ranked[1]
@@ -937,7 +782,9 @@ def _build_reasons(
             "修正审计：基本面胜/平/负 "
             f"{information_corrections['3']:+.3f}/{information_corrections['1']:+.3f}/{information_corrections['0']:+.3f}；"
             "数学 "
-            f"{math_corrections['3']:+.3f}/{math_corrections['1']:+.3f}/{math_corrections['0']:+.3f}。"
+            f"{math_corrections['3']:+.3f}/{math_corrections['1']:+.3f}/{math_corrections['0']:+.3f}；"
+            "平局校准 "
+            f"{-0.5 * draw_logit_shift:+.3f}/{draw_logit_shift:+.3f}/{-0.5 * draw_logit_shift:+.3f}。"
         )
     else:
         reasons.append(
@@ -949,7 +796,25 @@ def _build_reasons(
         f"预期进球 {math_forecast.home_xg:.2f}-{math_forecast.away_xg:.2f}，"
         f"胜/平/负 {math_probs['3']:.0%}/{math_probs['1']:.0%}/{math_probs['0']:.0%}。"
     )
-    if math_forecast.data_quality == "partial_strength":
+    if draw_evidence:
+        direction = "上调" if draw_logit_shift > 0 else "下调" if draw_logit_shift < 0 else "保持"
+        reasons.append(
+            "平局独立校准："
+            f"平局对数概率{direction} {abs(draw_logit_shift):.3f}；"
+            f"{'；'.join(draw_evidence)}。"
+            "低比分与联赛指标只校验市场结构修正的可信度，不重复叠加 Dixon-Coles。"
+        )
+    if math_forecast.data_quality in {"fitted", "partial_fitted"}:
+        reasons.append(
+            "Dixon-Coles 拟合审计："
+            f"逐场历史 {math_forecast.fit_sample_count} 场，时间衰减后有效样本 "
+            f"{math_forecast.effective_sample_count:.1f} 场；"
+            f"本联赛单队基准进球 {math_forecast.league_goal_rate:.2f}，"
+            f"主场系数 {math_forecast.home_advantage:.2f}，低比分相关系数 {math_forecast.rho:+.3f}。"
+        )
+        if math_forecast.data_quality == "partial_fitted":
+            reasons.append("逐场拟合已启用，但目标球队或联赛样本仍偏少，参数已向联赛与全局先验收缩并降低数学权重。")
+    elif math_forecast.data_quality == "partial_strength":
         reasons.append("数学模型取得部分 xG/xGA，已按样本量向联赛均值收缩，避免少量比赛被过度放大。")
     elif math_forecast.data_quality == "hierarchical":
         reasons.append("数学模型暂缺完整 xG，已用近期进失球与联赛先验做分层估计，保留中等权重。")
