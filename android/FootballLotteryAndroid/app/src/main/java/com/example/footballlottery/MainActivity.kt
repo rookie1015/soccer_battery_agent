@@ -110,6 +110,7 @@ private const val PREF_FEISHU_AUTO_SEND = "feishu_auto_send"
 private const val PREF_ANALYSIS_ISSUE = "analysis_issue"
 private const val PREF_ANALYSIS_MAX_TICKET_COST = "analysis_max_ticket_cost"
 private const val PREF_ANALYSIS_PLAY_TYPE = "analysis_play_type"
+private const val PREF_REVIEW_ISSUE = "review_issue"
 private const val STRENGTH_XG_MATCHES = 20
 
 data class AnalysisReport(
@@ -704,6 +705,8 @@ class HistoryViewModel : ViewModel() {
 }
 
 class ReviewViewModel : ViewModel() {
+    private var savedInputsLoaded = false
+
     var issue by mutableStateOf("26090")
         private set
     var autoResults by mutableStateOf(true)
@@ -725,10 +728,25 @@ class ReviewViewModel : ViewModel() {
     var selectedAnalysisId by mutableStateOf("")
         private set
 
-    fun updateIssue(value: String) {
+    fun loadSavedInputs(context: Context) {
+        if (savedInputsLoaded) {
+            return
+        }
+        val prefs = context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+        if (prefs.contains(PREF_REVIEW_ISSUE)) {
+            issue = prefs.getString(PREF_REVIEW_ISSUE, issue).orEmpty()
+        }
+        savedInputsLoaded = true
+    }
+
+    fun updateIssue(value: String, context: Context) {
         issue = value
         analysisCandidates = emptyList()
         selectedAnalysisId = ""
+        context.getSharedPreferences(SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(PREF_REVIEW_ISSUE, value)
+            .apply()
     }
 
     fun updateAutoResults(value: Boolean) {
@@ -1621,6 +1639,12 @@ fun ReviewScreen(
     viewModel: ReviewViewModel,
     historyViewModel: HistoryViewModel,
 ) {
+    val context = LocalContext.current
+
+    LaunchedEffect(Unit) {
+        viewModel.loadSavedInputs(context.applicationContext)
+    }
+
     LaunchedEffect(viewModel.report?.issue) {
         if (viewModel.report != null) {
             historyViewModel.refresh(localEngine)
@@ -1688,7 +1712,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.5.1（15） · 十四场覆盖优化与敏感性检验",
+                        "App 版本 0.5.2（16） · 复盘输入记忆与任九金额",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -1971,13 +1995,15 @@ private fun OddsField(label: String, value: String, onValueChange: (String) -> U
 
 @Composable
 private fun ReviewRequestCard(localEngine: FootballLotteryLocalEngine, viewModel: ReviewViewModel) {
+    val context = LocalContext.current
+
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("生成复盘", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedTextField(
                     value = viewModel.issue,
-                    onValueChange = viewModel::updateIssue,
+                    onValueChange = { value -> viewModel.updateIssue(value, context.applicationContext) },
                     label = { Text("期号") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.weight(1f),
@@ -2833,7 +2859,21 @@ private fun resultText(prediction: MatchPrediction): String {
 
 private fun purchaseCostText(report: AnalysisReport, playType: String = ReviewPlayType.Sfc14.value): String {
     if (playType == ReviewPlayType.Choose9.value) {
-        return report.choose9?.let { "任九 ¥${"%,d".format(it.costYuan)}" }.orEmpty()
+        report.choose9?.let { choose9 ->
+            return "任九 ¥${"%,d".format(choose9.costYuan)}"
+        }
+        val keep = report.choose9Keep.toSet()
+        val selections = report.predictions.filter { prediction ->
+            keep.isEmpty() || prediction.seq in keep
+        }
+        val units = selections.fold(1L) { total, prediction ->
+            total * recommendedChoiceCount(prediction).toLong()
+        }
+        return if (selections.isNotEmpty() && units > 0L) {
+            "任九 ¥${"%,d".format(units * 2L)}"
+        } else {
+            ""
+        }
     }
     report.linePortfolio?.let { portfolio ->
         return "购彩 ¥${"%,d".format(portfolio.costYuan)}"
