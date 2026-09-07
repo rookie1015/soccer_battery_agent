@@ -1285,6 +1285,8 @@ def _restore_analysis_recommendations(
     saved_original_picks: dict[int, tuple[str, ...]] = {}
     saved_budget_flags: dict[int, tuple[bool, bool]] = {}
     saved_tactical_draws: dict[int, bool] = {}
+    saved_stability: dict[int, dict[str, object]] = {}
+    saved_stability_notes: dict[int, tuple[str, ...]] = {}
     for saved in saved_predictions:
         if not isinstance(saved, dict):
             return None
@@ -1307,6 +1309,12 @@ def _restore_analysis_recommendations(
             bool(saved.get("budget_forced_single")),
         )
         saved_tactical_draws[seq] = bool(saved.get("tactical_draw"))
+        stability = saved.get("budget_stability")
+        saved_stability[seq] = dict(stability) if isinstance(stability, dict) else {}
+        saved_stability_notes[seq] = tuple(
+            reason for reason in (saved.get("reasons") or [])
+            if isinstance(reason, str) and reason.startswith("预算稳定性：")
+        )
 
     current_sequences = {prediction.match.seq for prediction in plan.predictions}
     if set(saved_picks) != current_sequences:
@@ -1325,6 +1333,11 @@ def _restore_analysis_recommendations(
                 budget_adjusted=saved_budget_flags[prediction.match.seq][0],
                 budget_forced_single=saved_budget_flags[prediction.match.seq][1],
                 tactical_draw=saved_tactical_draws[prediction.match.seq],
+                budget_stability=saved_stability[prediction.match.seq],
+                reasons=tuple(
+                    reason for reason in prediction.reasons
+                    if not reason.startswith("预算稳定性：")
+                ) + saved_stability_notes[prediction.match.seq],
             )
             for prediction in plan.predictions
         )

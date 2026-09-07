@@ -130,6 +130,7 @@ class Prediction:
     budget_adjusted: bool = False
     budget_forced_single: bool = False
     budget_removed_picks: tuple[Outcome, ...] = ()
+    budget_stability: dict[str, object] = field(default_factory=dict)
     draw_guard: bool = False
     tactical_draw: bool = False
     tactical_draw_score: float = 0.0

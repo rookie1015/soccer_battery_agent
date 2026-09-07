@@ -401,6 +401,7 @@ def _build_budget_portfolio(
     branch_predictions = _fit_predictions_to_budget(
         branch_seed,
         max_ticket_cost_yuan=hedge_budget,
+        fixed_picks={selected.match.seq: ("1",)},
     )
     line_count = ticket_units(branch_predictions)
     draw_hedge = DrawHedgePlan(
@@ -782,33 +783,36 @@ def _fit_predictions_to_budget(
     predictions: tuple[Prediction, ...],
     max_ticket_cost_yuan: int,
     budget_overage_tolerance_yuan: int = 0,
+    *,
+    fixed_picks: dict[int, tuple[str, ...]] | None = None,
 ) -> tuple[Prediction, ...]:
     if max_ticket_cost_yuan <= 0:
         return predictions
 
     effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
     max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
-    if ticket_units(predictions) <= max_units:
-        return predictions
-
     # Exact dynamic programming over the discrete 1/2/3-choice products. The
     # former greedy loop could remove a locally cheap option and still end with
     # a lower global coverage probability. States are keyed by ticket units, so
     # the search remains small even for fourteen fixtures.
-    # State value is (number of unsafe budget-forced singles, log coverage,
-    # selections).  Fewer forced singles wins before raw coverage, preventing
-    # a 43%-50% uncertain fixture from being presented as a normal banker when
-    # an equally affordable safer compression exists elsewhere.
+    # Maximize joint probability first. Unsafe singles are warnings and only
+    # break equal-coverage ties; they must not override the coverage objective.
+    # Always optimize, even if the original recommendations already fit: they
+    # are explanatory model selections, not a cap on purchasable coverage.
     states: dict[int, tuple[int, float, tuple[Prediction, ...]]] = {1: (0, 0.0, ())}
     for prediction in predictions:
-        options = _prediction_budget_options(prediction)
+        locked = (fixed_picks or {}).get(prediction.match.seq)
+        options = (
+            (_budget_selection(prediction, locked),)
+            if locked is not None else _prediction_budget_options(prediction)
+        )
         next_states: dict[int, tuple[int, float, tuple[Prediction, ...]]] = {}
         for units, (forced_singles, score, selected) in states.items():
             for option in options:
                 new_units = units * max(1, len(option.picks))
                 if new_units > max_units:
                     continue
-                coverage = sum(_coverage_value(option, outcome) for outcome in option.picks)
+                coverage = sum(option.probabilities.get(outcome, 0.0) for outcome in option.picks)
                 option_score = log(max(coverage, 1e-12))
                 candidate = (
                     forced_singles + int(option.budget_forced_single),
@@ -820,27 +824,107 @@ def _fit_predictions_to_budget(
                     next_states[new_units] = candidate
         states = next_states
         if not states:
-            return tuple(_single_only(prediction) for prediction in predictions)
+            raise ValueError("预算不足以容纳指定票面。")
 
     _, best = max(
         states.items(),
         key=lambda item: (*_budget_state_key(item[1]), item[0]),
     )
-    return best[2]
+    return tuple(_with_budget_stability(prediction) for prediction in best[2])
 
 
-def _budget_state_key(state: tuple[int, float, tuple[Prediction, ...]]) -> tuple[int, float]:
+def _budget_state_key(state: tuple[int, float, tuple[Prediction, ...]]) -> tuple[float, int]:
     forced_singles, score, _ = state
-    return -forced_singles, score
+    return score, -forced_singles
 
 
 def _prediction_budget_options(prediction: Prediction) -> tuple[Prediction, ...]:
-    options = [prediction]
-    current = prediction
-    while len(current.picks) > 1:
-        current = _downgrade_prediction(current)
-        options.append(current)
-    return tuple(options)
+    # For a fixed choice count, every other subset is dominated by the top-k
+    # final probabilities. Thus these three options cover the full search
+    # space without retaining all seven nonempty subsets at every DP step.
+    ranked = _rank_budget_outcomes(prediction.probabilities)
+    return tuple(
+        _budget_selection(prediction, ("3", "1", "0") if count == 3 else ranked[:count])
+        for count in (1, 2, 3)
+    )
+
+
+def _rank_budget_outcomes(probabilities: dict[str, float]) -> tuple[str, ...]:
+    # Stable label order resolves exact ties, without adding a draw bonus.
+    return tuple(sorted(("3", "1", "0"), key=lambda outcome: -probabilities.get(outcome, 0.0)))
+
+
+def _budget_selection(prediction: Prediction, picks: tuple[str, ...]) -> Prediction:
+    original = prediction.analysis_picks
+    changed = set(picks) != set(original)
+    forced = len(picks) == 1 and not _safe_budget_single(prediction, picks[0])
+    reasons = tuple(
+        reason for reason in prediction.reasons
+        if not reason.startswith((SELECTION_REASON_PREFIX, "预算调整：", "预算稳定性："))
+    )
+    if changed:
+        reasons += (
+            f"预算调整：为提高整张票的联合覆盖率，本场由模型建议 {'/'.join(original)} "
+            f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
+        )
+    adjusted = replace(
+        prediction,
+        picks=picks,
+        original_picks=original,
+        reasons=reasons,
+        risk="高" if forced else prediction.risk,
+        budget_adjusted=changed,
+        budget_forced_single=forced,
+        budget_removed_picks=tuple(outcome for outcome in original if outcome not in picks),
+        budget_stability={},
+    )
+    return replace(adjusted, reasons=(selection_reason(adjusted), *reasons))
+
+
+def _with_budget_stability(prediction: Prediction) -> Prediction:
+    """Audit local top-k sensitivity, not a calibrated uncertainty interval.
+
+    Transfer 0.5 and 1 percentage point between each ordered pair, preserving
+    total probability and choice count. Do not alter probabilities or the
+    optimizer objective based on an unvalidated robustness penalty.
+    """
+    count = len(prediction.picks)
+    selected = set(prediction.picks)
+    probabilities = prediction.probabilities
+    reasons = tuple(reason for reason in prediction.reasons if not reason.startswith("预算稳定性："))
+    if count == 3:
+        return replace(prediction, reasons=reasons, budget_stability={
+            "scope": "fixed_choice_count", "status": "full_coverage",
+            "scenario_count": 0, "changed_count": 0,
+        })
+    excluded = set(("3", "1", "0")) - selected
+    gap = min(probabilities[k] for k in selected) - max(probabilities[k] for k in excluded)
+    scenarios = changed = 0
+    for delta in (0.005, 0.01):
+        for donor, receiver in product(("3", "1", "0"), repeat=2):
+            if donor == receiver or probabilities[donor] < delta or probabilities[receiver] + delta > 1.0:
+                continue
+            perturbed = dict(probabilities)
+            perturbed[donor] -= delta
+            perturbed[receiver] += delta
+            scenarios += 1
+            changed += set(_rank_budget_outcomes(perturbed)[:count]) != selected
+    audit = {
+        "scope": "fixed_choice_count",
+        "status": "sensitive" if changed else "stable_in_probe",
+        "transfer_sizes": [0.005, 0.01],
+        "boundary_gap": round(gap, 6),
+        "scenario_count": scenarios,
+        "changed_count": changed,
+    }
+    note = (
+        f"预算稳定性：固定本场选择数量，在两项间转移 0.5/1.0 个百分点且总概率不变，"
+        f"{scenarios} 个扰动场景中 {changed} 个会换选；"
+        f"入选边缘项与最高排除项相差 {gap * 100:.2f} 个百分点。"
+        + ("取舍对小幅概率变化敏感。" if changed else "本次扰动内未换选。")
+        + "这是局部敏感性检验，不是错误概率，也未重新分配整票预算。"
+    )
+    return replace(prediction, reasons=(*reasons, note), budget_stability=audit)
 
 
 def _single_only(prediction: Prediction) -> Prediction:

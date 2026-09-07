@@ -226,9 +226,15 @@ def _selection_reason(
         f"{SELECTION_OUTCOME_LABELS[outcome]}({outcome}) {probabilities.get(outcome, 0.0):.1%}"
         for outcome in ("3", "1", "0")
     )
-    budget_text = "本场最终选择经过整张票预算压缩；被排除项仍有发生可能。" if budget_adjusted else ""
+    budget_text = "本场最终选择经过整张票预算分配；被排除项仍有发生可能。" if budget_adjusted else ""
 
     if len(picks) == 3:
+        if budget_adjusted:
+            return (
+                f"{SELECTION_REASON_PREFIX}3/1/0 全包。{probability_text}；"
+                "整票预算优化为本场分配三选，覆盖模型概率 100.0%；"
+                "这不表示三项概率相近。"
+            )
         spread = ranked[0][1] - ranked[-1][1]
         return (
             f"{SELECTION_REASON_PREFIX}3/1/0 全包。{probability_text}；"

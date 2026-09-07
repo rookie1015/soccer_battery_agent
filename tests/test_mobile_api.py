@@ -47,6 +47,7 @@ class MobileApiTests(unittest.TestCase):
         self.assertIn("analysis_pick_labels", first)
         self.assertIn("budget_adjusted", first)
         self.assertIn("budget_forced_single", first)
+        self.assertEqual(first["budget_stability"], plan.predictions[0].budget_stability)
         self.assertIn("draw_guard", first)
         self.assertIn("tactical_draw", first)
         self.assertIn("market_probabilities", first)

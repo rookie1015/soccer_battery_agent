@@ -208,6 +208,7 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         "budget_adjusted": prediction.budget_adjusted,
         "budget_forced_single": prediction.budget_forced_single,
         "budget_removed_picks": list(prediction.budget_removed_picks),
+        "budget_stability": dict(prediction.budget_stability),
         "draw_guard": prediction.draw_guard,
         "tactical_draw": prediction.tactical_draw,
         "tactical_draw_score": round(prediction.tactical_draw_score * 100, 1),

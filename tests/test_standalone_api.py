@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 from football_lottery_agent import standalone_api
 from football_lottery_agent.history import archive_report, load_history_entries
 from football_lottery_agent.loader import load_issue
+from football_lottery_agent.mobile_api import serialize_ticket_plan
 from football_lottery_agent.notifier import NotifyResult
 from football_lottery_agent.report import render_markdown
 from football_lottery_agent.strategy import build_ticket_plan
@@ -726,9 +727,30 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(first["pick_text"], plan.predictions[0].pick_text)
         self.assertEqual(first["budget_adjusted"], plan.predictions[0].budget_adjusted)
         self.assertEqual(len(parsed["predictions"]), 14)
-        self.assertEqual(parsed["budget"]["total_cost_yuan"], 128)
+        self.assertEqual(parsed["budget"]["total_cost_yuan"], plan.total_cost_yuan)
         self.assertEqual(parsed["metrics"]["line_portfolio_count"], 0)
         self.assertIsNone(parsed["line_portfolio"])
+
+    def test_restoring_old_ticket_does_not_attach_new_budget_stability(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        saved_plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
+        current_plan = build_ticket_plan(issue, max_ticket_cost_yuan=1000)
+        report = serialize_ticket_plan(saved_plan)
+        restored = standalone_api._restore_analysis_recommendations(current_plan, report)
+        self.assertIsNotNone(restored)
+        for saved, prediction in zip(saved_plan.predictions, restored.predictions):
+            self.assertEqual(prediction.picks, saved.picks)
+            self.assertEqual(prediction.budget_stability, saved.budget_stability)
+            self.assertEqual(
+                [r for r in prediction.reasons if r.startswith("预算稳定性：")],
+                [r for r in saved.reasons if r.startswith("预算稳定性：")],
+            )
+        for prediction in report["predictions"]:
+            prediction.pop("budget_stability")
+            prediction["reasons"] = []
+        legacy = standalone_api._restore_analysis_recommendations(current_plan, report)
+        self.assertTrue(all(p.budget_stability == {} for p in legacy.predictions))
+        self.assertFalse(any(r.startswith("预算稳定性：") for p in legacy.predictions for r in p.reasons))
 
     def test_history_parses_purchase_deadline_from_new_markdown(self) -> None:
         markdown_text = _analysis_markdown("26095", "3", tuple(range(1, 10))).replace(

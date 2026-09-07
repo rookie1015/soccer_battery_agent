@@ -307,7 +307,7 @@ def _analysis_match_tab(prediction: Prediction, plan: TicketPlan) -> str:
         budget_html = (
             f'<div class="analysis-result"><span>预算票面</span>'
             f'<strong>{escape(budget_labels)}（{escape(prediction.pick_text)}）</strong>'
-            f'<small>整票成本压缩{escape(warning)}</small></div>'
+            f'<small>整票预算分配{escape(warning)}</small></div>'
         )
     reasons = "".join(f"<li>{escape(reason)}</li>" for reason in prediction.reasons)
     if not reasons:
