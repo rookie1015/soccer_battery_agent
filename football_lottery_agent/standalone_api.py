@@ -37,10 +37,12 @@ from .notifier import send_text
 from .predictor import OUTCOME_LABELS, SELECTION_REASON_PREFIX, predict_match, selection_reason_from_values
 from .report import write_report
 from .review import (
+    OfficialPrize,
     REVIEW_PLAY_CHOOSE9,
     REVIEW_PLAY_SFC14,
     build_review,
     fetch_results_with_fallbacks,
+    fetch_sporttery_prize,
     load_results,
     write_review_report,
 )
@@ -494,11 +496,12 @@ def _record_analysis_mode(
     issue_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def run_history(work_dir: str | Path) -> dict[str, object]:
+def run_history(work_dir: str | Path, *, refresh_prizes: bool = False) -> dict[str, object]:
     root = Path(work_dir)
     history_dir = root / "reports" / "history"
     entries = []
     analysis_calibration: dict[str, object] | None = None
+    prize_cache: dict[str, OfficialPrize] = {}
     for item in load_history_entries(history_dir):
         entry = dict(item)
         markdown = str(entry.get("markdown") or "")
@@ -512,6 +515,15 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
             str(entry.get("issue") or ""),
             str(entry.get("kind") or ""),
         )
+        if refresh_prizes and report is not None and str(entry.get("kind") or "") == "review":
+            report = _refresh_archived_review_prize(
+                report,
+                root,
+                history_dir / markdown,
+                prize_cache,
+            )
+            markdown_text = _read_history_text(history_dir, markdown)
+            entry["markdown_text"] = markdown_text
         if report is not None and str(entry.get("kind") or "") == "analysis":
             report = _restore_history_metadata(report, root, str(entry.get("issue") or ""))
             # Archived reports are rebuilt from Markdown, which predates the
@@ -524,6 +536,58 @@ def run_history(work_dir: str | Path) -> dict[str, object]:
         entry["report"] = report
         entries.append(entry)
     return {"ok": True, "entries": entries}
+
+
+def _refresh_archived_review_prize(
+    report: dict[str, object],
+    root: Path,
+    markdown_path: Path,
+    prize_cache: dict[str, OfficialPrize],
+) -> dict[str, object]:
+    existing = report.get("prize")
+    if isinstance(existing, dict) and existing.get("status") == "published":
+        return report
+
+    issue = str(report.get("issue") or "").strip()
+    if not issue:
+        return report
+    official = prize_cache.get(issue)
+    if official is None:
+        try:
+            official = fetch_sporttery_prize(issue, cache_dir=root / "cache")
+        except Exception:
+            official = OfficialPrize()
+        prize_cache[issue] = official
+
+    prize = _serialize_prize_from_saved_report(report, official)
+    if prize is None:
+        return report
+    refreshed = dict(report)
+    refreshed["prize"] = prize
+    _write_archived_review_snapshot(markdown_path, refreshed)
+    return refreshed
+
+
+def _write_archived_review_snapshot(markdown_path: Path, report: dict[str, object]) -> None:
+    try:
+        markdown_path = markdown_path.resolve()
+        if not markdown_path.exists() or not markdown_path.is_file():
+            return
+        markdown_text = markdown_path.read_text(encoding="utf-8", errors="replace")
+        snapshot = json.dumps(report, ensure_ascii=False).replace("-->", "--\\u003e")
+        block = f"<!-- mobile-review-v1\n{snapshot}\n-->"
+        pattern = r"<!-- mobile-review-v1\n.*?\n-->"
+        if re.search(pattern, markdown_text, re.DOTALL):
+            updated = re.sub(pattern, lambda _: block, markdown_text, count=1, flags=re.DOTALL)
+        else:
+            updated = markdown_text.rstrip() + f"\n\n{block}\n"
+        temporary = markdown_path.with_suffix(markdown_path.suffix + ".tmp")
+        temporary.write_text(updated, encoding="utf-8")
+        temporary.replace(markdown_path)
+    except OSError:
+        # A read-only or concurrently removed history item can still be shown
+        # for this session; persistence will be retried on the next refresh.
+        return
 
 
 def run_delete_history(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
@@ -929,6 +993,14 @@ def _restore_history_metadata(report: dict[str, object], work_dir: Path, issue: 
 
 
 def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, object] | None:
+    snapshot = re.search(r"<!-- mobile-review-v1\n(.*?)\n-->", markdown_text, re.DOTALL)
+    if snapshot:
+        try:
+            saved = json.loads(snapshot.group(1))
+            if isinstance(saved, dict) and isinstance(saved.get("predictions"), list) and saved.get("issue") == fallback_issue:
+                return saved
+        except (ValueError, TypeError):
+            pass
     if "## 逐场复盘" not in markdown_text:
         return None
 
@@ -1148,6 +1220,11 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
             temp_results.unlink(missing_ok=True)
         results_source = "手工 CSV"
 
+    try:
+        official_prize = fetch_sporttery_prize(plan.issue.issue, cache_dir=cache_dir)
+    except Exception:
+        official_prize = OfficialPrize()
+
     missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
     if missing:
         missing_text = "、".join(str(item) for item in missing)
@@ -1159,6 +1236,20 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     markdown_path = report_dir / f"{_slug(plan.issue.issue)}_review.md"
     html_path = report_dir / f"{_slug(plan.issue.issue)}_review.html"
     write_review_report(review, markdown_path, post_match_evidence)
+    # History is loaded from the archived Markdown. Preserve both independent
+    # tickets and their review outcomes rather than reconstructing the nine
+    # selections from the fourteen-match table.
+    serialized_review = _serialize_review_report(
+        review,
+        diagnostics,
+        post_match_evidence,
+        official_prize=official_prize,
+    )
+    with markdown_path.open("a", encoding="utf-8") as handle:
+        handle.write(_render_prize_markdown(serialized_review["prize"]))
+    with markdown_path.open("a", encoding="utf-8") as handle:
+        snapshot = json.dumps(serialized_review, ensure_ascii=False).replace("-->", "--\\u003e")
+        handle.write(f"\n<!-- mobile-review-v1\n{snapshot}\n-->\n")
     write_review_html(review, html_path)
     archive_report(
         "review",
@@ -1174,7 +1265,7 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     return {
         "ok": True,
         "message": f"{plan.issue.issue} 复盘报告已生成，赛果来源：{results_source}。",
-        "report": _serialize_review_report(review, diagnostics, post_match_evidence),
+        "report": serialized_review,
         "html_path": str(html_path),
         "markdown_path": str(markdown_path),
         "model_experiment": experiment,
@@ -1504,6 +1595,7 @@ def _serialize_review_report(
     review,
     diagnostics: dict[str, object] | None = None,
     post_match_evidence: dict[int, list[dict[str, object]]] | None = None,
+    official_prize: OfficialPrize | None = None,
 ) -> dict[str, object]:
     report = serialize_ticket_plan(review.plan, include_review_fields=True)
     report["review_play_type"] = review.play_type
@@ -1585,7 +1677,237 @@ def _serialize_review_report(
         "history_issue_count": 0,
         "history_tags": [],
     }
+    report["prize"] = _serialize_prize(review, official_prize or OfficialPrize())
     return report
+
+
+def _serialize_prize(review, official: OfficialPrize) -> dict[str, object]:
+    results = {row.result.seq: row.result for row in review.rows}
+    if review.plan.line_portfolio is not None:
+        sfc_first, sfc_second = _portfolio_winning_lines(review)
+    else:
+        sfc_first, sfc_second = _rectangular_winning_lines(review.plan.predictions, results)
+    if review.plan.draw_hedge is not None:
+        hedge_first, hedge_second = _rectangular_winning_lines(
+            review.plan.draw_hedge.predictions,
+            results,
+        )
+        sfc_first += hedge_first
+        sfc_second += hedge_second
+    choose9_lines = 0
+    if review.plan.choose9_plan is not None:
+        choose9_lines, _ = _rectangular_winning_lines(review.plan.choose9_plan.predictions, results)
+
+    sfc_total = _known_prize_total(
+        (sfc_first, official.sfc14_first_yuan),
+        (sfc_second, official.sfc14_second_yuan),
+    )
+    choose9_total = _known_prize_total((choose9_lines, official.choose9_yuan))
+    total = None if sfc_total is None or choose9_total is None else sfc_total + choose9_total
+    return {
+        "status": "published" if official.published else "pending",
+        "source": official.source,
+        "draw_date": official.draw_date,
+        "sfc14": {
+            "won": sfc_first > 0 or sfc_second > 0,
+            "first_winning_lines": sfc_first,
+            "first_prize_per_line_yuan": official.sfc14_first_yuan,
+            "second_winning_lines": sfc_second,
+            "second_prize_per_line_yuan": official.sfc14_second_yuan,
+            "total_prize_yuan": sfc_total,
+        },
+        "choose9": {
+            "won": choose9_lines > 0,
+            "winning_lines": choose9_lines,
+            "prize_per_line_yuan": official.choose9_yuan,
+            "total_prize_yuan": choose9_total,
+        },
+        "total_prize_yuan": total,
+    }
+
+
+def _serialize_prize_from_saved_report(
+    report: dict[str, object],
+    official: OfficialPrize,
+) -> dict[str, object] | None:
+    predictions = [item for item in report.get("predictions") or [] if isinstance(item, dict)]
+    results = {
+        int(item.get("seq") or 0): str(item.get("final_result") or "").strip()
+        for item in predictions
+        if int(item.get("seq") or 0) > 0 and str(item.get("final_result") or "").strip()
+    }
+    if not results:
+        return None
+
+    sfc_first = sfc_second = 0
+    portfolio = report.get("line_portfolio")
+    if isinstance(portfolio, dict) and isinstance(portfolio.get("lines"), list):
+        portfolio_result = _saved_portfolio_winning_lines(portfolio["lines"], results)
+        if portfolio_result is not None:
+            sfc_first, sfc_second = portfolio_result
+    elif len(predictions) == 14:
+        rectangular = _saved_rectangular_winning_lines(predictions, results)
+        if rectangular is not None:
+            sfc_first, sfc_second = rectangular
+
+    draw_hedge = report.get("draw_hedge")
+    if isinstance(draw_hedge, dict):
+        hedge = draw_hedge.get("selections")
+        if isinstance(hedge, list):
+            hedge_result = _saved_rectangular_winning_lines(hedge, results)
+            if hedge_result is not None:
+                sfc_first += hedge_result[0]
+                sfc_second += hedge_result[1]
+
+    choose9_lines = 0
+    choose9 = report.get("choose9")
+    choose9_selections = choose9.get("selections") if isinstance(choose9, dict) else None
+    if not isinstance(choose9_selections, list):
+        keep = {int(item) for item in report.get("choose9_keep") or [] if str(item).isdigit()}
+        if len(keep) == 9:
+            choose9_selections = [item for item in predictions if int(item.get("seq") or 0) in keep]
+        elif len(predictions) == 9 and report.get("review_play_type") == REVIEW_PLAY_CHOOSE9:
+            choose9_selections = predictions
+    if isinstance(choose9_selections, list) and len(choose9_selections) == 9:
+        choose9_result = _saved_rectangular_winning_lines(choose9_selections, results)
+        if choose9_result is not None:
+            choose9_lines = choose9_result[0]
+
+    sfc_total = _known_prize_total(
+        (sfc_first, official.sfc14_first_yuan),
+        (sfc_second, official.sfc14_second_yuan),
+    )
+    choose9_total = _known_prize_total((choose9_lines, official.choose9_yuan))
+    total = None if sfc_total is None or choose9_total is None else sfc_total + choose9_total
+    return {
+        "status": "published" if official.published else "pending",
+        "source": official.source,
+        "draw_date": official.draw_date,
+        "sfc14": {
+            "won": sfc_first > 0 or sfc_second > 0,
+            "first_winning_lines": sfc_first,
+            "first_prize_per_line_yuan": official.sfc14_first_yuan,
+            "second_winning_lines": sfc_second,
+            "second_prize_per_line_yuan": official.sfc14_second_yuan,
+            "total_prize_yuan": sfc_total,
+        },
+        "choose9": {
+            "won": choose9_lines > 0,
+            "winning_lines": choose9_lines,
+            "prize_per_line_yuan": official.choose9_yuan,
+            "total_prize_yuan": choose9_total,
+        },
+        "total_prize_yuan": total,
+    }
+
+
+def _saved_rectangular_winning_lines(
+    selections: list[object],
+    results: dict[int, str],
+) -> tuple[int, int] | None:
+    correct: list[int] = []
+    wrong: list[int] = []
+    for value in selections:
+        if not isinstance(value, dict):
+            return None
+        seq = int(value.get("seq") or 0)
+        result = results.get(seq)
+        if result is None:
+            return None
+        raw_picks = value.get("picks")
+        picks = [str(item) for item in raw_picks] if isinstance(raw_picks, list) else re.findall(r"[310]", str(value.get("pick_text") or ""))
+        picks = [pick for pick in picks if pick in OUTCOME_LABELS]
+        if not picks:
+            return None
+        correct_count = len(picks) if result == "*" else int(result in picks)
+        correct.append(correct_count)
+        wrong.append(0 if result == "*" else len(picks) - correct_count)
+    first = _product(correct)
+    second = sum(wrong[index] * _product(correct[:index] + correct[index + 1 :]) for index in range(len(correct)))
+    return first, second
+
+
+def _saved_portfolio_winning_lines(
+    lines: list[object],
+    results: dict[int, str],
+) -> tuple[int, int] | None:
+    ordered_results = [results.get(seq) for seq in sorted(results)]
+    if len(ordered_results) != 14 or any(result is None for result in ordered_results):
+        return None
+    first = second = 0
+    valid_lines = 0
+    for value in lines:
+        if not isinstance(value, dict):
+            continue
+        outcomes = value.get("outcomes")
+        if not isinstance(outcomes, list):
+            outcomes = str(value.get("pick_text") or "").split("-")
+        if len(outcomes) != 14:
+            continue
+        valid_lines += 1
+        hits = sum(
+            1
+            for pick, result in zip(outcomes, ordered_results)
+            if result == "*" or str(pick) == result
+        )
+        first += int(hits == 14)
+        second += int(hits == 13)
+    return (first, second) if valid_lines else None
+
+
+def _rectangular_winning_lines(predictions, results) -> tuple[int, int]:
+    correct: list[int] = []
+    wrong: list[int] = []
+    for prediction in predictions:
+        result = results.get(prediction.match.seq)
+        if result is None:
+            return 0, 0
+        choices = len(prediction.picks)
+        correct_count = choices if result.unplayed else int(result.outcome in prediction.picks)
+        correct.append(correct_count)
+        wrong.append(0 if result.unplayed else choices - correct_count)
+    first = _product(correct)
+    second = sum(wrong[index] * _product(correct[:index] + correct[index + 1 :]) for index in range(len(correct)))
+    return first, second
+
+
+def _portfolio_winning_lines(review) -> tuple[int, int]:
+    first = second = 0
+    for line in review.plan.line_portfolio.lines:
+        hits = review._line_hits(line.outcomes)
+        first += int(hits == review.total)
+        second += int(hits == review.total - 1)
+    return first, second
+
+
+def _product(values) -> int:
+    result = 1
+    for value in values:
+        result *= int(value)
+    return result
+
+
+def _known_prize_total(*levels: tuple[int, int | None]) -> int | None:
+    if any(lines > 0 and amount is None for lines, amount in levels):
+        return None
+    return sum(lines * int(amount or 0) for lines, amount in levels)
+
+
+def _render_prize_markdown(prize: dict[str, object]) -> str:
+    sfc = prize["sfc14"]
+    choose9 = prize["choose9"]
+    def amount(value: object) -> str:
+        return "待官方公布" if value is None else f"{int(value):,} 元"
+    return (
+        "\n## 中奖奖金\n\n"
+        f"- 开奖日期：{prize.get('draw_date') or '未提供'}\n"
+        f"- 十四场：一等奖 {sfc['first_winning_lines']} 注 × {amount(sfc['first_prize_per_line_yuan'])}；"
+        f"二等奖 {sfc['second_winning_lines']} 注 × {amount(sfc['second_prize_per_line_yuan'])}；"
+        f"合计 {amount(sfc['total_prize_yuan'])}。\n"
+        f"- 任九：{choose9['winning_lines']} 注 × {amount(choose9['prize_per_line_yuan'])}；"
+        f"合计 {amount(choose9['total_prize_yuan'])}。\n"
+        f"- 两种玩法总计：{amount(prize['total_prize_yuan'])}（按官方单注奖金计算，税前）。\n"
+    )
 
 
 def run_single_prediction(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:

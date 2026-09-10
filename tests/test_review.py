@@ -10,6 +10,7 @@ from football_lottery_agent.review import (
     REVIEW_PLAY_CHOOSE9,
     _diagnostic_tags,
     build_review,
+    fetch_sporttery_prize,
     fetch_sporttery_results,
     fetch_results_with_fallbacks,
     load_results,
@@ -134,6 +135,23 @@ class ReviewTests(unittest.TestCase):
 
         self.assertEqual(results[1].score_text, "2-1")
         self.assertEqual(results[1].outcome, "3")
+
+    def test_fetch_sporttery_prize_reads_both_games(self) -> None:
+        raw = '''{"errorCode":"0","value":{"list":[{
+          "lotteryDrawNum":"26087","lotteryDrawTime":"2026-07-08",
+          "prizeLevelList":[
+            {"prizeLevel":"一等奖","stakeAmountFormat":"123456"},
+            {"prizeLevel":"二等奖","stakeAmount":"7,890"}],
+          "prizeLevelListRj":[{"prizeLevel":"任选9场","stakeAmountFormat":"4567"}]
+        }]}}'''
+        with patch("football_lottery_agent.review._fetch_text", return_value=raw):
+            prize = fetch_sporttery_prize("26087")
+
+        self.assertEqual(prize.draw_date, "2026-07-08")
+        self.assertEqual(prize.sfc14_first_yuan, 123456)
+        self.assertEqual(prize.sfc14_second_yuan, 7890)
+        self.assertEqual(prize.choose9_yuan, 4567)
+        self.assertTrue(prize.published)
 
     def test_parse_sporttery_result_row_uses_match_numbers_and_official_outcomes(self) -> None:
         row = {

@@ -11,10 +11,92 @@ from football_lottery_agent.loader import load_issue
 from football_lottery_agent.mobile_api import serialize_ticket_plan
 from football_lottery_agent.notifier import NotifyResult
 from football_lottery_agent.report import render_markdown
+from football_lottery_agent.review import MatchResult, OfficialPrize, build_review
 from football_lottery_agent.strategy import build_ticket_plan
 
 
 class StandaloneApiTests(unittest.TestCase):
+    def test_review_prize_counts_independent_tickets(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=500)
+        results = {}
+        for prediction in plan.predictions:
+            outcome = prediction.picks[0]
+            results[prediction.match.seq] = (
+                MatchResult(prediction.match.seq, 1, 0, score_exact=False) if outcome == "3"
+                else MatchResult(prediction.match.seq, 0, 0, score_exact=False) if outcome == "1"
+                else MatchResult(prediction.match.seq, 0, 1, score_exact=False)
+            )
+        report = standalone_api._serialize_review_report(
+            build_review(plan, results),
+            official_prize=OfficialPrize("2026-07-08", 100000, 5000, 3000),
+        )
+
+        self.assertEqual(report["prize"]["sfc14"]["first_winning_lines"], 1)
+        self.assertTrue(report["prize"]["sfc14"]["won"])
+        expected_sfc = 100000 + report["prize"]["sfc14"]["second_winning_lines"] * 5000
+        self.assertEqual(report["prize"]["sfc14"]["total_prize_yuan"], expected_sfc)
+        expected_choose9 = 3000 if report["prize"]["choose9"]["won"] else 0
+        self.assertEqual(report["prize"]["choose9"]["total_prize_yuan"], expected_choose9)
+
+    def test_review_history_preserves_independent_choose9_ticket_and_hits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "data").mkdir()
+            issue_path = root / "data" / "sample-001_issue.json"
+            issue_path.write_text(Path("data/sample_issue.json").read_text(encoding="utf-8"), encoding="utf-8")
+            plan = build_ticket_plan(load_issue(issue_path))
+            with patch.object(standalone_api, "find_post_match_evidence", return_value={}), patch.object(
+                standalone_api, "_refresh_model_experiment", return_value={}
+            ):
+                result = standalone_api.run_review({
+                    "issue": plan.issue.issue,
+                    "auto_results": False,
+                    "results_csv": "seq,score\n" + "\n".join(f"{seq},1-0" for seq in range(1, 15)),
+                }, root)
+            restored = standalone_api.run_history(root)["entries"][0]["report"]
+            self.assertIsNotNone(restored["choose9"])
+            self.assertEqual(len(restored["choose9"]["selections"]), 9)
+            self.assertEqual(len(restored["predictions"]), 14)
+            self.assertEqual(restored, result["report"])
+
+    def test_history_refresh_migrates_old_review_prize_and_persists_it(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=500)
+        results = {}
+        for prediction in plan.predictions:
+            outcome = prediction.picks[0]
+            results[prediction.match.seq] = (
+                MatchResult(prediction.match.seq, 1, 0, score_exact=False) if outcome == "3"
+                else MatchResult(prediction.match.seq, 0, 0, score_exact=False) if outcome == "1"
+                else MatchResult(prediction.match.seq, 0, 1, score_exact=False)
+            )
+        review = build_review(plan, results)
+        old_report = standalone_api._serialize_review_report(review)
+        old_report.pop("prize")
+        official = OfficialPrize("2026-07-08", 100000, 5000, 3000)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            html = root / "review.html"
+            markdown = root / "review.md"
+            html.write_text("<h1>review</h1>", encoding="utf-8")
+            markdown.write_text(
+                "# 足球彩票复盘报告：sample-001\n\n## 逐场复盘\n\n"
+                f"<!-- mobile-review-v1\n{json.dumps(old_report, ensure_ascii=False)}\n-->\n",
+                encoding="utf-8",
+            )
+            archive_report("review", "sample-001", html, markdown, history_dir=root / "reports" / "history")
+
+            with patch.object(standalone_api, "fetch_sporttery_prize", return_value=official) as fetch_prize:
+                migrated = standalone_api.run_history(root, refresh_prizes=True)["entries"][0]["report"]
+                restored = standalone_api.run_history(root, refresh_prizes=True)["entries"][0]["report"]
+
+            archived_markdown = next((root / "reports" / "history" / "items").glob("*.md")).read_text(encoding="utf-8")
+
+        fetch_prize.assert_called_once()
+        self.assertEqual(migrated["prize"], standalone_api._serialize_prize(review, official))
+        self.assertEqual(restored["prize"], migrated["prize"])
+        self.assertIn('"prize":', archived_markdown)
+
     def test_review_refreshes_candidate_without_auto_promotion(self) -> None:
         experiment = {
             "experiment_id": "candidate-1",

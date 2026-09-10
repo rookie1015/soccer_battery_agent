@@ -51,8 +51,8 @@ def send_feishu(payload_json: str) -> str:
     return _json(run_send_feishu(json.loads(payload_json)))
 
 
-def history(work_dir: str) -> str:
-    return _json(run_history(work_dir))
+def history(work_dir: str, refresh_prizes: bool = False) -> str:
+    return _json(run_history(work_dir, refresh_prizes=bool(refresh_prizes)))
 
 
 def delete_history(payload_json: str, work_dir: str) -> str:

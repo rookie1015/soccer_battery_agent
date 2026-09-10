@@ -29,6 +29,22 @@ class ResultsFetch:
 
 
 @dataclass(frozen=True)
+class OfficialPrize:
+    draw_date: str = ""
+    sfc14_first_yuan: int | None = None
+    sfc14_second_yuan: int | None = None
+    choose9_yuan: int | None = None
+    source: str = "中国体彩网官方开奖"
+
+    @property
+    def published(self) -> bool:
+        return any(
+            value is not None
+            for value in (self.sfc14_first_yuan, self.sfc14_second_yuan, self.choose9_yuan)
+        )
+
+
+@dataclass(frozen=True)
 class MatchResult:
     seq: int
     home_goals: int
@@ -256,6 +272,23 @@ def fetch_sina_results(issue: str, cache_dir: str | Path = "data/cache") -> dict
 
 
 def fetch_sporttery_results(issue: str, cache_dir: str | Path = "data/cache") -> dict[int, MatchResult]:
+    row = _fetch_sporttery_draw_row(issue, cache_dir)
+    return parse_sporttery_result_row(row) if row else {}
+
+
+def fetch_sporttery_prize(issue: str, cache_dir: str | Path = "data/cache") -> OfficialPrize:
+    row = _fetch_sporttery_draw_row(issue, cache_dir)
+    if not row:
+        return OfficialPrize()
+    return OfficialPrize(
+        draw_date=str(row.get("lotteryDrawTime") or "").strip()[:10],
+        sfc14_first_yuan=_prize_amount(row.get("prizeLevelList"), "一等奖"),
+        sfc14_second_yuan=_prize_amount(row.get("prizeLevelList"), "二等奖"),
+        choose9_yuan=_prize_amount(row.get("prizeLevelListRj"), "任选9场"),
+    )
+
+
+def _fetch_sporttery_draw_row(issue: str, cache_dir: str | Path = "data/cache") -> dict[str, object] | None:
     params = {
         "gameNo": "90",
         "provinceId": "0",
@@ -272,8 +305,20 @@ def fetch_sporttery_results(issue: str, cache_dir: str | Path = "data/cache") ->
     rows = value.get("list") or []
     for row in rows:
         if str(row.get("lotteryDrawNum") or "").strip() == issue:
-            return parse_sporttery_result_row(row)
-    return {}
+            return row if isinstance(row, dict) else None
+    return None
+
+
+def _prize_amount(levels: object, label: str) -> int | None:
+    if not isinstance(levels, list):
+        return None
+    for level in levels:
+        if not isinstance(level, dict) or str(level.get("prizeLevel") or "").strip() != label:
+            continue
+        raw = level.get("stakeAmountFormat") or level.get("stakeAmount")
+        digits = re.sub(r"[^0-9]", "", str(raw or ""))
+        return int(digits) if digits else None
+    return None
 
 
 def fetch_results_with_fallbacks(issue: str, cache_dir: str | Path = "data/cache") -> ResultsFetch:
