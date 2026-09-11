@@ -747,10 +747,14 @@ def _parse_choose9_markdown(
         markdown_text,
         re.MULTILINE,
     )
-    heading = "## 任九建议（独立优化）"
-    if not summary or heading not in markdown_text:
+    heading_match = re.search(
+        r"^## 任九建议(?:（[^\r\n）]+）)?\s*$",
+        markdown_text,
+        re.MULTILINE,
+    )
+    if not summary or heading_match is None:
         return None
-    section = markdown_text.split(heading, 1)[1].split("\n## ", 1)[0]
+    section = markdown_text[heading_match.end() :].split("\n## ", 1)[0]
     probability_match = re.search(r"^- 理论联合覆盖率：([\d.]+)%", section, re.MULTILINE)
     tolerance_match = re.search(
         r"^- 任九容差出票：超出名义上限 \d+ 元，未超过允许容差 (\d+) 元。?$",

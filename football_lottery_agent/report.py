@@ -102,7 +102,7 @@ def render_markdown(plan: TicketPlan) -> str:
             "未使用金额不代表模型降低了风险，预算删除项仍需单独审计。"
         )
     lines.append("")
-    lines.append("## 任九建议（独立优化）")
+    lines.append("## 任九建议（模型建议优先，超预算才压缩）")
     lines.append("")
     if plan.choose9_plan:
         choose9 = plan.choose9_plan
@@ -117,8 +117,9 @@ def render_markdown(plan: TicketPlan) -> str:
                 f"{choose9.budget_tolerance_yuan} 元。"
             )
         lines.append(
-            "- 预算口径：任九与十四场共享基础概率，但场次和票面分别优化；"
-            "两种玩法的金额各自计算，若同时购买需要相加。"
+            "- 预算口径：任九先按单场最高置信度选择最稳的 9 场并保留原始模型建议；"
+            "若原票面不超过金额上限则原样保留，"
+            "只有超预算时才删除模型原有选项进行压缩，不会为用满预算主动扩展。"
         )
         lines.append(
             f"- 理论联合覆盖率：{choose9.joint_coverage_probability:.2%}；"

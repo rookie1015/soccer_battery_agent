@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from heapq import heappop, heappush
-from itertools import product
+from itertools import combinations, product
 from math import exp, log
 from random import Random
 
@@ -659,50 +659,34 @@ def _build_choose9_plan(
     max_ticket_cost_yuan: int,
     budget_overage_tolerance_yuan: int = 0,
 ) -> Choose9Plan:
-    """Jointly optimize the nine fixtures and their rectangular selections.
+    """Select nine model fixtures, then only compress their model selections.
 
-    This is intentionally independent from the fourteen-match ticket.  Each
-    fixture offers its strongest single, double, and three-way coverage; an
-    exact dynamic program then chooses exactly nine fixtures and a product of
-    choice counts that fits the choose-nine budget while maximizing estimated
-    joint coverage.
+    Fixture selection prioritizes the strongest single-outcome confidence,
+    so a low-confidence three-way recommendation cannot outrank a reliable
+    single merely because it covers every outcome. If those nine model
+    recommendations already fit the budget, they are returned unchanged.
+    Otherwise the budget optimiser may remove outcomes from a recommendation,
+    but it must never add an outcome merely to spend more of the budget.
     """
-    effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
-    max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
-    # (selected fixture count, ticket units) -> (log coverage, predictions)
-    states: dict[tuple[int, int], tuple[float, tuple[Prediction, ...]]] = {
-        (0, 1): (0.0, ())
-    }
-    for prediction in predictions:
-        next_states = dict(states)  # Skipping this fixture is a valid choice.
-        for (selected_count, units), (score, selected) in states.items():
-            if selected_count >= 9:
-                continue
-            for option in _choose9_prediction_options(prediction):
-                new_units = units * len(option.picks)
-                if new_units > max_units:
-                    continue
-                coverage = _choose9_coverage_probability(option)
-                key = (selected_count + 1, new_units)
-                candidate = (score + log(max(coverage, 1e-12)), (*selected, option))
-                existing = next_states.get(key)
-                if existing is None or _choose9_state_key(candidate) > _choose9_state_key(existing):
-                    next_states[key] = candidate
-        states = next_states
-
-    candidates = [
-        (units, value)
-        for (selected_count, units), value in states.items()
-        if selected_count == 9
-    ]
-    if not candidates:
-        raise ValueError("任九预算不足，至少需要 2 元购买 1 注。")
-
-    units, (score, selected_predictions) = max(
-        candidates,
-        key=lambda item: (_choose9_state_key(item[1]), item[0]),
+    ranked = sorted(
+        predictions,
+        key=lambda prediction: (
+            max(prediction.probabilities.values()),
+            _prediction_top_gap(prediction),
+            _pick_coverage_probability(prediction),
+            -prediction.match.seq,
+        ),
+        reverse=True,
     )
-    ordered = tuple(sorted(selected_predictions, key=lambda item: item.match.seq))
+    selected_predictions = tuple(sorted(ranked[:9], key=lambda item: item.match.seq))
+    ordered = _fit_predictions_to_budget(
+        selected_predictions,
+        max_ticket_cost_yuan=max_ticket_cost_yuan,
+        budget_overage_tolerance_yuan=budget_overage_tolerance_yuan,
+        allow_expansion=False,
+    )
+    units = ticket_units(ordered)
+    score = sum(log(max(_choose9_coverage_probability(item), 1e-12)) for item in ordered)
     return Choose9Plan(
         predictions=ordered,
         allocated_budget_yuan=max_ticket_cost_yuan,
@@ -713,36 +697,17 @@ def _build_choose9_plan(
     )
 
 
+def _prediction_top_gap(prediction: Prediction) -> float:
+    ranked = sorted(prediction.probabilities.values(), reverse=True)
+    return ranked[0] - ranked[1] if len(ranked) >= 2 else ranked[0]
+
+
 def _choose9_prediction_options(prediction: Prediction) -> tuple[Prediction, ...]:
-    ranked_outcomes = tuple(
-        sorted(
-            ("3", "1", "0"),
-            key=lambda outcome: (
-                _coverage_value(prediction, outcome),
-                prediction.probabilities.get(outcome, 0.0),
-                -("3", "1", "0").index(outcome),
-            ),
-            reverse=True,
-        )
-    )
+    original = prediction.analysis_picks
     return tuple(
-        replace(
-            prediction,
-            picks=("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count],
-            original_picks=prediction.analysis_picks,
-            budget_adjusted=(
-                (("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count])
-                != prediction.analysis_picks
-            ),
-            budget_forced_single=False,
-            budget_removed_picks=tuple(
-                outcome
-                for outcome in prediction.analysis_picks
-                if outcome
-                not in (("3", "1", "0") if choice_count == 3 else ranked_outcomes[:choice_count])
-            ),
-        )
-        for choice_count in (1, 2, 3)
+        _budget_selection(prediction, picks, compression_only=True)
+        for choice_count in range(1, len(original) + 1)
+        for picks in combinations(original, choice_count)
     )
 
 
@@ -751,17 +716,6 @@ def _choose9_coverage_probability(prediction: Prediction) -> float:
         1.0,
         sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks),
     )
-
-
-def _choose9_state_key(
-    state: tuple[float, tuple[Prediction, ...]],
-) -> tuple[float, float, tuple[int, ...]]:
-    score, selected = state
-    # Deterministic ties: prefer stronger top outcomes and then earlier issue
-    # sequence numbers.  The coverage objective remains the primary criterion.
-    top_sum = sum(max(prediction.probabilities.values()) for prediction in selected)
-    sequences = tuple(-prediction.match.seq for prediction in selected)
-    return score, top_sum, sequences
 
 
 def _pick_coverage_probability(prediction: Prediction) -> float:
@@ -785,12 +739,15 @@ def _fit_predictions_to_budget(
     budget_overage_tolerance_yuan: int = 0,
     *,
     fixed_picks: dict[int, tuple[str, ...]] | None = None,
+    allow_expansion: bool = True,
 ) -> tuple[Prediction, ...]:
     if max_ticket_cost_yuan <= 0:
         return predictions
 
     effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
     max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
+    if not allow_expansion and ticket_units(predictions) <= max_units:
+        return predictions
     # Exact dynamic programming over the discrete 1/2/3-choice products. The
     # former greedy loop could remove a locally cheap option and still end with
     # a lower global coverage probability. States are keyed by ticket units, so
@@ -804,7 +761,10 @@ def _fit_predictions_to_budget(
         locked = (fixed_picks or {}).get(prediction.match.seq)
         options = (
             (_budget_selection(prediction, locked),)
-            if locked is not None else _prediction_budget_options(prediction)
+            if locked is not None
+            else _prediction_budget_options(prediction)
+            if allow_expansion
+            else _choose9_prediction_options(prediction)
         )
         next_states: dict[int, tuple[int, float, tuple[Prediction, ...]]] = {}
         for units, (forced_singles, score, selected) in states.items():
@@ -854,7 +814,12 @@ def _rank_budget_outcomes(probabilities: dict[str, float]) -> tuple[str, ...]:
     return tuple(sorted(("3", "1", "0"), key=lambda outcome: -probabilities.get(outcome, 0.0)))
 
 
-def _budget_selection(prediction: Prediction, picks: tuple[str, ...]) -> Prediction:
+def _budget_selection(
+    prediction: Prediction,
+    picks: tuple[str, ...],
+    *,
+    compression_only: bool = False,
+) -> Prediction:
     original = prediction.analysis_picks
     changed = set(picks) != set(original)
     forced = len(picks) == 1 and not _safe_budget_single(prediction, picks[0])
@@ -863,10 +828,16 @@ def _budget_selection(prediction: Prediction, picks: tuple[str, ...]) -> Predict
         if not reason.startswith((SELECTION_REASON_PREFIX, "预算调整：", "预算稳定性："))
     )
     if changed:
-        reasons += (
-            f"预算调整：为提高整张票的联合覆盖率，本场由模型建议 {'/'.join(original)} "
-            f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
-        )
+        if compression_only:
+            reasons += (
+                f"预算压缩：任九模型建议 {'/'.join(original)} 超出整票预算后压缩为 "
+                f"{'/'.join(picks)}；仅删除模型原有选项，不新增选项。",
+            )
+        else:
+            reasons += (
+                f"预算调整：为提高整张票的联合覆盖率，本场由模型建议 {'/'.join(original)} "
+                f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
+            )
     adjusted = replace(
         prediction,
         picks=picks,

@@ -214,19 +214,90 @@ class StrategyTests(unittest.TestCase):
         self.assertEqual(choose9.line_count, 1)
         self.assertEqual(choose9.cost_yuan, 2)
 
-    def test_choose9_can_expand_beyond_fourteen_match_model_picks(self) -> None:
+    def test_choose9_prefers_high_confidence_single_over_low_confidence_full_cover(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2).predictions
+        candidates = []
+        for index, prediction in enumerate(base):
+            if index < 6:
+                candidates.append(
+                    replace(
+                        prediction,
+                        probabilities={"3": 0.38, "1": 0.32, "0": 0.30},
+                        picks=("3", "1", "0"),
+                        original_picks=("3", "1", "0"),
+                    )
+                )
+            else:
+                confidence = 0.85 - (index - 6) * 0.02
+                candidates.append(
+                    replace(
+                        prediction,
+                        probabilities={"3": confidence, "1": 0.10, "0": 0.90 - confidence},
+                        picks=("3",),
+                        original_picks=("3",),
+                    )
+                )
+
+        choose9 = _build_choose9_plan(tuple(candidates), max_ticket_cost_yuan=10_000)
+
+        self.assertTrue(set(range(7, 15)).issubset(choose9.keep))
+        self.assertEqual(len(set(range(1, 7)) & set(choose9.keep)), 1)
+
+    def test_choose9_never_expands_beyond_model_picks(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2000)
         choose9 = plan.choose9_plan
 
         self.assertIsNotNone(choose9)
         assert choose9 is not None
         self.assertTrue(
-            any(
-                len(prediction.picks) > len(prediction.analysis_picks)
+            all(
+                set(prediction.picks).issubset(prediction.analysis_picks)
                 for prediction in choose9.predictions
             )
         )
         self.assertEqual(choose9.line_count, prod(len(item.picks) for item in choose9.predictions))
+
+    def test_choose9_preserves_model_picks_when_they_fit_budget(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2).predictions
+        candidates = tuple(
+            replace(
+                prediction,
+                picks=("3", "1"),
+                original_picks=("3", "1"),
+                probabilities={"3": 0.60, "1": 0.25, "0": 0.15},
+            )
+            for prediction in base
+        )
+
+        choose9 = _build_choose9_plan(candidates, max_ticket_cost_yuan=2000)
+
+        self.assertTrue(all(prediction.picks == ("3", "1") for prediction in choose9.predictions))
+        self.assertEqual(choose9.line_count, 2**9)
+        self.assertEqual(choose9.cost_yuan, 1024)
+
+    def test_choose9_budget_compression_only_removes_model_outcomes(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=2).predictions
+        candidates = tuple(
+            replace(
+                prediction,
+                picks=("3", "1", "0"),
+                original_picks=("3", "1", "0"),
+                probabilities={"3": 0.45, "1": 0.30, "0": 0.25},
+            )
+            for prediction in base
+        )
+
+        choose9 = _build_choose9_plan(
+            candidates,
+            max_ticket_cost_yuan=100,
+            budget_overage_tolerance_yuan=0,
+        )
+
+        self.assertLessEqual(choose9.cost_yuan, 100)
+        self.assertTrue(
+            all(set(prediction.picks).issubset(prediction.analysis_picks) for prediction in choose9.predictions)
+        )
+        self.assertTrue(any(prediction.budget_adjusted for prediction in choose9.predictions))
 
     def test_budget_downgrade_protects_near_tied_draw_without_real_odds(self) -> None:
         prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]

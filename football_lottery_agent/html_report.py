@@ -113,12 +113,12 @@ def _choose9_ticket_section(plan: TicketPlan) -> str:
     return f"""
     <section class="panel">
       <div class="section-title">
-        <h2>任九独立优化</h2>
+        <h2>任九模型建议与预算压缩</h2>
         <span>{choose9.line_count} 注 · {choose9.cost_yuan}/{choose9.allocated_budget_yuan} 元</span>
       </div>
       <p><strong>独立票面：{escape(selections)}</strong></p>
-      <p class="subtle">理论联合覆盖率 {choose9.joint_coverage_probability:.2%}。任九与十四场共享基础概率，
-      但场次选择、复式票面和预算压缩分别优化；若两种玩法同时购买，金额需要相加。</p>
+      <p class="subtle">理论联合覆盖率 {choose9.joint_coverage_probability:.2%}。任九先按单场最高置信度选择最稳的 9 场并保留原始模型建议；
+      原票面不超预算时直接保留，只有超预算时才删除原有选项，不会为用满预算主动扩展。</p>
     </section>
     """
 

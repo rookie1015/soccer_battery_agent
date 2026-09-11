@@ -812,6 +812,10 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertEqual(parsed["budget"]["total_cost_yuan"], plan.total_cost_yuan)
         self.assertEqual(parsed["metrics"]["line_portfolio_count"], 0)
         self.assertIsNone(parsed["line_portfolio"])
+        self.assertIsNotNone(parsed["choose9"])
+        self.assertEqual(len(parsed["choose9"]["selections"]), 9)
+        self.assertEqual(parsed["choose9"]["keep"], list(plan.choose9_keep))
+        self.assertEqual(parsed["choose9"]["drop"], list(plan.choose9_drop))
 
     def test_restoring_old_ticket_does_not_attach_new_budget_stability(self) -> None:
         issue = load_issue("data/sample_issue.json")

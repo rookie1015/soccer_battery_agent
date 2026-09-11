@@ -6,10 +6,10 @@
 
 ## 当前版本
 
-- Android：`0.5.4`（versionCode `18`）
-- 更新日期：`2026-09-10`
+- Android：`0.5.6`（versionCode `20`）
+- 更新日期：`2026-09-11`
 - Python：`3.10+`
-- 自动测试：`253` 项，另含 `11` 个子测试
+- 自动测试：`256` 项，另含 `11` 个子测试
 
 ## Android App
 
@@ -57,7 +57,7 @@ android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-App 版本 0.5.4（18） · 旧复盘奖金自动补算
+App 版本 0.5.6（20） · 任九模型建议优先，超预算才压缩
 ```
 
 ## 数据来源
