@@ -78,7 +78,6 @@ class MobileApiTests(unittest.TestCase):
             expected_units *= len(prediction["pick_labels"])
         self.assertEqual(report["budget"]["total_cost_yuan"], expected_units * 2)
         self.assertEqual(report["decision_record"]["schema"], "ticket-decision-v1")
-        self.assertFalse(report["decision_record"]["actual_purchase_confirmed"])
         diagnostics = report["budget_diagnostics"]
         self.assertEqual(diagnostics["schema"], "budget-compression-diagnostics-v1")
         self.assertEqual(diagnostics["after"]["cost_yuan"], expected_units * 2)

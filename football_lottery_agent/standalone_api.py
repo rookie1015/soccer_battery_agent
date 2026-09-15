@@ -51,11 +51,8 @@ from .review import (
     load_results,
     write_review_report,
 )
-from .purchase_records import load_purchase_record, save_purchase_record
 from .roi import (
-    calculate_actual_purchase_roi,
     calculate_report_roi,
-    summarize_dual_roi,
     summarize_latest_issue_roi,
 )
 from .review_diagnostics import record_review_diagnostics
@@ -79,18 +76,6 @@ NETWORK_SENSITIVE_SOURCE_LABELS = {
 
 def run_health() -> dict[str, object]:
     return {"ok": True, "service": "football-lottery-agent-local"}
-
-
-def run_get_purchase(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
-    issue = str(payload.get("issue") or "").strip()
-    if not issue:
-        raise ValueError("缺少购买记录期号。")
-    return {"ok": True, "purchase": load_purchase_record(work_dir, issue)}
-
-
-def run_save_purchase(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
-    record = save_purchase_record(work_dir, payload)
-    return {"ok": True, "message": f"第 {record['issue']} 期实购记录已保存。", "purchase": record}
 
 
 def run_foreign_odds_usage(payload: dict[str, Any]) -> dict[str, object]:
@@ -333,7 +318,6 @@ def _run_analysis(
         "snapshot_schema": ANALYSIS_SNAPSHOT_SCHEMA,
         "model_calibration": calibration,
     }
-    serialized_report["purchase_record"] = load_purchase_record(root, issue)
     check_cancelled()
     with tempfile.TemporaryDirectory(prefix="analysis-", dir=report_dir) as temp_dir:
         temporary_markdown_path = Path(temp_dir) / markdown_path.name
@@ -572,25 +556,13 @@ def run_history(work_dir: str | Path, *, refresh_prizes: bool = False) -> dict[s
                 provenance=_review_provenance(report, markdown_text),
             )
             report["conditional_prize_ev"] = _conditional_prize_ev(report)
-        if report is not None:
-            purchase = load_purchase_record(root, str(report.get("issue") or ""))
-            report["purchase_record"] = purchase
-            if str(entry.get("kind") or "") == "review":
-                report["actual_purchase_roi"] = calculate_actual_purchase_roi(report, purchase)
         entry["report"] = report
         entries.append(entry)
-    purchases = {
-        str(entry["report"].get("issue") or ""): entry["report"]["purchase_record"]
-        for entry in entries
-        if isinstance(entry.get("report"), dict)
-        and isinstance(entry["report"].get("purchase_record"), dict)
-    }
-    dual = summarize_dual_roi(entries, purchases)
+    roi_backtest = summarize_latest_issue_roi(entries)
     return {
         "ok": True,
         "entries": entries,
-        "roi_backtest": summarize_latest_issue_roi(entries),
-        "roi_backtests": dual,
+        "roi_backtest": roi_backtest,
     }
 
 
@@ -1491,19 +1463,12 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
     serialized_review["ticket_provenance"] = {
         "mode": "selected_analysis_record" if analysis_id else "latest_analysis_record",
         "analysis_id": analysis_id,
-        "actual_purchase_confirmed": False,
     }
     if official_economics is not None:
         serialized_review["draw_economics"] = official_economics.as_dict()
     serialized_review["roi"] = calculate_report_roi(
         serialized_review,
         provenance=str(serialized_review["ticket_provenance"]["mode"]),
-    )
-    purchase_record = load_purchase_record(root, issue)
-    serialized_review["purchase_record"] = purchase_record
-    serialized_review["actual_purchase_roi"] = calculate_actual_purchase_roi(
-        serialized_review,
-        purchase_record,
     )
     serialized_review["conditional_prize_ev"] = _conditional_prize_ev(serialized_review)
     with markdown_path.open("a", encoding="utf-8") as handle:

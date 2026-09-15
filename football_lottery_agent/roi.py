@@ -8,7 +8,6 @@ from typing import Any, Iterable
 
 ROI_SCHEMA = "ticket-roi-v1"
 ROI_BACKTEST_SCHEMA = "roi-backtest-v1"
-DUAL_ROI_BACKTEST_SCHEMA = "dual-roi-backtest-v1"
 
 
 @dataclass(frozen=True)
@@ -68,94 +67,6 @@ def calculate_report_roi(report: dict[str, object], *, provenance: str = "saved_
     return record.as_dict()
 
 
-def calculate_actual_purchase_roi(
-    report: dict[str, object],
-    purchase: dict[str, object] | None,
-) -> dict[str, object]:
-    issue = str(report.get("issue") or (purchase or {}).get("issue") or "")
-    if not purchase:
-        return _empty_actual_roi(issue, "no_purchase_record")
-    purchase_status = str(purchase.get("status") or "")
-    if purchase_status == "not_purchased":
-        return {
-            **_empty_actual_roi(issue, "not_purchased"),
-            "purchase_status": purchase_status,
-            "actual_purchase_confirmed": False,
-        }
-    cost = _optional_int(purchase.get("actual_amount_yuan"))
-    if cost is None or cost <= 0:
-        return _empty_actual_roi(issue, "incomplete_cost")
-    explicit_gross = _optional_int(purchase.get("actual_gross_prize_yuan"))
-    gross = explicit_gross if explicit_gross is not None else _actual_ticket_prize(report, purchase)
-    prize = report.get("prize") if isinstance(report.get("prize"), dict) else {}
-    published = prize.get("status") == "published" or explicit_gross is not None
-    complete = published and gross is not None
-    net = gross - cost if complete else None
-    tickets = purchase.get("tickets") if isinstance(purchase.get("tickets"), list) else []
-    included = tuple(
-        dict.fromkeys(
-            str(ticket.get("play_type"))
-            for ticket in tickets
-            if isinstance(ticket, dict) and ticket.get("play_type") in {"sfc14", "choose9"}
-        )
-    )
-    return {
-        "schema": ROI_SCHEMA,
-        "scope": "actual_purchase",
-        "issue": issue,
-        "status": "complete" if complete else "pending_prize",
-        "purchase_status": purchase_status,
-        "actual_purchase_confirmed": True,
-        "sfc14_cost_yuan": sum(
-            int(ticket.get("cost_yuan") or 0)
-            for ticket in tickets
-            if isinstance(ticket, dict) and ticket.get("play_type") == "sfc14"
-        ),
-        "choose9_cost_yuan": sum(
-            int(ticket.get("cost_yuan") or 0)
-            for ticket in tickets
-            if isinstance(ticket, dict) and ticket.get("play_type") == "choose9"
-        ),
-        "total_cost_yuan": cost,
-        "gross_prize_yuan": gross if complete else None,
-        "net_profit_yuan": net,
-        "roi_percent": round(net / cost * 100, 2) if net is not None else None,
-        "won": gross > 0 if complete else None,
-        "provenance": "purchase-record-v1",
-        "cost_source": "confirmed_actual_amount",
-        "prize_source": "manual_actual" if explicit_gross is not None else "official_prize_x_actual_ticket",
-        "included_games": included,
-    }
-
-
-def summarize_dual_roi(
-    entries: Iterable[dict[str, object]],
-    purchases: dict[str, dict[str, object]] | None = None,
-) -> dict[str, object]:
-    entry_list = list(entries)
-    recommendation = summarize_latest_issue_roi(entry_list)
-    actual_records: list[dict[str, object]] = []
-    seen: set[str] = set()
-    for entry in entry_list:
-        if str(entry.get("kind") or "") != "review":
-            continue
-        report = entry.get("report")
-        if not isinstance(report, dict):
-            continue
-        issue = str(report.get("issue") or entry.get("issue") or "").strip()
-        if not issue or issue in seen or not issue.isdigit():
-            continue
-        seen.add(issue)
-        actual_records.append(calculate_actual_purchase_roi(report, (purchases or {}).get(issue)))
-    actual = _summarize_records(actual_records, scope="actual_purchase_per_issue")
-    return {
-        "schema": DUAL_ROI_BACKTEST_SCHEMA,
-        "recommendation_replay": recommendation,
-        "actual_purchase": actual,
-        "note": "推荐方案重放与实际购买是两套独立账本；无实购记录时不以推荐票面代替。",
-    }
-
-
 def summarize_latest_issue_roi(entries: Iterable[dict[str, object]]) -> dict[str, object]:
     records: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -209,7 +120,7 @@ def summarize_latest_issue_roi(entries: Iterable[dict[str, object]]) -> dict[str
         "max_drawdown_yuan": max_drawdown,
         "max_consecutive_losing_issues": max_losing_streak,
         "records": sorted(records, key=lambda record: str(record["issue"])),
-        "note": "每期只取历史索引中的最新复盘；旧记录成本按表格票面组合数推算，既不代表真实发生过购买，也不等同于已核验现金流水。",
+        "note": "每期只取历史索引中的最新复盘；旧记录成本按表格票面组合数推算，所有结果仅代表理论推荐方案的历史情景回放。",
     }
 
 
@@ -227,66 +138,13 @@ def write_roi_backtest(
     return markdown_target, json_target
 
 
-def write_dual_roi_backtest(
-    summary: dict[str, object],
-    markdown_path: str | Path,
-    json_path: str | Path | None = None,
-) -> tuple[Path, Path]:
-    markdown_target = Path(markdown_path)
-    json_target = Path(json_path) if json_path is not None else markdown_target.with_suffix(".json")
-    markdown_target.parent.mkdir(parents=True, exist_ok=True)
-    json_target.parent.mkdir(parents=True, exist_ok=True)
-    json_target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    recommendation = summary.get("recommendation_replay")
-    actual = summary.get("actual_purchase")
-    recommendation_text = render_roi_backtest(recommendation if isinstance(recommendation, dict) else {})
-    actual_text = _render_actual_roi(actual if isinstance(actual, dict) else {})
-    markdown_target.write_text(
-        "# 双口径 ROI 回测\n\n"
-        "> 推荐方案重放和实际购买分开统计；缺少实购记录时绝不以推荐票面代替。\n\n"
-        + recommendation_text.replace("# 历史票面ROI回测", "## 推荐方案重放 ROI", 1)
-        + "\n"
-        + actual_text,
-        encoding="utf-8",
-    )
-    return markdown_target, json_target
-
-
-def _render_actual_roi(summary: dict[str, object]) -> str:
-    amount = lambda value: "无数据" if value is None else f"{int(value):,} 元"
-    percent = lambda value: "无数据" if value is None else f"{float(value):.2f}%"
-    lines = [
-        "## 实际购买 ROI",
-        "",
-        f"- 有复盘期数：{summary.get('record_count', 0)}",
-        f"- 已完成实际结算：{summary.get('complete_count', 0)}",
-        f"- 无实购记录：{summary.get('no_purchase_record_count', 0)}",
-        f"- 明确未购买：{summary.get('not_purchased_count', 0)}",
-        f"- 实际投入：{amount(summary.get('total_cost_yuan'))}",
-        f"- 实际奖金：{amount(summary.get('gross_prize_yuan'))}",
-        f"- 实际净收益：{amount(summary.get('net_profit_yuan'))}",
-        f"- 实际 ROI：{percent(summary.get('roi_percent'))}",
-        "",
-        "| 期号 | 状态 | 实际投入 | 实际奖金 | 净收益 | ROI |",
-        "| --- | --- | ---: | ---: | ---: | ---: |",
-    ]
-    for record in summary.get("records") or []:
-        if isinstance(record, dict):
-            lines.append(
-                f"| {record.get('issue', '')} | {record.get('status', '')} | "
-                f"{amount(record.get('total_cost_yuan'))} | {amount(record.get('gross_prize_yuan'))} | "
-                f"{amount(record.get('net_profit_yuan'))} | {percent(record.get('roi_percent'))} |"
-            )
-    return "\n".join(lines) + "\n"
-
-
 def render_roi_backtest(summary: dict[str, object]) -> str:
     amount = lambda value: "待补全" if value is None else f"{int(value):,} 元"
     percent = lambda value: "待补全" if value is None else f"{float(value):.2f}%"
     lines = [
         "# 历史票面ROI回测",
         "",
-        "> 每期只取历史索引中最新的一条复盘票面；这是保存方案的情景回放，不代表用户实际完成了购买。",
+        "> 每期只取历史索引中最新的一条复盘票面；这里只评估理论推荐方案的历史表现。",
         "",
         f"- 完整记录：{summary.get('complete_count', 0)}/{summary.get('record_count', 0)} 期",
         f"- 结构化保存成本：{summary.get('saved_cost_count', 0)} 期",
@@ -376,98 +234,3 @@ def _optional_int(value: object) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
-
-
-def _empty_actual_roi(issue: str, status: str) -> dict[str, object]:
-    return {
-        "schema": ROI_SCHEMA,
-        "scope": "actual_purchase",
-        "issue": issue,
-        "status": status,
-        "purchase_status": "",
-        "actual_purchase_confirmed": False,
-        "sfc14_cost_yuan": 0,
-        "choose9_cost_yuan": 0,
-        "total_cost_yuan": 0,
-        "gross_prize_yuan": None,
-        "net_profit_yuan": None,
-        "roi_percent": None,
-        "won": None,
-        "provenance": "purchase-record-v1",
-        "cost_source": "none",
-        "included_games": (),
-    }
-
-
-def _actual_ticket_prize(report: dict[str, object], purchase: dict[str, object]) -> int | None:
-    prize = report.get("prize") if isinstance(report.get("prize"), dict) else {}
-    if prize.get("status") != "published":
-        return None
-    predictions = report.get("predictions") if isinstance(report.get("predictions"), list) else []
-    results = {
-        int(row.get("seq") or 0): str(row.get("final_result") or "")
-        for row in predictions
-        if isinstance(row, dict) and row.get("final_result") in {"3", "1", "0"}
-    }
-    tickets = purchase.get("tickets") if isinstance(purchase.get("tickets"), list) else []
-    total = 0
-    for ticket in tickets:
-        if not isinstance(ticket, dict):
-            continue
-        play_type = str(ticket.get("play_type") or "")
-        game_prize = prize.get(play_type) if isinstance(prize.get(play_type), dict) else {}
-        lines = ticket.get("lines") if isinstance(ticket.get("lines"), list) else []
-        for line in lines:
-            if not isinstance(line, dict):
-                return None
-            sequences = line.get("sequences") if isinstance(line.get("sequences"), list) else []
-            outcomes = line.get("outcomes") if isinstance(line.get("outcomes"), list) else []
-            if len(sequences) != len(outcomes) or any(int(seq) not in results for seq in sequences):
-                return None
-            hits = sum(results[int(seq)] == str(outcome) for seq, outcome in zip(sequences, outcomes))
-            if play_type == "sfc14":
-                if hits == 14:
-                    amount = _optional_int(game_prize.get("first_prize_per_line_yuan"))
-                elif hits == 13:
-                    amount = _optional_int(game_prize.get("second_prize_per_line_yuan"))
-                else:
-                    amount = 0
-            elif play_type == "choose9":
-                amount = _optional_int(game_prize.get("prize_per_line_yuan")) if hits == 9 else 0
-            else:
-                return None
-            if amount is None:
-                return None
-            total += amount
-    return total
-
-
-def _summarize_records(records: list[dict[str, object]], *, scope: str) -> dict[str, object]:
-    completed = [record for record in records if record.get("status") == "complete"]
-    total_cost = sum(int(record.get("total_cost_yuan") or 0) for record in completed)
-    gross = sum(int(record.get("gross_prize_yuan") or 0) for record in completed)
-    net = gross - total_cost
-    cumulative = peak = max_drawdown = losing = max_losing = 0
-    for record in sorted(completed, key=lambda value: str(value.get("issue") or "")):
-        profit = int(record.get("net_profit_yuan") or 0)
-        cumulative += profit
-        peak = max(peak, cumulative)
-        max_drawdown = max(max_drawdown, peak - cumulative)
-        losing = losing + 1 if profit < 0 else 0
-        max_losing = max(max_losing, losing)
-    return {
-        "schema": ROI_BACKTEST_SCHEMA,
-        "scope": scope,
-        "record_count": len(records),
-        "complete_count": len(completed),
-        "no_purchase_record_count": sum(record.get("status") == "no_purchase_record" for record in records),
-        "not_purchased_count": sum(record.get("status") == "not_purchased" for record in records),
-        "total_cost_yuan": total_cost if completed else None,
-        "gross_prize_yuan": gross if completed else None,
-        "net_profit_yuan": net if completed else None,
-        "roi_percent": round(net / total_cost * 100, 2) if total_cost else None,
-        "winning_issue_count": sum(bool(record.get("won")) for record in completed),
-        "max_drawdown_yuan": max_drawdown,
-        "max_consecutive_losing_issues": max_losing,
-        "records": sorted(records, key=lambda value: str(value.get("issue") or "")),
-    }

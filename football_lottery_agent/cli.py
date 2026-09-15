@@ -20,7 +20,7 @@ from .loader import load_issue
 from .notifier import NotifyError, send_report
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
-from .roi import write_dual_roi_backtest
+from .roi import write_roi_backtest
 from .standalone_api import run_history
 from .strategy import build_ticket_plan
 from .web_ui import run_ui
@@ -166,8 +166,8 @@ def main() -> None:
     elif args.command == "roi-backtest":
         root = Path(args.work_dir)
         history = run_history(root, refresh_prizes=args.refresh_prizes)
-        markdown, payload = write_dual_roi_backtest(
-            history["roi_backtests"],
+        markdown, payload = write_roi_backtest(
+            history["roi_backtest"],
             root / args.output,
         )
         print(f"ROI backtest written: {markdown}")

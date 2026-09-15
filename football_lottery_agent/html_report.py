@@ -33,7 +33,7 @@ def render_analysis_html(plan: TicketPlan) -> str:
         [
             _metric_card("14场", str(len(plan.predictions)), "本期比赛数量"),
             _metric_card("模型单选", str(singles), "预算压缩前"),
-            _metric_card("票面单选", str(ticket_singles), "实际出票选择"),
+            _metric_card("票面单选", str(ticket_singles), "预算压缩后"),
             _metric_card("复式注数", str(ticket_units), "各场选择数相乘"),
             _metric_card("复式成本", f"{plan.total_cost_yuan}元", f"上限 {plan.max_ticket_cost_yuan}元"),
             _metric_card("平均置信", f"{avg_confidence:.1f}%", "仅代表模型置信"),
@@ -96,8 +96,8 @@ def _rectangular_ticket_section(plan: TicketPlan) -> str:
         <span>{units} 注 · {plan.total_cost_yuan}/{plan.max_ticket_cost_yuan} 元</span>
       </div>
       <p><strong>各场预算票面选择数相乘为 {units} 注，每注 2 元，实际成本 {plan.total_cost_yuan} 元。</strong></p>
-      <p class="subtle">实际票面：{escape(selections)}</p>
-      <p class="subtle">“模型建议”用于说明预算压缩前的判断范围；实际出票和计价只使用“预算票面”。</p>
+      <p class="subtle">预算票面：{escape(selections)}</p>
+      <p class="subtle">“模型建议”保留预算压缩前的理论判断；计价只使用压缩后的“预算票面”。</p>
     </section>
     """
 

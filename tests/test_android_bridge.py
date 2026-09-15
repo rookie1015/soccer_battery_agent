@@ -44,15 +44,5 @@ class AndroidBridgeTests(unittest.TestCase):
         self.assertNotIn("internal/path.py", result["error"])
         self.assertNotIn("SECRET_CODE", result["error"])
 
-    def test_purchase_record_bridge_forwards_to_local_api(self) -> None:
-        bridge = _load_bridge()
-        expected = {"ok": True, "purchase": {"schema": "purchase-record-v1"}}
-        with patch.object(bridge, "run_save_purchase", return_value=expected) as save:
-            result = json.loads(bridge.save_purchase('{"issue":"26124"}', "work"))
-
-        self.assertEqual(result, expected)
-        save.assert_called_once_with({"issue": "26124"}, "work")
-
-
 if __name__ == "__main__":
     unittest.main()

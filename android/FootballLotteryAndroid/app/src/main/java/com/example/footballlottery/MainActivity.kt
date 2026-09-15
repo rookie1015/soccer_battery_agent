@@ -53,7 +53,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -137,8 +136,6 @@ data class AnalysisReport(
     val reviewPlayType: String,
     val prize: PrizeReport?,
     val roi: RoiReport?,
-    val actualPurchaseRoi: RoiReport?,
-    val purchaseRecord: PurchaseRecord?,
     val budgetDiagnostics: BudgetDiagnostics?,
 )
 
@@ -167,15 +164,6 @@ data class RoiReport(
     val roiPercent: Double?,
     val costSource: String,
     val includedGames: List<String>,
-)
-
-data class PurchaseRecord(
-    val status: String,
-    val actualAmountYuan: Long,
-    val ticketCostYuan: Long,
-    val amountMatchesTicketCost: Boolean,
-    val purchasedAt: String,
-    val notes: String,
 )
 
 data class BudgetDiagnostics(
@@ -1032,56 +1020,6 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
         json.optInt("deleted_count", 0)
     }
 
-    suspend fun savePurchase(
-        report: AnalysisReport,
-        status: String,
-        amountYuan: Long,
-        sfc14Text: String,
-        choose9Text: String,
-        notes: String,
-    ): PurchaseRecord = withContext(Dispatchers.IO) {
-        val tickets = JSONArray()
-        if (status != "not_purchased") {
-            compactTicketLines(sfc14Text, 14).takeIf { it.isNotEmpty() }?.let { lines ->
-                tickets.put(
-                    JSONObject()
-                        .put("play_type", "sfc14")
-                        .put("cost_yuan", lines.size * 2)
-                        .put("lines", JSONArray(lines.map { line ->
-                            JSONObject()
-                                .put("sequences", JSONArray((1..14).toList()))
-                                .put("outcomes", JSONArray(line))
-                        })),
-                )
-            }
-            val choose9Sequences = report.choose9?.selections?.map { it.seq }.orEmpty()
-            compactTicketLines(choose9Text, 9).takeIf { it.isNotEmpty() }?.let { lines ->
-                tickets.put(
-                    JSONObject()
-                        .put("play_type", "choose9")
-                        .put("cost_yuan", lines.size * 2)
-                        .put("lines", JSONArray(lines.map { line ->
-                            JSONObject()
-                                .put("sequences", JSONArray(choose9Sequences))
-                                .put("outcomes", JSONArray(line))
-                        })),
-                )
-            }
-        }
-        val body = JSONObject()
-            .put("issue", report.issue)
-            .put("status", status)
-            .put("strategy_version", "budget-coverage-dp-v1")
-            .put("actual_amount_yuan", if (status == "not_purchased") 0 else amountYuan)
-            .put("tickets", tickets)
-            .put("notes", notes)
-        val json = JSONObject(bridge.callAttr("save_purchase", body.toString(), workDir).toString())
-        if (!json.optBoolean("ok", false)) {
-            throw IllegalStateException(json.optString("error", "保存实购记录失败。"))
-        }
-        parsePurchaseRecord(json.getJSONObject("purchase"))
-    }
-
     suspend fun generateReview(
         issue: String,
         autoResults: Boolean,
@@ -1202,8 +1140,6 @@ class FootballLotteryLocalEngine(private val context: android.content.Context) {
             reviewPlayType = json.optString("review_play_type", ReviewPlayType.Sfc14.value),
             prize = parsePrize(json.optJSONObject("prize")),
             roi = parseRoi(json.optJSONObject("roi")),
-            actualPurchaseRoi = parseRoi(json.optJSONObject("actual_purchase_roi")),
-            purchaseRecord = json.optJSONObject("purchase_record")?.let(::parsePurchaseRecord),
             budgetDiagnostics = parseBudgetDiagnostics(json.optJSONObject("budget_diagnostics")),
         )
     }
@@ -1641,7 +1577,6 @@ private fun PrizeDay(
 private fun PrizeDetailCard(entry: HistoryEntry) {
     val prize = entry.report?.prize
     val roi = entry.report?.roi
-    val actualRoi = entry.report?.actualPurchaseRoi
     Card(shape = RoundedCornerShape(8.dp), colors = CardDefaults.cardColors(containerColor = Color.White)) {
         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Text("第 ${entry.issue} 期", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
@@ -1677,22 +1612,6 @@ private fun PrizeDetailCard(entry: HistoryEntry) {
                     } else {
                         Text("该期旧复盘缺少可确认的线路成本，暂不计入累计ROI。", color = Color(0xFF9A6700), style = MaterialTheme.typography.bodySmall)
                     }
-                }
-                HorizontalDivider()
-                Text("实际购买账本", fontWeight = FontWeight.Bold)
-                when (actualRoi?.status) {
-                    "complete" -> {
-                        val actualNetColor = if ((actualRoi.netProfitYuan ?: 0L) >= 0L) Color(0xFF269264) else Color(0xFFD64545)
-                        Text("实购投入：${prizeAmount(actualRoi.totalCostYuan)} · 奖金 ${prizeAmount(actualRoi.grossPrizeYuan)}")
-                        Text(
-                            "实际净收益：${prizeAmount(actualRoi.netProfitYuan)} · ROI ${actualRoi.roiPercent?.let { "%.2f%%".format(it) } ?: "待补全"}",
-                            color = actualNetColor,
-                            fontWeight = FontWeight.Bold,
-                        )
-                    }
-                    "not_purchased" -> Text("本期已明确记录为未购买。", color = Color(0xFF667085))
-                    "pending_prize" -> Text("已保存实际票面，等待官方奖金后结算。", color = Color(0xFF9A6700))
-                    else -> Text("本期没有实购记录；推荐票面不会自动计入实际 ROI。", color = Color(0xFF667085))
                 }
                 Text(
                     if (prize.status == "published") "${prize.source} · 按官方单注奖金计算，金额为税前" else "官方单注奖金尚未公布，中奖注数已先记录",
@@ -1748,7 +1667,7 @@ fun SettingsScreen(appViewModel: AppViewModel, localEngine: FootballLotteryLocal
                 Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text("设置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
                     Text(
-                        "App 版本 0.5.10（24） · 实购记录、双口径 ROI 与预算诊断",
+                        "App 版本 0.5.11（25） · 理论建议、预算压缩与回放诊断",
                         color = Color(0xFF2364AA),
                         style = MaterialTheme.typography.bodyMedium,
                         fontWeight = FontWeight.Bold,
@@ -2168,23 +2087,6 @@ private fun AnalysisReport.predictionsForPlayType(playType: String, isReview: Bo
 
 @Composable
 private fun SummaryCard(report: AnalysisReport, displayPlayType: String = report.reviewPlayType) {
-    val context = LocalContext.current
-    val engine = remember(context) { FootballLotteryLocalEngine(context.applicationContext) }
-    val scope = rememberCoroutineScope()
-    var purchaseRecord by remember(report.issue, report.purchaseRecord) { mutableStateOf(report.purchaseRecord) }
-    var showPurchaseDialog by remember(report.issue) { mutableStateOf(false) }
-    var purchaseSaving by remember(report.issue) { mutableStateOf(false) }
-    var purchaseError by remember(report.issue) { mutableStateOf("") }
-    var sfc14TicketText by remember(report.issue) {
-        mutableStateOf(report.predictions.sortedBy { it.seq }.joinToString("-") { it.pickText })
-    }
-    var choose9TicketText by remember(report.issue) {
-        mutableStateOf(report.choose9?.selections?.joinToString("-") { it.pickText }.orEmpty())
-    }
-    var actualAmountText by remember(report.issue) {
-        mutableStateOf(((report.budget?.totalCostYuan ?: 0) + (report.choose9?.costYuan ?: 0)).toString())
-    }
-    var purchaseNotes by remember(report.issue) { mutableStateOf("") }
     val isReview = report.purchaseDeadlineSource == "复盘报告"
     val isChoose9Display = displayPlayType == ReviewPlayType.Choose9.value
     val isChoose9Review = isReview && isChoose9Display
@@ -2229,39 +2131,6 @@ private fun SummaryCard(report: AnalysisReport, displayPlayType: String = report
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color(0xFF667085),
             )
-            val purchaseStatusText = when (purchaseRecord?.status) {
-                "purchased" -> "已记录实购 ¥%,d".format(purchaseRecord?.actualAmountYuan ?: 0L)
-                "partial" -> "已记录部分购买 ¥%,d".format(purchaseRecord?.actualAmountYuan ?: 0L)
-                "not_purchased" -> "已记录：本期未购买"
-                else -> "尚未记录是否实际购买"
-            }
-            Text(
-                purchaseStatusText,
-                color = if (purchaseRecord == null) Color(0xFF9A6700) else Color(0xFF16845B),
-                style = MaterialTheme.typography.bodySmall,
-                fontWeight = FontWeight.Bold,
-            )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { showPurchaseDialog = true }, enabled = !purchaseSaving) {
-                    Text(if (purchaseRecord == null) "记录购买" else "修改实购记录")
-                }
-                TextButton(
-                    enabled = !purchaseSaving,
-                    onClick = {
-                        purchaseSaving = true
-                        purchaseError = ""
-                        scope.launch {
-                            runCatching { engine.savePurchase(report, "not_purchased", 0, "", "", purchaseNotes) }
-                                .onSuccess { purchaseRecord = it }
-                                .onFailure { purchaseError = it.message ?: "保存失败。" }
-                            purchaseSaving = false
-                        }
-                    },
-                ) { Text("标记未购买") }
-            }
-            if (purchaseError.isNotBlank()) {
-                Text(purchaseError, color = Color(0xFFB42318), style = MaterialTheme.typography.bodySmall)
-            }
             if (!isReview) {
                 Text(deadlineText(report), style = MaterialTheme.typography.bodySmall, color = Color(0xFF667085))
             }
@@ -2434,77 +2303,6 @@ private fun SummaryCard(report: AnalysisReport, displayPlayType: String = report
                 }
             }
         }
-    }
-    if (showPurchaseDialog) {
-        fun save(status: String) {
-            val amount = actualAmountText.toLongOrNull()
-            if (amount == null || amount <= 0L) {
-                purchaseError = "请填写大于 0 的实际购买金额。"
-                return
-            }
-            purchaseSaving = true
-            purchaseError = ""
-            scope.launch {
-                runCatching {
-                    engine.savePurchase(
-                        report,
-                        status,
-                        amount,
-                        sfc14TicketText,
-                        choose9TicketText,
-                        purchaseNotes,
-                    )
-                }.onSuccess {
-                    purchaseRecord = it
-                    showPurchaseDialog = false
-                }.onFailure { purchaseError = it.message ?: "保存实购记录失败。" }
-                purchaseSaving = false
-            }
-        }
-        AlertDialog(
-            onDismissRequest = { if (!purchaseSaving) showPurchaseDialog = false },
-            title = { Text("记录第 ${report.issue} 期实际购买") },
-            text = {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("已从推荐复式复制。可修改每场 3/1/0；场次用 - 分隔，多选用 / 分隔。", style = MaterialTheme.typography.bodySmall)
-                    OutlinedTextField(
-                        value = sfc14TicketText,
-                        onValueChange = { sfc14TicketText = it },
-                        label = { Text("十四场实际票面") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = choose9TicketText,
-                        onValueChange = { choose9TicketText = it },
-                        label = { Text("任九实际票面（可留空）") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = actualAmountText,
-                        onValueChange = { actualAmountText = it.filter(Char::isDigit) },
-                        label = { Text("实际支付金额（元）") },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    OutlinedTextField(
-                        value = purchaseNotes,
-                        onValueChange = { purchaseNotes = it },
-                        label = { Text("备注（可选）") },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    if (purchaseError.isNotBlank()) Text(purchaseError, color = Color(0xFFB42318), style = MaterialTheme.typography.bodySmall)
-                }
-            },
-            confirmButton = {
-                TextButton(enabled = !purchaseSaving, onClick = { save("purchased") }) { Text("保存已购买") }
-            },
-            dismissButton = {
-                Row {
-                    TextButton(enabled = !purchaseSaving, onClick = { save("partial") }) { Text("保存部分购买") }
-                    TextButton(enabled = !purchaseSaving, onClick = { showPurchaseDialog = false }) { Text("取消") }
-                }
-            },
-        )
     }
 }
 
@@ -3360,15 +3158,6 @@ private fun parseRoi(json: JSONObject?): RoiReport? {
     )
 }
 
-private fun parsePurchaseRecord(json: JSONObject): PurchaseRecord = PurchaseRecord(
-    status = json.optString("status"),
-    actualAmountYuan = json.optLong("actual_amount_yuan"),
-    ticketCostYuan = json.optLong("ticket_cost_yuan"),
-    amountMatchesTicketCost = json.optBoolean("amount_matches_ticket_cost"),
-    purchasedAt = json.optString("purchased_at"),
-    notes = json.optString("notes"),
-)
-
 private fun parseBudgetDiagnostics(json: JSONObject?): BudgetDiagnostics? {
     json ?: return null
     fun phase(value: JSONObject?): TicketProbabilityDiagnostics {
@@ -3387,24 +3176,6 @@ private fun parseBudgetDiagnostics(json: JSONObject?): BudgetDiagnostics? {
         atLeast13ProbabilityChange = json.optDouble("at_least_13_probability_change"),
         removedDrawCount = json.optInt("removed_draw_count"),
     )
-}
-
-private fun compactTicketLines(value: String, expectedFixtures: Int): List<List<String>> {
-    if (value.isBlank()) return emptyList()
-    val choices = value.trim().split(Regex("[-\\s]+"))
-        .filter { it.isNotBlank() }
-        .map { token -> token.split("/").filter { it in setOf("3", "1", "0") }.distinct() }
-    if (choices.size != expectedFixtures || choices.any { it.isEmpty() }) {
-        throw IllegalArgumentException("票面必须包含 $expectedFixtures 场，每场用 3/1/0 表示，场次之间用 - 分隔。")
-    }
-    var lines = listOf(emptyList<String>())
-    choices.forEach { outcomes ->
-        if (lines.size * outcomes.size > 10_000) {
-            throw IllegalArgumentException("单个实际票面最多保存 10000 注，请缩小复式范围。")
-        }
-        lines = lines.flatMap { prefix -> outcomes.map { prefix + it } }
-    }
-    return lines
 }
 
 private fun JSONObject.optNullableInt(key: String): Int? =

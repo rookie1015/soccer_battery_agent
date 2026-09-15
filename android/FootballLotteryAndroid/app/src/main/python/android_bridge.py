@@ -11,9 +11,7 @@ from football_lottery_agent.standalone_api import (
     run_foreign_odds_usage,
     run_health,
     run_history,
-    run_get_purchase,
     run_review,
-    run_save_purchase,
     run_send_feishu,
     run_single_prediction,
 )
@@ -59,14 +57,6 @@ def history(work_dir: str, refresh_prizes: bool = False) -> str:
 
 def delete_history(payload_json: str, work_dir: str) -> str:
     return _json(run_delete_history(json.loads(payload_json), work_dir))
-
-
-def get_purchase(payload_json: str, work_dir: str) -> str:
-    return _json(run_get_purchase(json.loads(payload_json), work_dir))
-
-
-def save_purchase(payload_json: str, work_dir: str) -> str:
-    return _json(run_save_purchase(json.loads(payload_json), work_dir))
 
 
 def review(payload_json: str, work_dir: str) -> str:

@@ -77,7 +77,6 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
             "recommended_total_cost_yuan": total_cost_yuan + (
                 plan.choose9_plan.cost_yuan if isinstance(getattr(plan, "choose9_plan", None), Choose9Plan) else 0
             ),
-            "actual_purchase_confirmed": False,
         },
         "budget_diagnostics": budget_diagnostics,
         "draw_hedge": _serialize_draw_hedge(plan),
