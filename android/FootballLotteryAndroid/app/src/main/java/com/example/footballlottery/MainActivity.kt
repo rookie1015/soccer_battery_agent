@@ -38,6 +38,7 @@ import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -1961,13 +1962,8 @@ private fun RequestCard(
                     },
                     modifier = Modifier.weight(1f),
                 ) {
-                    Text(if (viewModel.isLoading) "取消分析" else "生成分析报告")
-                }
-                if (viewModel.isLoading) {
-                    CircularProgressIndicator(
-                        modifier = Modifier.size(22.dp),
-                        strokeWidth = 2.dp,
-                    )
+                    LoadingPrefix(viewModel.isLoading)
+                    Text(if (viewModel.isLoading) "正在分析" else "生成分析报告")
                 }
             }
         }
@@ -3198,6 +3194,7 @@ private fun LoadingPrefix(isLoading: Boolean) {
             modifier = Modifier
                 .height(18.dp)
                 .width(18.dp),
+            color = LocalContentColor.current,
             strokeWidth = 2.dp,
         )
         Spacer(modifier = Modifier.width(8.dp))
