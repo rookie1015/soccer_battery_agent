@@ -20,6 +20,8 @@ from .loader import load_issue
 from .notifier import NotifyError, send_report
 from .report import write_report
 from .review import build_review, fetch_results_with_fallbacks, load_results, write_review_report
+from .roi import write_dual_roi_backtest
+from .standalone_api import run_history
 from .strategy import build_ticket_plan
 from .web_ui import run_ui
 
@@ -76,6 +78,23 @@ def main() -> None:
     experiment_parser.add_argument("--min-test-matches", type=int, default=DEFAULT_MIN_TEST_MATCHES)
     experiment_parser.add_argument("--min-test-issues", type=int, default=DEFAULT_MIN_TEST_ISSUES)
     experiment_parser.add_argument("--min-brier-gain", type=float, default=0.002)
+    experiment_parser.add_argument(
+        "--include-all-history",
+        action="store_true",
+        help="Evaluate every paired historical sample regardless of snapshot audit status; never grants promotion eligibility.",
+    )
+
+    roi_parser = subparsers.add_parser(
+        "roi-backtest",
+        help="Backtest saved review tickets against official per-line prizes.",
+    )
+    roi_parser.add_argument("--work-dir", default=".")
+    roi_parser.add_argument("--output", default="reports/roi_backtest.md")
+    roi_parser.add_argument(
+        "--refresh-prizes",
+        action="store_true",
+        help="Fetch and persist official sales, winning counts, prizes, pools, and raw responses.",
+    )
     experiment_parser.add_argument(
         "--promote",
         action="store_true",
@@ -139,10 +158,20 @@ def main() -> None:
             min_test_matches=args.min_test_matches,
             min_test_issues=args.min_test_issues,
             min_brier_gain=args.min_brier_gain,
+            include_all_history=args.include_all_history,
             promote=args.promote,
         )
         print(f"Experiment written: {result['artifacts']['markdown']}")
         print(f"Promotion status: {result['promotion']['status']}")
+    elif args.command == "roi-backtest":
+        root = Path(args.work_dir)
+        history = run_history(root, refresh_prizes=args.refresh_prizes)
+        markdown, payload = write_dual_roi_backtest(
+            history["roi_backtests"],
+            root / args.output,
+        )
+        print(f"ROI backtest written: {markdown}")
+        print(f"ROI data written: {payload}")
     elif args.command == "ui":
         run_ui(host=args.host, port=args.port, open_browser=not args.no_open)
 

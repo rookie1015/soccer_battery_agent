@@ -1,6 +1,6 @@
 import unittest
 from dataclasses import replace
-from itertools import combinations, permutations, product
+from itertools import combinations, product
 from math import prod
 
 from football_lottery_agent.loader import load_issue
@@ -21,6 +21,12 @@ from football_lottery_agent.strategy import (
 
 
 class StrategyTests(unittest.TestCase):
+    def test_production_plan_does_not_create_legacy_ticket_branches(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+
+        self.assertIsNone(plan.draw_hedge)
+        self.assertIsNone(plan.line_portfolio)
+
     def test_build_ticket_plan_has_14_predictions(self) -> None:
         issue = load_issue("data/sample_issue.json")
         plan = build_ticket_plan(issue)
@@ -406,6 +412,15 @@ class StrategyTests(unittest.TestCase):
             ("3", "1", "0"),
         )
 
+    def test_near_tied_draw_boundary_keeps_three_choices_without_independent_resolution(self) -> None:
+        ranked = [("0", 0.485), ("3", 0.271), ("1", 0.244)]
+        final_probabilities = dict(ranked)
+
+        self.assertEqual(
+            _select_picks(ranked, selection_scores=final_probabilities),
+            ("3", "1", "0"),
+        )
+
     def test_full_analysis_budget_downgrade_uses_evidence_scores(self) -> None:
         prediction = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
         uncertain = replace(
@@ -522,8 +537,8 @@ class StrategyTests(unittest.TestCase):
         base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[:3]
         probabilities = (
             {"3": 0.80, "1": 0.12, "0": 0.08},
-            {"3": 0.4283, "1": 0.2838, "0": 0.2879},
-            {"3": 0.3299, "1": 0.3289, "0": 0.3412},
+            {"3": 0.4283, "1": 0.24, "0": 0.3317},
+            {"3": 0.3299, "1": 0.25, "0": 0.4201},
         )
         predictions = tuple(
             replace(item, probabilities=values, picks=("3",), original_picks=("3",),
@@ -559,22 +574,62 @@ class StrategyTests(unittest.TestCase):
         self.assertIn("整票预算优化", adjusted.reasons[0])
         self.assertNotIn("没有足够把握", adjusted.reasons[0])
 
-    def test_budget_stability_detects_close_boundary_without_favoring_draw(self) -> None:
+    def test_budget_close_boundary_keeps_the_higher_coverage_pair(self) -> None:
         base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
-        for values in permutations((0.4283, 0.2838, 0.2879)):
-            probabilities = dict(zip(("3", "1", "0"), values))
-            prediction = replace(base, probabilities=probabilities, picks=("3", "1", "0"),
-                                 original_picks=("3", "1", "0"))
-            adjusted = _fit_predictions_to_budget((prediction,), 4)[0]
-            self.assertEqual(set(adjusted.picks), set(sorted(probabilities, key=probabilities.get, reverse=True)[:2]))
-            audit = adjusted.budget_stability
-            self.assertEqual(audit["scope"], "fixed_choice_count")
-            self.assertEqual(audit["status"], "sensitive")
-            self.assertEqual(audit["scenario_count"], 12)
-            self.assertEqual(audit["changed_count"], 6)
-            self.assertAlmostEqual(audit["boundary_gap"], 0.0041)
-            self.assertEqual(adjusted.probabilities, probabilities)
-            self.assertTrue(any("不是错误概率" in reason for reason in adjusted.reasons))
+        probabilities = {"3": 0.4283, "1": 0.2838, "0": 0.2879}
+        prediction = replace(base, probabilities=probabilities, picks=("3", "1", "0"),
+                             original_picks=("3", "1", "0"))
+
+        adjusted = _fit_predictions_to_budget((prediction,), 4)[0]
+
+        self.assertEqual(adjusted.picks, ("3", "0"))
+        audit = adjusted.budget_stability
+        self.assertEqual(audit["scope"], "fixed_choice_count")
+        self.assertEqual(audit["status"], "sensitive")
+        self.assertEqual(audit["scenario_count"], 12)
+        self.assertGreater(audit["changed_count"], 0)
+        self.assertAlmostEqual(audit["boundary_gap"], 0.0041)
+        self.assertEqual(adjusted.probabilities, probabilities)
+        self.assertFalse(any("平局边界保护" in reason for reason in adjusted.reasons))
+
+    def test_budget_preserves_explicit_draw_guard_when_feasible(self) -> None:
+        base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]
+        guarded = replace(
+            base,
+            probabilities={"3": 0.61, "1": 0.21, "0": 0.18},
+            picks=("3", "1"),
+            original_picks=("3", "1"),
+            draw_guard=True,
+        )
+
+        self.assertEqual(_fit_predictions_to_budget((guarded,), 4)[0].picks, ("3", "1"))
+        self.assertEqual(_fit_predictions_to_budget((guarded,), 2)[0].picks, ("3",))
+
+    def test_draw_guard_does_not_override_better_joint_coverage(self) -> None:
+        first, second = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[:2]
+        guarded = replace(
+            first,
+            probabilities={"3": 0.61, "1": 0.21, "0": 0.18},
+            picks=("3", "1"),
+            original_picks=("3", "1"),
+            draw_guard=True,
+        )
+        balanced = replace(
+            second,
+            probabilities={"3": 0.34, "1": 0.33, "0": 0.33},
+            picks=("3", "1", "0"),
+            original_picks=("3", "1", "0"),
+            draw_guard=False,
+        )
+
+        adjusted = _fit_predictions_to_budget((guarded, balanced), 4)
+
+        self.assertEqual(tuple(prediction.picks for prediction in adjusted), (("3",), ("3", "1")))
+        actual = prod(
+            sum(prediction.probabilities[pick] for pick in prediction.picks)
+            for prediction in adjusted
+        )
+        self.assertAlmostEqual(actual, 0.61 * (0.34 + 0.33))
 
     def test_budget_stability_handles_single_full_coverage_and_zero_probability(self) -> None:
         base = build_ticket_plan(load_issue("data/sample_issue.json")).predictions[0]

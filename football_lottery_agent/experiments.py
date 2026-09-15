@@ -199,6 +199,7 @@ def run_experiment(
     min_test_matches: int = DEFAULT_MIN_TEST_MATCHES,
     min_test_issues: int = DEFAULT_MIN_TEST_ISSUES,
     min_brier_gain: float = DEFAULT_MIN_BRIER_GAIN,
+    include_all_history: bool = False,
     promote: bool = False,
     created_at: datetime | None = None,
 ) -> dict[str, Any]:
@@ -211,6 +212,7 @@ def run_experiment(
 
     strict_track = evaluate_track(strict, min_train_matches=min_train_matches)
     exploratory_track = evaluate_track(exploratory, min_train_matches=min_train_matches)
+    all_history_track = evaluate_track(samples, min_train_matches=min_train_matches) if include_all_history else None
     promotion = _promotion_decision(
         strict_track,
         min_test_matches=min_test_matches,
@@ -237,6 +239,7 @@ def run_experiment(
             "min_test_matches": min_test_matches,
             "min_test_issues": min_test_issues,
             "min_brier_gain": min_brier_gain,
+            "include_all_history": include_all_history,
             "upset_market_probability": UPSET_MARKET_PROBABILITY,
             "static_models": STATIC_MODELS,
         },
@@ -251,6 +254,9 @@ def run_experiment(
         "promotion": promotion,
         "ticket_strategy": ticket_strategy,
     }
+    if all_history_track is not None:
+        result["all_history"] = all_history_track
+        result["all_history_ticket_strategy"] = evaluate_ticket_strategy(samples)
 
     target = Path(output_dir) if output_dir else root / "reports" / "experiments"
     target.mkdir(parents=True, exist_ok=True)
@@ -613,6 +619,29 @@ def render_experiment_markdown(result: dict[str, Any]) -> str:
     lines.extend(_track_markdown(result["strict"]))
     lines.extend(["", "## 探索性回测（不具备晋级资格）", ""])
     lines.extend(_track_markdown(result["exploratory"]))
+    all_history = result.get("all_history")
+    if all_history:
+        lines.extend(
+            [
+                "",
+                "## 全量历史回溯（用户指定忽略采集时间）",
+                "",
+                "> 本轨道把旧版、无法验证采集时间及开赛后快照统一视为有效历史数据；可用于回溯诊断，但不作为生产模型自动晋级证据。",
+                "",
+            ]
+        )
+        lines.extend(_track_markdown(all_history))
+        all_strategy = result.get("all_history_ticket_strategy") or {}
+        lines.extend(["", "### 全量历史单/双/全包策略", ""])
+        if all_strategy.get("status") == "evaluated":
+            lines.append(f"- 样本外门禁：{'通过' if all_strategy.get('gate_passed') else '未通过'}")
+            lines.append(f"- 对比：{all_strategy.get('gate_detail', '')}")
+            lines.append(f"- 候选阈值：`{json.dumps(all_strategy.get('tested_policy', {}), ensure_ascii=False)}`")
+        else:
+            lines.append(
+                f"- 状态：继续收集（训练 {all_strategy.get('train_matches', 0)} / "
+                f"测试 {all_strategy.get('test_matches', 0)} 场）"
+            )
     promotion = result["promotion"]
     lines.extend(
         [

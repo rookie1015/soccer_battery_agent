@@ -11,6 +11,7 @@ import urllib.parse
 
 from .collectors import collect_issue
 from .calibration import build_calibration
+from .draw_economics import OfficialDrawEconomics
 from .experiments import (
     load_active_draw_calibration_coefficients,
     load_active_fundamental_coefficients,
@@ -21,6 +22,7 @@ from .experiments import (
 from .history import archive_report, delete_history_entries, load_history_entries
 from .html_report import write_analysis_html, write_review_html
 from .loader import load_issue
+from .legacy_history import parse_line_portfolio_markdown as parse_legacy_line_portfolio_markdown
 from .mobile_api import serialize_ticket_plan
 from .models import (
     Choose9Plan,
@@ -29,6 +31,8 @@ from .models import (
     LinePortfolioPlan,
     Match,
     Odds,
+    Prediction,
+    Scoreline,
     Signals,
     TicketLine,
     TicketPlan,
@@ -42,18 +46,28 @@ from .review import (
     REVIEW_PLAY_SFC14,
     build_review,
     fetch_results_with_fallbacks,
+    fetch_sporttery_economics,
     fetch_sporttery_prize,
     load_results,
     write_review_report,
 )
+from .purchase_records import load_purchase_record, save_purchase_record
+from .roi import (
+    calculate_actual_purchase_roi,
+    calculate_report_roi,
+    summarize_dual_roi,
+    summarize_latest_issue_roi,
+)
 from .review_diagnostics import record_review_diagnostics
 from .post_match_context import find_post_match_evidence, normalize_evidence
 from .strategy import DEFAULT_MAX_TICKET_COST_YUAN, build_ticket_plan
+from .ticket_math import conditional_prize_ev, ticket_probability_diagnostics
 import tempfile
 
 
 STRENGTH_XG_MATCHES = 20
 RECENT_SNAPSHOT_REUSE_SECONDS = 180
+ANALYSIS_SNAPSHOT_SCHEMA = "mobile-analysis-v1"
 NETWORK_SENSITIVE_SOURCE_LABELS = {
     "injuries": "伤停信息",
     "history": "历史交锋",
@@ -65,6 +79,18 @@ NETWORK_SENSITIVE_SOURCE_LABELS = {
 
 def run_health() -> dict[str, object]:
     return {"ok": True, "service": "football-lottery-agent-local"}
+
+
+def run_get_purchase(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
+    issue = str(payload.get("issue") or "").strip()
+    if not issue:
+        raise ValueError("缺少购买记录期号。")
+    return {"ok": True, "purchase": load_purchase_record(work_dir, issue)}
+
+
+def run_save_purchase(payload: dict[str, Any], work_dir: str | Path) -> dict[str, object]:
+    record = save_purchase_record(work_dir, payload)
+    return {"ok": True, "message": f"第 {record['issue']} 期实购记录已保存。", "purchase": record}
 
 
 def run_foreign_odds_usage(payload: dict[str, Any]) -> dict[str, object]:
@@ -302,11 +328,18 @@ def _run_analysis(
         strategy_options["selection_policy"] = active_selection_policy
     strategy_options["evidence_aware_secondary"] = True
     plan = build_ticket_plan(issue_data, **strategy_options)
+    serialized_report = {
+        **serialize_ticket_plan(plan, include_review_fields=True),
+        "snapshot_schema": ANALYSIS_SNAPSHOT_SCHEMA,
+        "model_calibration": calibration,
+    }
+    serialized_report["purchase_record"] = load_purchase_record(root, issue)
     check_cancelled()
     with tempfile.TemporaryDirectory(prefix="analysis-", dir=report_dir) as temp_dir:
         temporary_markdown_path = Path(temp_dir) / markdown_path.name
         temporary_html_path = Path(temp_dir) / html_path.name
         write_report(plan, temporary_markdown_path)
+        _write_analysis_snapshot(temporary_markdown_path, serialized_report)
         write_analysis_html(plan, temporary_html_path)
         check_cancelled()
         if temporary_markdown_path.exists():
@@ -327,7 +360,7 @@ def _run_analysis(
     return {
         "ok": True,
         "message": f"{issue} 分析报告已在手机本机生成。",
-        "report": {**serialize_ticket_plan(plan), "model_calibration": calibration},
+        "report": serialized_report,
         "html_path": str(html_path),
         "markdown_path": str(markdown_path),
         "history_path": str(history_path),
@@ -501,7 +534,7 @@ def run_history(work_dir: str | Path, *, refresh_prizes: bool = False) -> dict[s
     history_dir = root / "reports" / "history"
     entries = []
     analysis_calibration: dict[str, object] | None = None
-    prize_cache: dict[str, OfficialPrize] = {}
+    economics_cache: dict[str, OfficialDrawEconomics | None] = {}
     for item in load_history_entries(history_dir):
         entry = dict(item)
         markdown = str(entry.get("markdown") or "")
@@ -520,52 +553,168 @@ def run_history(work_dir: str | Path, *, refresh_prizes: bool = False) -> dict[s
                 report,
                 root,
                 history_dir / markdown,
-                prize_cache,
+                economics_cache,
             )
             markdown_text = _read_history_text(history_dir, markdown)
             entry["markdown_text"] = markdown_text
         if report is not None and str(entry.get("kind") or "") == "analysis":
             report = _restore_history_metadata(report, root, str(entry.get("issue") or ""))
-            # Archived reports are rebuilt from Markdown, which predates the
-            # structured model-status field returned by run_analysis.  Attach
-            # the same current, version-checked status here so Android does not
-            # silently lose it as soon as the history list is refreshed.
-            if analysis_calibration is None:
-                analysis_calibration = build_calibration(root)
-            report["model_calibration"] = analysis_calibration
+            # New analysis snapshots preserve the exact status shown when the
+            # report was generated. Legacy Markdown has no such field, so only
+            # that compatibility path receives the current versioned status.
+            if "model_calibration" not in report:
+                if analysis_calibration is None:
+                    analysis_calibration = build_calibration(root)
+                report["model_calibration"] = analysis_calibration
+        if report is not None and str(entry.get("kind") or "") == "review":
+            report["roi"] = calculate_report_roi(
+                report,
+                provenance=_review_provenance(report, markdown_text),
+            )
+            report["conditional_prize_ev"] = _conditional_prize_ev(report)
+        if report is not None:
+            purchase = load_purchase_record(root, str(report.get("issue") or ""))
+            report["purchase_record"] = purchase
+            if str(entry.get("kind") or "") == "review":
+                report["actual_purchase_roi"] = calculate_actual_purchase_roi(report, purchase)
         entry["report"] = report
         entries.append(entry)
-    return {"ok": True, "entries": entries}
+    purchases = {
+        str(entry["report"].get("issue") or ""): entry["report"]["purchase_record"]
+        for entry in entries
+        if isinstance(entry.get("report"), dict)
+        and isinstance(entry["report"].get("purchase_record"), dict)
+    }
+    dual = summarize_dual_roi(entries, purchases)
+    return {
+        "ok": True,
+        "entries": entries,
+        "roi_backtest": summarize_latest_issue_roi(entries),
+        "roi_backtests": dual,
+    }
 
 
 def _refresh_archived_review_prize(
     report: dict[str, object],
     root: Path,
     markdown_path: Path,
-    prize_cache: dict[str, OfficialPrize],
+    economics_cache: dict[str, OfficialDrawEconomics | None],
 ) -> dict[str, object]:
     existing = report.get("prize")
-    if isinstance(existing, dict) and existing.get("status") == "published":
+    existing_economics = report.get("draw_economics")
+    if (
+        isinstance(existing, dict)
+        and existing.get("status") == "published"
+        and isinstance(existing_economics, dict)
+    ):
         return report
 
     issue = str(report.get("issue") or "").strip()
     if not issue:
         return report
-    official = prize_cache.get(issue)
-    if official is None:
+    economics = economics_cache.get(issue)
+    if issue not in economics_cache:
         try:
-            official = fetch_sporttery_prize(issue, cache_dir=root / "cache")
+            economics = fetch_sporttery_economics(
+                issue,
+                cache_dir=root / "cache",
+                snapshot_dir=root / "data" / "draw_economics",
+            )
         except Exception:
-            official = OfficialPrize()
-        prize_cache[issue] = official
+            economics = None
+        economics_cache[issue] = economics
+
+    official = economics.prize if economics is not None else OfficialPrize()
 
     prize = _serialize_prize_from_saved_report(report, official)
     if prize is None:
         return report
     refreshed = dict(report)
     refreshed["prize"] = prize
+    if economics is not None:
+        refreshed["draw_economics"] = economics.as_dict()
+    refreshed["roi"] = calculate_report_roi(
+        refreshed,
+        provenance=_review_provenance(refreshed, markdown_path.read_text(encoding="utf-8", errors="replace")),
+    )
+    refreshed["conditional_prize_ev"] = _conditional_prize_ev(refreshed)
     _write_archived_review_snapshot(markdown_path, refreshed)
     return refreshed
+
+
+def _conditional_prize_ev(report: dict[str, object]) -> dict[str, object]:
+    prize = report.get("prize") if isinstance(report.get("prize"), dict) else {}
+    sfc_prize = prize.get("sfc14") if isinstance(prize.get("sfc14"), dict) else {}
+    choose9_prize = prize.get("choose9") if isinstance(prize.get("choose9"), dict) else {}
+    predictions = [item for item in report.get("predictions") or [] if isinstance(item, dict)]
+    by_seq = {int(item.get("seq") or 0): item for item in predictions}
+
+    sfc_diagnostics = None
+    existing = report.get("budget_diagnostics")
+    if isinstance(existing, dict) and isinstance(existing.get("after"), dict):
+        sfc_diagnostics = existing["after"]
+    elif len(predictions) == 14:
+        sfc_diagnostics = _saved_ticket_diagnostics(predictions)
+    sfc_ev = conditional_prize_ev(
+        sfc_diagnostics or {},
+        first_prize_yuan=_optional_int_value(sfc_prize.get("first_prize_per_line_yuan")),
+        second_prize_yuan=_optional_int_value(sfc_prize.get("second_prize_per_line_yuan")),
+    )
+
+    choose9 = report.get("choose9") if isinstance(report.get("choose9"), dict) else {}
+    choose9_rows = choose9.get("selections") if isinstance(choose9.get("selections"), list) else []
+    enriched = []
+    for row in choose9_rows:
+        if not isinstance(row, dict):
+            continue
+        source = by_seq.get(int(row.get("seq") or 0), {})
+        enriched.append({**source, "picks": row.get("picks") or str(row.get("pick_text") or "").split("/")})
+    choose9_diagnostics = _saved_ticket_diagnostics(enriched) if len(enriched) == 9 else {}
+    choose9_ev = conditional_prize_ev(
+        choose9_diagnostics,
+        first_prize_yuan=_optional_int_value(choose9_prize.get("prize_per_line_yuan")),
+    )
+    return {
+        "schema": "conditional-prize-ev-v1",
+        "sfc14": {"diagnostics": sfc_diagnostics, "ev": sfc_ev},
+        "choose9": {"diagnostics": choose9_diagnostics or None, "ev": choose9_ev},
+        "production_eligible": False,
+    }
+
+
+def _saved_ticket_diagnostics(rows: list[dict[str, object]]) -> dict[str, object]:
+    probabilities = []
+    selections = []
+    for row in rows:
+        raw = row.get("probabilities") if isinstance(row.get("probabilities"), dict) else {}
+        probabilities.append(
+            {
+                "3": float(raw.get("3", raw.get("home", 0.0))) / (100.0 if float(raw.get("3", raw.get("home", 0.0)) or 0.0) > 1 else 1.0),
+                "1": float(raw.get("1", raw.get("draw", 0.0))) / (100.0 if float(raw.get("1", raw.get("draw", 0.0)) or 0.0) > 1 else 1.0),
+                "0": float(raw.get("0", raw.get("away", 0.0))) / (100.0 if float(raw.get("0", raw.get("away", 0.0)) or 0.0) > 1 else 1.0),
+            }
+        )
+        picks = row.get("picks")
+        selections.append(picks if isinstance(picks, list) else str(row.get("pick_text") or "").split("/"))
+    return ticket_probability_diagnostics(probabilities, selections)
+
+
+def _optional_int_value(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _review_provenance(report: dict[str, object], markdown_text: str) -> str:
+    explicit = report.get("ticket_provenance")
+    if isinstance(explicit, dict) and str(explicit.get("mode") or ""):
+        return str(explicit["mode"])
+    if not isinstance(report.get("budget"), dict):
+        return "legacy_markdown_review"
+    return "structured_review_snapshot" if "mobile-review-v1" in markdown_text else "legacy_markdown_review"
 
 
 def _write_archived_review_snapshot(markdown_path: Path, report: dict[str, object]) -> None:
@@ -621,9 +770,88 @@ def _read_history_text(history_dir: Path, relative_path: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def _write_analysis_snapshot(markdown_path: Path, report: dict[str, object]) -> None:
+    payload = json.dumps(
+        {"schema": ANALYSIS_SNAPSHOT_SCHEMA, "report": report},
+        ensure_ascii=False,
+    ).replace("-->", "--\\u003e")
+    with markdown_path.open("a", encoding="utf-8") as handle:
+        handle.write(f"\n<!-- {ANALYSIS_SNAPSHOT_SCHEMA}\n{payload}\n-->\n")
+
+
+def _parse_analysis_snapshot(markdown_text: str) -> dict[str, object] | None:
+    snapshot = re.search(
+        rf"<!-- {re.escape(ANALYSIS_SNAPSHOT_SCHEMA)}\n(.*?)\n-->",
+        markdown_text,
+        re.DOTALL,
+    )
+    if not snapshot:
+        return None
+    try:
+        payload = json.loads(snapshot.group(1))
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != ANALYSIS_SNAPSHOT_SCHEMA:
+        return None
+    report = payload.get("report")
+    if (
+        not isinstance(report, dict)
+        or report.get("snapshot_schema") != ANALYSIS_SNAPSHOT_SCHEMA
+        or not str(report.get("issue") or "").strip()
+    ):
+        return None
+    predictions = report.get("predictions")
+    if not isinstance(predictions, list) or len(predictions) != 14:
+        return None
+    try:
+        sequences = {int(item.get("seq")) for item in predictions if isinstance(item, dict)}
+    except (TypeError, ValueError):
+        return None
+    if sequences != set(range(1, 15)):
+        return None
+    if not isinstance(report.get("budget"), dict):
+        return None
+    keep = report.get("choose9_keep")
+    drop = report.get("choose9_drop")
+    if not isinstance(keep, list) or len(keep) != 9 or not isinstance(drop, list) or len(drop) != 5:
+        return None
+    choose9 = report.get("choose9")
+    if not isinstance(choose9, dict) or not isinstance(choose9.get("selections"), list):
+        return None
+    if len(choose9["selections"]) != 9:
+        return None
+    for item in predictions:
+        if not isinstance(item, dict):
+            return None
+        picks = item.get("picks")
+        analysis_picks = item.get("analysis_picks")
+        probabilities = item.get("probabilities")
+        if (
+            not isinstance(picks, list)
+            or not picks
+            or any(str(pick) not in OUTCOME_LABELS for pick in picks)
+            or not isinstance(analysis_picks, list)
+            or not analysis_picks
+            or not isinstance(probabilities, dict)
+            or any(label not in probabilities for label in ("home", "draw", "away"))
+            or not isinstance(item.get("reasons"), list)
+        ):
+            return None
+        try:
+            float(item.get("confidence"))
+            if sum(float(probabilities[label]) for label in ("home", "draw", "away")) <= 0:
+                return None
+        except (TypeError, ValueError):
+            return None
+    return report
+
+
 def _parse_history_report(markdown_text: str, fallback_issue: str, kind: str = "") -> dict[str, object] | None:
     if "## 逐场复盘" in markdown_text or kind == "review":
         return _parse_review_report(markdown_text, fallback_issue)
+    snapshot = _parse_analysis_snapshot(markdown_text)
+    if snapshot is not None:
+        return snapshot
     if "## 14场逐场建议" not in markdown_text:
         return None
 
@@ -846,6 +1074,9 @@ def _parse_line_portfolio_markdown(
     markdown_text: str,
     predictions: list[dict[str, object]],
 ) -> dict[str, object] | None:
+    return parse_legacy_line_portfolio_markdown(markdown_text, predictions)
+    # Kept below temporarily as dead reference text for old patch readability;
+    # active compatibility parsing is isolated in legacy_history.py.
     summary = re.search(
         r"^- 独立线路：(\d+) 注，实际成本 (\d+)/(\d+) 元。?$",
         markdown_text,
@@ -1002,6 +1233,8 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
         try:
             saved = json.loads(snapshot.group(1))
             if isinstance(saved, dict) and isinstance(saved.get("predictions"), list) and saved.get("issue") == fallback_issue:
+                if "- 独立线路：" in markdown_text and not isinstance(saved.get("line_portfolio"), dict):
+                    saved["legacy_line_portfolio_cost_unknown"] = True
                 return saved
         except (ValueError, TypeError):
             pass
@@ -1083,6 +1316,7 @@ def _parse_review_report(markdown_text: str, fallback_issue: str) -> dict[str, o
         },
         "choose9_keep": keep,
         "choose9_drop": drop,
+        "legacy_line_portfolio_cost_unknown": "- 独立线路：" in markdown_text,
         "predictions": predictions,
     }
 
@@ -1225,9 +1459,14 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         results_source = "手工 CSV"
 
     try:
-        official_prize = fetch_sporttery_prize(plan.issue.issue, cache_dir=cache_dir)
+        official_economics = fetch_sporttery_economics(
+            plan.issue.issue,
+            cache_dir=cache_dir,
+            snapshot_dir=data_dir / "draw_economics",
+        )
     except Exception:
-        official_prize = OfficialPrize()
+        official_economics = None
+    official_prize = official_economics.prize if official_economics is not None else OfficialPrize()
 
     missing = [prediction.match.seq for prediction in plan.predictions if prediction.match.seq not in results]
     if missing:
@@ -1249,6 +1488,24 @@ def run_review(payload: dict[str, Any], work_dir: str | Path) -> dict[str, objec
         post_match_evidence,
         official_prize=official_prize,
     )
+    serialized_review["ticket_provenance"] = {
+        "mode": "selected_analysis_record" if analysis_id else "latest_analysis_record",
+        "analysis_id": analysis_id,
+        "actual_purchase_confirmed": False,
+    }
+    if official_economics is not None:
+        serialized_review["draw_economics"] = official_economics.as_dict()
+    serialized_review["roi"] = calculate_report_roi(
+        serialized_review,
+        provenance=str(serialized_review["ticket_provenance"]["mode"]),
+    )
+    purchase_record = load_purchase_record(root, issue)
+    serialized_review["purchase_record"] = purchase_record
+    serialized_review["actual_purchase_roi"] = calculate_actual_purchase_roi(
+        serialized_review,
+        purchase_record,
+    )
+    serialized_review["conditional_prize_ev"] = _conditional_prize_ev(serialized_review)
     with markdown_path.open("a", encoding="utf-8") as handle:
         handle.write(_render_prize_markdown(serialized_review["prize"]))
     with markdown_path.open("a", encoding="utf-8") as handle:
@@ -1382,6 +1639,7 @@ def _restore_analysis_recommendations(
     saved_tactical_draws: dict[int, bool] = {}
     saved_stability: dict[int, dict[str, object]] = {}
     saved_stability_notes: dict[int, tuple[str, ...]] = {}
+    saved_by_seq: dict[int, dict[str, object]] = {}
     for saved in saved_predictions:
         if not isinstance(saved, dict):
             return None
@@ -1389,6 +1647,7 @@ def _restore_analysis_recommendations(
             seq = int(saved.get("seq"))
         except (TypeError, ValueError):
             return None
+        saved_by_seq[seq] = saved
         picks = tuple(item for item in str(saved.get("pick_text") or "").split("/") if item in OUTCOME_LABELS)
         if not picks:
             return None
@@ -1420,26 +1679,26 @@ def _restore_analysis_recommendations(
     if saved_keep is None or saved_drop is None or set(saved_keep) & set(saved_drop):
         return None
 
+    snapshot_backed = report.get("snapshot_schema") == ANALYSIS_SNAPSHOT_SCHEMA
     restored_predictions = tuple(
-            replace(
-                prediction,
-                picks=saved_picks[prediction.match.seq],
-                original_picks=saved_original_picks[prediction.match.seq],
-                budget_adjusted=saved_budget_flags[prediction.match.seq][0],
-                budget_forced_single=saved_budget_flags[prediction.match.seq][1],
-                tactical_draw=saved_tactical_draws[prediction.match.seq],
-                budget_stability=saved_stability[prediction.match.seq],
-                reasons=tuple(
-                    reason for reason in prediction.reasons
-                    if not reason.startswith("预算稳定性：")
-                ) + saved_stability_notes[prediction.match.seq],
-            )
-            for prediction in plan.predictions
+        _restore_saved_prediction(
+            prediction,
+            saved_by_seq[prediction.match.seq],
+            picks=saved_picks[prediction.match.seq],
+            original_picks=saved_original_picks[prediction.match.seq],
+            budget_flags=saved_budget_flags[prediction.match.seq],
+            tactical_draw=saved_tactical_draws[prediction.match.seq],
+            stability=saved_stability[prediction.match.seq],
+            stability_notes=saved_stability_notes[prediction.match.seq],
+            snapshot_backed=snapshot_backed,
         )
+        for prediction in plan.predictions
+    )
     budget = report.get("budget") if isinstance(report.get("budget"), dict) else {}
-    restored_hedge = _restore_draw_hedge(plan, report.get("draw_hedge"))
+    restored_plan = replace(plan, predictions=restored_predictions)
+    restored_hedge = _restore_draw_hedge(restored_plan, report.get("draw_hedge"))
     restored_portfolio = _restore_line_portfolio(report.get("line_portfolio"))
-    restored_choose9 = _restore_choose9(plan, report.get("choose9"))
+    restored_choose9 = _restore_choose9(restored_plan, report.get("choose9"))
     return TicketPlan(
         issue=plan.issue,
         predictions=restored_predictions,
@@ -1457,6 +1716,184 @@ def _restore_analysis_recommendations(
             budget.get("tolerance_yuan") or plan.budget_tolerance_yuan
         ),
     )
+
+
+def _restore_saved_prediction(
+    prediction: Prediction,
+    saved: dict[str, object],
+    *,
+    picks: tuple[str, ...],
+    original_picks: tuple[str, ...],
+    budget_flags: tuple[bool, bool],
+    tactical_draw: bool,
+    stability: dict[str, object],
+    stability_notes: tuple[str, ...],
+    snapshot_backed: bool,
+) -> Prediction:
+    legacy_reasons = tuple(
+        reason for reason in prediction.reasons
+        if not reason.startswith("预算稳定性：")
+    ) + stability_notes
+    if not snapshot_backed:
+        return replace(
+            prediction,
+            picks=picks,
+            original_picks=original_picks,
+            budget_adjusted=budget_flags[0],
+            budget_forced_single=budget_flags[1],
+            tactical_draw=tactical_draw,
+            budget_stability=stability,
+            reasons=legacy_reasons,
+        )
+
+    fundamental = saved.get("fundamental_audit")
+    fundamental = fundamental if isinstance(fundamental, dict) else {}
+    draw_calibration = saved.get("draw_calibration")
+    draw_calibration = draw_calibration if isinstance(draw_calibration, dict) else {}
+    dixon_coles = saved.get("dixon_coles")
+    dixon_coles = dixon_coles if isinstance(dixon_coles, dict) else {}
+    reasons = saved.get("reasons")
+    restored_reasons = tuple(item for item in reasons if isinstance(item, str)) if isinstance(reasons, list) else legacy_reasons
+    return replace(
+        prediction,
+        probabilities=_saved_float_dict(
+            saved.get("probabilities_raw"),
+            _serialized_probabilities(saved.get("probabilities"), prediction.probabilities),
+        ),
+        market_probabilities=_saved_float_dict(
+            saved.get("market_probabilities_raw"),
+            _serialized_probabilities(saved.get("market_probabilities"), prediction.market_probabilities),
+        ),
+        picks=picks,
+        original_picks=original_picks,
+        scorelines=_snapshot_scorelines(saved, prediction.scorelines),
+        confidence=_saved_float(saved.get("confidence"), prediction.confidence),
+        risk=str(saved.get("risk") or prediction.risk),
+        reasons=restored_reasons,
+        selection_scores=_saved_float_dict(saved.get("selection_scores"), prediction.selection_scores),
+        dixon_coles_probabilities=_saved_float_dict(
+            dixon_coles.get("probabilities"), prediction.dixon_coles_probabilities
+        ),
+        dixon_coles_quality=str(dixon_coles.get("quality") or prediction.dixon_coles_quality),
+        dixon_coles_quality_score=_saved_float(
+            dixon_coles.get("quality_score"), prediction.dixon_coles_quality_score
+        ),
+        blend_weights=_saved_float_dict(saved.get("blend_weights"), prediction.blend_weights),
+        fundamental_features=_saved_float_dict(fundamental.get("features"), prediction.fundamental_features),
+        fundamental_reliability=_saved_float_dict(fundamental.get("reliability"), prediction.fundamental_reliability),
+        fundamental_corrections=_saved_float_dict(fundamental.get("corrections"), prediction.fundamental_corrections),
+        mathematical_corrections=_saved_float_dict(
+            saved.get("mathematical_corrections"), prediction.mathematical_corrections
+        ),
+        draw_calibration_features=_saved_float_dict(
+            draw_calibration.get("features"), prediction.draw_calibration_features
+        ),
+        draw_calibration_available=_saved_bool_dict(
+            draw_calibration.get("available"), prediction.draw_calibration_available
+        ),
+        draw_calibration_contributions=_saved_float_dict(
+            draw_calibration.get("contributions"), prediction.draw_calibration_contributions
+        ),
+        draw_calibration_corrections=_saved_float_dict(
+            draw_calibration.get("corrections"), prediction.draw_calibration_corrections
+        ),
+        draw_calibration_evidence=_saved_string_tuple(
+            draw_calibration.get("evidence"), prediction.draw_calibration_evidence
+        ),
+        budget_adjusted=budget_flags[0],
+        budget_forced_single=budget_flags[1],
+        budget_removed_picks=_saved_outcomes(saved.get("budget_removed_picks")),
+        budget_stability=stability,
+        draw_guard=bool(saved.get("draw_guard")),
+        tactical_draw=tactical_draw,
+        tactical_draw_score=_saved_float(
+            saved.get("tactical_draw_score_raw"),
+            _saved_float(saved.get("tactical_draw_score"), 0.0) / 100.0,
+        ),
+        tactical_draw_evidence=_saved_string_tuple(
+            saved.get("tactical_draw_evidence"), prediction.tactical_draw_evidence
+        ),
+    )
+
+
+def _serialized_probabilities(value: object, fallback: dict[str, float]) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return fallback
+    labels = {"3": "home", "1": "draw", "0": "away"}
+    try:
+        restored = {outcome: float(value[label]) / 100.0 for outcome, label in labels.items()}
+    except (KeyError, TypeError, ValueError):
+        return fallback
+    return restored if sum(restored.values()) > 0 else fallback
+
+
+def _serialized_scorelines(value: object, fallback: tuple[Scoreline, ...]) -> tuple[Scoreline, ...]:
+    if not isinstance(value, list):
+        return fallback
+    restored: list[Scoreline] = []
+    try:
+        for item in value:
+            if not isinstance(item, dict):
+                return fallback
+            home, away = str(item["score"]).split("-", 1)
+            restored.append(Scoreline(int(home), int(away), float(item["probability"]) / 100.0))
+    except (KeyError, TypeError, ValueError):
+        return fallback
+    return tuple(restored) if restored else fallback
+
+
+def _snapshot_scorelines(saved: dict[str, object], fallback: tuple[Scoreline, ...]) -> tuple[Scoreline, ...]:
+    value = saved.get("scorelines_raw")
+    if isinstance(value, list):
+        try:
+            restored = tuple(
+                Scoreline(
+                    int(item["home_goals"]),
+                    int(item["away_goals"]),
+                    float(item["probability"]),
+                )
+                for item in value
+                if isinstance(item, dict)
+            )
+        except (KeyError, TypeError, ValueError):
+            restored = ()
+        if restored:
+            return restored
+    return _serialized_scorelines(saved.get("scorelines"), fallback)
+
+
+def _saved_float(value: object, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _saved_float_dict(value: object, fallback: dict[str, float]) -> dict[str, float]:
+    if not isinstance(value, dict):
+        return fallback
+    try:
+        return {str(key): float(item) for key, item in value.items()}
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _saved_bool_dict(value: object, fallback: dict[str, bool]) -> dict[str, bool]:
+    if not isinstance(value, dict):
+        return fallback
+    return {str(key): bool(item) for key, item in value.items()}
+
+
+def _saved_string_tuple(value: object, fallback: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return fallback
+    return tuple(str(item) for item in value)
+
+
+def _saved_outcomes(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(item) for item in value if str(item) in OUTCOME_LABELS)
 
 
 def _restore_choose9(plan: TicketPlan, value: object) -> Choose9Plan | None:

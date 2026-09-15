@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from football_lottery_agent import standalone_api
+from football_lottery_agent.draw_economics import parse_official_draw_economics
 from football_lottery_agent.history import archive_report, load_history_entries
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.mobile_api import serialize_ticket_plan
@@ -73,6 +74,18 @@ class StandaloneApiTests(unittest.TestCase):
         old_report = standalone_api._serialize_review_report(review)
         old_report.pop("prize")
         official = OfficialPrize("2026-07-08", 100000, 5000, 3000)
+        economics = parse_official_draw_economics(
+            "sample-001",
+            {
+                "lotteryDrawTime": "2026-07-08",
+                "totalSaleAmount": "1,000,000",
+                "prizeLevelList": [
+                    {"prizeLevel": "一等奖", "stakeAmount": "100000"},
+                    {"prizeLevel": "二等奖", "stakeAmount": "5000"},
+                ],
+                "prizeLevelListRj": [{"prizeLevel": "任选9场", "stakeAmount": "3000"}],
+            },
+        )
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -86,15 +99,19 @@ class StandaloneApiTests(unittest.TestCase):
             )
             archive_report("review", "sample-001", html, markdown, history_dir=root / "reports" / "history")
 
-            with patch.object(standalone_api, "fetch_sporttery_prize", return_value=official) as fetch_prize:
+            with patch.object(
+                standalone_api, "fetch_sporttery_economics", return_value=economics
+            ) as fetch_economics:
                 migrated = standalone_api.run_history(root, refresh_prizes=True)["entries"][0]["report"]
                 restored = standalone_api.run_history(root, refresh_prizes=True)["entries"][0]["report"]
 
             archived_markdown = next((root / "reports" / "history" / "items").glob("*.md")).read_text(encoding="utf-8")
 
-        fetch_prize.assert_called_once()
+        fetch_economics.assert_called_once()
         self.assertEqual(migrated["prize"], standalone_api._serialize_prize(review, official))
         self.assertEqual(restored["prize"], migrated["prize"])
+        self.assertEqual(migrated["draw_economics"]["sfc14_sales_yuan"], 1000000)
+        self.assertEqual(migrated["roi"]["status"], "complete")
         self.assertIn('"prize":', archived_markdown)
 
     def test_review_refreshes_candidate_without_auto_promotion(self) -> None:
@@ -264,6 +281,29 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertFalse(collect_issue.call_args.kwargs["sina_odds_only"])
         self.assertTrue(collect_issue.call_args.kwargs["strength_model"])
         self.assertEqual(collect_issue.call_args.kwargs["strength_xg_matches"], 20)
+
+    def test_run_analysis_archives_the_same_structured_snapshot_it_returns(self) -> None:
+        sample = json.loads(Path("data/sample_issue.json").read_text(encoding="utf-8"))
+        sample["issue"] = "26090"
+
+        def collect_sample(**kwargs: object) -> None:
+            Path(str(kwargs["issue_path"])).write_text(
+                json.dumps(sample, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with patch.object(standalone_api, "_collect_mobile_analysis", side_effect=collect_sample):
+                result = standalone_api.run_analysis(
+                    {"issue": "26090", "max_ticket_cost_yuan": 128, "force_refresh": True},
+                    root,
+                )
+            markdown = Path(result["markdown_path"]).read_text(encoding="utf-8")
+            restored = standalone_api._parse_analysis_snapshot(markdown)
+
+        self.assertEqual(restored, result["report"])
+        self.assertEqual(restored["snapshot_schema"], standalone_api.ANALYSIS_SNAPSHOT_SCHEMA)
 
     def test_analysis_rejects_malformed_issue_before_network_collection(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -768,6 +808,78 @@ class StandaloneApiTests(unittest.TestCase):
         self.assertIn("综合赔率和基本面", reasons[1])
         self.assertIn("双方近期状态接近", reasons[2])
         self.assertTrue(all(not reason.startswith("比赛：") for reason in reasons))
+
+    def test_analysis_snapshot_round_trip_is_independent_of_markdown_layout(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=128)
+        report = {
+            **serialize_ticket_plan(plan, include_review_fields=True),
+            "snapshot_schema": standalone_api.ANALYSIS_SNAPSHOT_SCHEMA,
+            "model_calibration": {"status": "collecting", "sample_count": 14},
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "analysis.md"
+            markdown.write_text("# layout can change freely\n", encoding="utf-8")
+            standalone_api._write_analysis_snapshot(markdown, report)
+
+            restored = standalone_api._parse_history_report(
+                markdown.read_text(encoding="utf-8"),
+                plan.issue.issue,
+                "analysis",
+            )
+
+        self.assertEqual(restored, report)
+        self.assertEqual(len(restored["predictions"]), 14)
+        self.assertIn("dixon_coles", restored["predictions"][0])
+        self.assertIn("scorelines", restored["predictions"][0])
+
+    def test_invalid_analysis_snapshot_falls_back_to_legacy_markdown(self) -> None:
+        markdown = (
+            _analysis_markdown("26090", "3", tuple(range(1, 10)))
+            + "\n<!-- mobile-analysis-v1\n{not-json}\n-->\n"
+        )
+
+        restored = standalone_api._parse_history_report(markdown, "26090", "analysis")
+
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored["issue"], "26090")
+        self.assertEqual(len(restored["predictions"]), 14)
+
+    def test_incomplete_analysis_snapshot_is_rejected_instead_of_returning_partial_data(self) -> None:
+        plan = build_ticket_plan(load_issue("data/sample_issue.json"))
+        report = serialize_ticket_plan(plan, include_review_fields=True)
+        report["snapshot_schema"] = standalone_api.ANALYSIS_SNAPSHOT_SCHEMA
+        report["predictions"][0].pop("probabilities")
+        with tempfile.TemporaryDirectory() as tmp:
+            markdown = Path(tmp) / "analysis.md"
+            markdown.write_text("# no legacy table\n", encoding="utf-8")
+            standalone_api._write_analysis_snapshot(markdown, report)
+
+            restored = standalone_api._parse_history_report(
+                markdown.read_text(encoding="utf-8"),
+                plan.issue.issue,
+                "analysis",
+            )
+
+        self.assertIsNone(restored)
+
+    def test_analysis_snapshot_restores_saved_probabilities_and_reasons(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        saved_plan = build_ticket_plan(issue, max_ticket_cost_yuan=128)
+        current_plan = build_ticket_plan(issue, max_ticket_cost_yuan=1000)
+        report = serialize_ticket_plan(saved_plan, include_review_fields=True)
+        report["snapshot_schema"] = standalone_api.ANALYSIS_SNAPSHOT_SCHEMA
+        report["predictions"][0]["probabilities"] = {"home": 55.0, "draw": 25.0, "away": 20.0}
+        report["predictions"][0]["probabilities_raw"] = {"3": 0.55, "1": 0.25, "0": 0.20}
+        report["predictions"][0]["confidence"] = 44.0
+        report["predictions"][0]["reasons"] = ["历史快照理由"]
+
+        restored = standalone_api._restore_analysis_recommendations(current_plan, report)
+
+        self.assertIsNotNone(restored)
+        first = restored.predictions[0]
+        self.assertEqual(first.probabilities, {"3": 0.55, "1": 0.25, "0": 0.20})
+        self.assertEqual(first.confidence, 44.0)
+        self.assertEqual(first.reasons, ("历史快照理由",))
 
     def test_history_attaches_current_versioned_model_status(self) -> None:
         calibration = {

@@ -1524,9 +1524,12 @@ def _strength_source(
         ]
     )
     identity_matched = bool(
-        source.get("matched_event_id")
-        and source.get("home_team_id")
+        source.get("home_team_id")
         and source.get("away_team_id")
+        and (
+            source.get("matched_event_id")
+            or source.get("identity_fallback") == "verified_provider_ids"
+        )
     )
     if home is not None and away is not None:
         status = "complete"

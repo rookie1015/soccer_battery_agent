@@ -151,6 +151,7 @@ class CliTests(unittest.TestCase):
                     "workspace",
                     "--min-train-matches",
                     "28",
+                    "--include-all-history",
                     "--promote",
                 ],
             ),
@@ -161,6 +162,7 @@ class CliTests(unittest.TestCase):
 
         self.assertEqual(run_experiment.call_args.args[0], Path("workspace"))
         self.assertEqual(run_experiment.call_args.kwargs["min_train_matches"], 28)
+        self.assertTrue(run_experiment.call_args.kwargs["include_all_history"])
         self.assertTrue(run_experiment.call_args.kwargs["promote"])
 
 

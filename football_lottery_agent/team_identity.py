@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .league_team_aliases import FOTMOB_TEAM_IDS, LEAGUE_TEAM_ALIASES
+
 
 # These aliases ship with the application and are never rewritten. Identities
 # learned from provider fixtures are layered on top from team_identity.json.
@@ -110,6 +112,15 @@ SEED_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
     "雷恩": ("rennes", "stade rennais"),
 }
 
+# The competition roster is the stable baseline. Merge the smaller historical
+# seed map on top without dropping any verified provider spelling.
+for _canonical, _aliases in LEAGUE_TEAM_ALIASES.items():
+    _existing = list(SEED_TEAM_ALIASES.get(_canonical, ()))
+    for _alias in _aliases:
+        if _alias not in _existing:
+            _existing.append(_alias)
+    SEED_TEAM_ALIASES[_canonical] = tuple(_existing)
+
 # Keep this object stable: collectors and other modules import it by reference.
 TEAM_ALIASES: dict[str, tuple[str, ...]] = dict(SEED_TEAM_ALIASES)
 
@@ -197,7 +208,8 @@ def provider_team_match_score(
     canonical = _canonical_name(local_name)
     record = _team_record(canonical, create=False)
     provider_ids = record.get("provider_ids", {}) if record else {}
-    saved_id = str(provider_ids.get(provider, "")).strip()
+    seed_id = FOTMOB_TEAM_IDS.get(canonical, "") if provider == "fotmob" else ""
+    saved_id = seed_id or str(provider_ids.get(provider, "")).strip()
     incoming_id = str(candidate_id).strip() if candidate_id is not None else ""
     if saved_id and incoming_id:
         return 1.0 if saved_id == incoming_id else 0.0
@@ -261,15 +273,29 @@ def identity_summary(local_name: str) -> dict[str, Any]:
     """Return non-sensitive identity details for collection diagnostics."""
     canonical = _canonical_name(local_name)
     record = _team_record(canonical, create=False)
+    provider_ids = dict(record.get("provider_ids", {})) if record else {}
+    if canonical in FOTMOB_TEAM_IDS:
+        provider_ids["fotmob"] = FOTMOB_TEAM_IDS[canonical]
     return {
         "canonical_name": canonical,
         "aliases": list(TEAM_ALIASES.get(canonical, ())),
-        "provider_ids": dict(record.get("provider_ids", {})) if record else {},
+        "provider_ids": provider_ids,
     }
 
 
 def _canonical_name(value: str) -> str:
     normalized = normalize_team_name(value)
+    # Prefer the verified league roster before the historical seed table.  Some
+    # short Chinese names (for example "巴黎") used to be separate canonical
+    # records even though they are aliases of a roster canonical name.  Folding
+    # them here keeps the verified provider ID and every spelling on one club.
+    if value in LEAGUE_TEAM_ALIASES:
+        return value
+    for canonical, aliases in LEAGUE_TEAM_ALIASES.items():
+        if normalized == normalize_team_name(canonical):
+            return canonical
+        if any(normalized == normalize_team_name(alias) for alias in aliases):
+            return canonical
     if value in TEAM_ALIASES:
         return value
     for canonical, aliases in TEAM_ALIASES.items():
@@ -313,6 +339,10 @@ def _sanitize_persisted_teams(teams: dict[str, Any]) -> tuple[dict[str, Any], bo
             kept_aliases.append(item)
         record["aliases"] = kept_aliases
         provider_ids = dict(raw_record.get("provider_ids", {}))
+        verified_fotmob_id = FOTMOB_TEAM_IDS.get(canonical)
+        if verified_fotmob_id and provider_ids.get("fotmob") not in (None, "", verified_fotmob_id):
+            provider_ids.pop("fotmob", None)
+            changed = True
         for provider in blocked_providers:
             has_supported_alias = any(
                 isinstance(item, dict)
@@ -363,6 +393,10 @@ def _team_record(canonical: str, *, create: bool) -> dict[str, Any]:
 
 
 def _provider_id_owner(provider: str, provider_id: str) -> str:
+    if provider == "fotmob":
+        for canonical, seed_id in FOTMOB_TEAM_IDS.items():
+            if seed_id == provider_id:
+                return canonical
     for canonical, record in _IDENTITY_DATA.get("teams", {}).items():
         if isinstance(record, dict) and str(record.get("provider_ids", {}).get(provider, "")) == provider_id:
             return str(canonical)

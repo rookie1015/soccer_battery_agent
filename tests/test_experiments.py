@@ -195,6 +195,36 @@ class ExperimentTests(unittest.TestCase):
         self.assertEqual(result["promotion"]["status"], "collecting")
         self.assertIsNone(load_active_model_weights(tmp))
 
+    def test_include_all_history_evaluates_excluded_samples_without_promoting_them(self) -> None:
+        excluded = [
+            ExperimentSample(
+                **{
+                    **_sample("26020", seq, outcome).__dict__,
+                    "snapshot_status": "post_kickoff_excluded",
+                }
+            )
+            for seq, outcome in enumerate(("3", "1", "0"), start=1)
+        ]
+        with TemporaryDirectory() as tmp, patch(
+            "football_lottery_agent.experiments.load_experiment_samples",
+            return_value=(excluded, _audit(excluded)),
+        ):
+            result = run_experiment(
+                tmp,
+                min_train_matches=1,
+                min_test_matches=1,
+                min_test_issues=1,
+                include_all_history=True,
+                promote=True,
+            )
+            markdown = Path(result["artifacts"]["markdown"]).read_text(encoding="utf-8")
+
+        self.assertEqual(result["strict"]["sample_count"], 0)
+        self.assertEqual(result["exploratory"]["sample_count"], 0)
+        self.assertEqual(result["all_history"]["sample_count"], 3)
+        self.assertIn("忽略采集时间", markdown)
+        self.assertIsNone(load_active_model_weights(tmp))
+
 
 def _sample(
     issue: str,

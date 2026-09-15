@@ -173,6 +173,29 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(source["status"], "matched_no_samples")
         self.assertEqual(source["identity_status"], "matched")
 
+    def test_strength_source_accepts_only_explicit_verified_id_fallback(self) -> None:
+        verified = SimpleNamespace(
+            home=None,
+            away=None,
+            home_squad=None,
+            away_squad=None,
+            source={
+                "home_team_id": 5904,
+                "away_team_id": 623229,
+                "identity_fallback": "verified_provider_ids",
+            },
+        )
+        unverified = SimpleNamespace(
+            home=None,
+            away=None,
+            home_squad=None,
+            away_squad=None,
+            source={"home_team_id": 5904, "away_team_id": 623229},
+        )
+
+        self.assertEqual(_strength_source(verified)["identity_status"], "matched")
+        self.assertEqual(_strength_source(unverified)["identity_status"], "unmatched")
+
     def test_fetch_sina_sfc_rejects_table_from_another_issue(self) -> None:
         html = """
         <input type="hidden" name="num" value="26087">

@@ -607,10 +607,12 @@ def _combined_quality(home: str, away: str) -> str:
 
 
 def _apply_squad_strength(source: dict[str, object], home_xg: float, away_xg: float) -> tuple[float, float]:
-    """Apply only pre-availability paper strength to the xG prior.
+    """Apply healthy paper strength and one relative availability adjustment.
 
-    Current-XI ratings and availability penalties already encode absences, so
-    using either here would duplicate the information-layer injury correction.
+    Paper ratings describe the injury-free baseline. Availability is then
+    applied exactly once as a damped retention ratio. The information layer
+    suppresses its separate injury correction whenever both squad penalties
+    are present, so the same absences cannot be counted twice.
     """
     home_rating = _number(source.get("home_squad_paper_rating"))
     away_rating = _number(source.get("away_squad_paper_rating"))
@@ -619,6 +621,16 @@ def _apply_squad_strength(source: dict[str, object], home_xg: float, away_xg: fl
     edge = max(-0.16, min(0.16, log(home_rating / away_rating) * 0.12))
     home_factor = 1.0 + edge
     away_factor = 1.0 - edge
+
+    home_penalty = _probability(source.get("home_squad_availability_penalty"))
+    away_penalty = _probability(source.get("away_squad_availability_penalty"))
+    if home_penalty is not None and away_penalty is not None:
+        home_retention = 1.0 - max(0.0, min(0.35, home_penalty))
+        away_retention = 1.0 - max(0.0, min(0.35, away_penalty))
+        availability_factor = (home_retention / away_retention) ** 0.5
+        availability_factor = max(0.82, min(1.22, availability_factor))
+        home_factor *= availability_factor
+        away_factor /= availability_factor
     return _clamp_xg(home_xg * home_factor), _clamp_xg(away_xg * away_factor)
 
 

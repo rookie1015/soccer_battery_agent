@@ -541,6 +541,14 @@ def _handler(root: Path):
                 if self.path == "/api/review":
                     self._send_json(_run_review(_read_json(self)))
                     return
+                if self.path == "/api/purchase/get":
+                    from .standalone_api import run_get_purchase
+                    self._send_json(run_get_purchase(_read_json(self), root))
+                    return
+                if self.path == "/api/purchase/save":
+                    from .standalone_api import run_save_purchase
+                    self._send_json(run_save_purchase(_read_json(self), root))
+                    return
                 if self.path == "/api/single-prediction":
                     self._send_json(_run_single_prediction(_read_json(self)))
                     return

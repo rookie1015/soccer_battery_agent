@@ -19,6 +19,7 @@ from football_lottery_agent.strength_model import (
     _match_details_payload,
     _read_json_object,
     _team_score,
+    _team_ref,
 )
 from football_lottery_agent.collectors import RawMatch
 from football_lottery_agent.team_identity import (
@@ -102,6 +103,13 @@ class StrengthModelTests(unittest.TestCase):
         self.assertEqual(_team_score("赫根", "Häcken"), 1.0)
         self.assertEqual(_team_score("迈阿密国际", "Inter Miami CF"), 1.0)
 
+    def test_verified_team_id_is_used_when_daily_fixture_is_missing(self) -> None:
+        china = _team_ref("中国女足", "home", None, {})
+        hong_kong = _team_ref("中国香港女足", "away", None, {})
+
+        self.assertEqual((china.id, china.name), (5904, "中国女足"))
+        self.assertEqual((hong_kong.id, hong_kong.name), (623229, "中国香港女足"))
+
     def test_team_normalization_does_not_delete_chinese_names(self) -> None:
         self.assertEqual(normalize_team_name("圣路易斯城"), "圣路易斯城")
 
@@ -135,8 +143,8 @@ class StrengthModelTests(unittest.TestCase):
             "20260802": [
                 {
                     "id": 99,
-                    "home": {"id": 2, "name": "Kalmar FF"},
-                    "away": {"id": 1, "name": "Häcken"},
+                    "home": {"id": 9892, "name": "Kalmar FF"},
+                    "away": {"id": 8428, "name": "Häcken"},
                 }
             ]
         }

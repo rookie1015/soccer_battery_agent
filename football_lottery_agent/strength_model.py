@@ -22,6 +22,7 @@ from .json_utils import loads_json
 from .team_identity import (
     TEAM_ALIASES,
     configure_team_identity,
+    identity_summary,
     identity_path_for_cache,
     normalize_team_name,
     provider_team_match_score,
@@ -54,7 +55,14 @@ FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
     "葡超": ("liga portugal", "primeira liga"),
     "苏超": ("premiership", "scottish premiership"),
     "比甲": ("pro league", "first division a"),
+    "亚冠精英": (
+        "afc champions league elite east",
+        "afc champions league elite west",
+        "afc champions league elite",
+    ),
     "瑞超": ("allsvenskan",),
+    "瑞典超": ("allsvenskan",),
+    "瑞士超": ("super league", "swiss super league"),
     "挪超": ("eliteserien",),
     "芬超": ("veikkausliiga",),
     "丹超": ("superliga",),
@@ -65,6 +73,7 @@ FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
     "日职": ("j league", "j. league"),
     "韩职": ("k league 1",),
     "美职": ("major league soccer", "mls"),
+    "美职联": ("major league soccer", "mls"),
 }
 
 @dataclass(frozen=True)
@@ -234,6 +243,7 @@ def _build_fixture_strength(
         _remember_fotmob_side(match.away, event.get(away_side) or {}, match_diagnostic)
     home_ref = _team_ref(match.home, home_side, event, id_overrides)
     away_ref = _team_ref(match.away, away_side, event, id_overrides)
+    verified_id_fallback = bool(not event and home_ref and away_ref)
 
     # A FotMob matchDetails payload is large. The former path parsed each
     # recent game once for xG and again for player form, and parsed the current
@@ -282,6 +292,7 @@ def _build_fixture_strength(
             "xg_matches": xg_matches,
             "candidate_league_id": _event_league_id(event) if event else 0,
             "neutral_venue": _event_is_neutral(event) if event else False,
+            "identity_fallback": "verified_provider_ids" if verified_id_fallback else "",
             **match_diagnostic,
         },
         league_history=(),
@@ -630,13 +641,17 @@ def _build_squad_profile(
     unavailable_players = [player for player in players if str(player.get("id")) in unavailable_ids]
     available_players = [player for player in players if str(player.get("id")) not in unavailable_ids]
     recent_forms = _recent_player_forms(team, team_data or {}, cache, match_details=match_details)
+    # Keep the healthy paper XI separate from the currently available XI.
+    # The former is the injury-free baseline used by the mathematical model;
+    # the latter is used only for current-strength and replacement estimates.
+    healthy_selected = _estimate_starting_eleven(players, recent_forms)
     selected = _estimate_starting_eleven(available_players, recent_forms)
     if len(selected) < 8:
-        selected = _estimate_starting_eleven(players, recent_forms)
+        selected = healthy_selected
 
     starter_value = sum(_player_value(player) for player in selected)
     unavailable_value = sum(_player_value(player) for player in unavailable_players)
-    paper_strength = sum(_player_strength(player) for player in selected)
+    paper_strength = sum(_player_strength(player) for player in healthy_selected)
     current_strength = sum(_player_strength(player, recent_forms) for player in selected)
     attack_strength = sum(_player_strength(player, recent_forms) for player in selected if _position_group(player) in {"midfield", "attack"})
     defence_strength = sum(_player_strength(player, recent_forms) for player in selected if _position_group(player) in {"keeper", "defence", "midfield"})
@@ -1064,7 +1079,15 @@ def _team_ref(local_name: str, side: str, event: dict[str, Any] | None, override
     if local_name in overrides:
         return TeamRef(overrides[local_name], local_name)
     if not event:
-        return None
+        # Some cup and national-team fixtures are absent from FotMob's daily
+        # fixture feed even though both team pages and histories exist.  Only
+        # fall back to a shipped, verified provider ID; never infer an ID from
+        # kickoff time or a fuzzy name match.
+        provider_id = identity_summary(local_name).get("provider_ids", {}).get("fotmob")
+        try:
+            return TeamRef(int(provider_id), local_name) if provider_id else None
+        except (TypeError, ValueError):
+            return None
     raw = event.get(side) or {}
     team_id = raw.get("id")
     name = raw.get("longName") or raw.get("name") or local_name

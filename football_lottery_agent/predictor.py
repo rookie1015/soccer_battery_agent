@@ -18,6 +18,8 @@ OUTCOME_LABELS = {"3": "主胜", "1": "平", "0": "客胜"}
 SELECTION_OUTCOME_LABELS = {"3": "主胜", "1": "平局", "0": "客胜"}
 SECONDARY_RAW_GAP_LIMIT = 0.04
 SECONDARY_EVIDENCE_MARGIN = 0.015
+DRAW_BOUNDARY_MIN_PROBABILITY = 0.23
+DRAW_BOUNDARY_MAX_GAP = 0.03
 MAX_KNOCKOUT_PROBABILITY_SHIFT = 0.07
 MAX_MARKET_ANCHOR_SHIFT = 0.12
 DEFAULT_SELECTION_POLICY = {
@@ -332,6 +334,18 @@ def _select_picks(
         # double, but it cannot turn a protected triple into a double.
         if third_prob >= policy["triple_third"] and second_prob - third_prob < policy["triple_gap"]:
             return ("3", "1", "0")
+        # A two-to-three point edge is not strong enough to remove a plausible
+        # draw merely because 1X2 prices impose an exact ordering.  Keep the
+        # match open unless a genuinely different evidence score resolves the
+        # boundary.  This targets the recurring 3/0 and 0/3 bias without adding
+        # a blanket draw bonus to every match.
+        if (
+            "1" in {second_outcome, third_outcome}
+            and dict(ranked).get("1", 0.0) >= DRAW_BOUNDARY_MIN_PROBABILITY
+            and second_prob - third_prob <= DRAW_BOUNDARY_MAX_GAP
+            and evidence_choice is None
+        ):
+            return ("3", "1", "0")
         return (top_outcome, evidence_choice or second_outcome)
     return ("3", "1", "0")
 
@@ -436,6 +450,16 @@ def _resolved_secondary_choice(
         reverse=True,
     )
     margin = selection_scores.get(ranked[0], 0.0) - selection_scores.get(ranked[1], 0.0)
+    # Full analysis normally exposes the final calibrated probabilities as its
+    # selection scores.  Repeating the same ordering is not independent
+    # evidence and must not turn a near-tied draw boundary into a confident
+    # double.  Custom/experimental scores can still resolve the choice.
+    reproduces_raw_order = (
+        ranked[0] == second_outcome
+        and abs(margin - raw_gap) <= 1e-6
+    )
+    if reproduces_raw_order:
+        return None
     return ranked[0] if margin >= evidence_margin else None
 
 

@@ -6,10 +6,10 @@
 
 ## 当前版本
 
-- Android：`0.5.6`（versionCode `20`）
-- 更新日期：`2026-09-11`
+- Android：`0.5.10`（versionCode `24`）
+- 更新日期：`2026-09-14`
 - Python：`3.10+`
-- 自动测试：`256` 项，另含 `11` 个子测试
+- 自动测试：`288` 项，另含 `248` 个子测试
 
 ## Android App
 
@@ -57,7 +57,7 @@ android\FootballLotteryAndroid\app\build\outputs\apk\debug\app-debug.apk
 安装后可在第四页确认版本号。新版设置页应显示：
 
 ```text
-App 版本 0.5.6（20） · 任九模型建议优先，超预算才压缩
+App 版本 0.5.10（24） · 实购记录、双口径 ROI 与预算诊断
 ```
 
 ## 数据来源
@@ -217,6 +217,26 @@ python -m football_lottery_agent review `
 python -m football_lottery_agent experiment --work-dir .
 ```
 
+按全量历史口径忽略快照审计状态、把所有已配对赛果纳入单独的回溯轨道：
+
+```powershell
+python -m football_lottery_agent experiment --work-dir . --include-all-history
+```
+
+该轨道用于历史诊断，不会把旧版或赛后快照自动变成生产模型晋级证据。
+
+刷新并保存官方开奖经济数据（销量、中奖注数、单注奖金、奖池字段和原始响应），随后按每期最新保存票面生成ROI回测：
+
+```powershell
+python -m football_lottery_agent roi-backtest --work-dir . --refresh-prizes
+```
+
+结构化经济数据保存在 `data/draw_economics/`，汇总写入 `reports/roi_backtest.md` 和同名 JSON。报告同时包含“推荐方案重放 ROI”和“实际购买 ROI”；实购记录保存在 `data/purchases/<期号>.json`，没有实购记录时不会拿推荐票面代替。旧 Markdown 若没有任九独立票面，只计算可恢复的十四场票；无法确认独立线路成本的记录会标记为 `incomplete_cost`，不会进入累计 ROI。
+
+Android 分析历史中可点击“记录购买”，从推荐复式复制十四场与任九票面，编辑后保存为已购买或部分购买；也可以明确标记未购买。复盘并刷新官方奖金后，奖金日历会分别展示回放收益和实际购买收益。
+
+每份新分析快照还保存预算压缩前后的成本、14 场全覆盖概率、至少命中 13 场概率和具体删项。命中分布使用动态规划/生成函数计算，不枚举全部 `3^14` 赛果。按已公布单注奖金计算的 EV 仅属于事后条件估值，接口会标记 `production_eligible: false`，不得直接用于赛前生产策略。
+
 手工请求晋级仍会执行全部门槛，不会强制覆盖生产模型：
 
 ```powershell
@@ -270,7 +290,7 @@ python -m football_lottery_agent collect `
   --odds data\odds.csv
 ```
 
-球队匹配会优先使用已确认的 FotMob / SofaScore 球队 ID，再使用共享别名和完整赛程的联赛、开球时间与主客队组合。同联赛同时间只有一场候选时会直接反推双方身份；仍有多场候选时，使用 DBpedia 中英文足球俱乐部实体作桥接，并且只有主客两队共同唯一指向同一场供应商赛事时才会绑定。确认的新别名和球队 ID 会写入缓存目录旁的 `team_identity.json`，下次分析和 App 升级后继续使用；低置信度或歧义候选只写入采集诊断，不会自动绑定。国家成年队、青年队和女足不会仅凭名称包含关系互相匹配。
+球队匹配会优先使用已确认的 FotMob / SofaScore 球队 ID，再使用共享别名和完整赛程的联赛、开球时间与主客队组合。内置静态库覆盖五大联赛、荷甲、葡超、法乙、瑞典超、芬超、瑞士超和美职联的当前球队名单、常见中英文名称及 FotMob ID；`瑞超` 和 `瑞典超` 均兼容项目原有的 Allsvenskan 含义。同联赛同时间只有一场候选时会直接反推双方身份；仍有多场候选时，使用 DBpedia 中英文足球俱乐部实体作桥接，并且只有主客两队共同唯一指向同一场供应商赛事时才会绑定。确认的新别名和球队 ID 会写入缓存目录旁的 `team_identity.json`，下次分析和 App 升级后继续使用；低置信度或歧义候选只写入采集诊断，不会自动绑定。国家成年队、青年队和女足不会仅凭名称包含关系互相匹配。
 
 如果仍有未匹配球队，可参考 `data/team_ids.example.csv` 手工指定 FotMob ID。该文件继续作为紧急覆盖入口。
 

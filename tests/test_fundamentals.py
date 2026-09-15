@@ -98,6 +98,26 @@ class FundamentalModelTests(unittest.TestCase):
         for name in ("motivation", "injury", "schedule"):
             self.assertGreater(profile.reliabilities[name], 0.0)
 
+    def test_squad_availability_suppresses_duplicate_injury_correction(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        audited = replace(
+            match,
+            signals=replace(match.signals, home_injury_impact=0.35, away_injury_impact=0.10),
+            sources={
+                **match.sources,
+                "strength_model": {
+                    "home_squad_availability_penalty": 0.30,
+                    "away_squad_availability_penalty": 0.10,
+                },
+            },
+        )
+
+        profile = build_fundamental_profile(audited)
+
+        self.assertAlmostEqual(profile.raw_features["injury"], -0.25)
+        self.assertEqual(profile.reliabilities["injury"], 0.0)
+        self.assertEqual(profile.features["injury"], 0.0)
+
     def test_signal_fallback_is_not_independent_math_evidence(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         math = forecast(match)

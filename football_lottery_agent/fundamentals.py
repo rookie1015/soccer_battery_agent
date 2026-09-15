@@ -63,6 +63,11 @@ def build_fundamental_profile(match: Match) -> FundamentalProfile:
         ),
     }
     reliability = _feature_reliabilities(match, raw)
+    if _squad_availability_owns_injuries(match):
+        # Dixon-Coles applies the relative loss of the two available squads to
+        # xG. Keep the independently collected injury signal visible for the
+        # audit, but do not turn the same absences into a second correction.
+        reliability["injury"] = 0.0
     if _has_source_backed_mathematical_rates(match):
         # Dixon-Coles already owns recent strength, scoring level and draw
         # history whenever real xG/goals inputs are available. Keeping these
@@ -73,6 +78,16 @@ def build_fundamental_profile(match: Match) -> FundamentalProfile:
             reliability[name] = 0.0
     effective = {name: raw[name] * reliability[name] for name in FEATURE_NAMES}
     return FundamentalProfile(raw_features=raw, reliabilities=reliability, features=effective)
+
+
+def _squad_availability_owns_injuries(match: Match) -> bool:
+    source = match.sources.get("strength_model") if isinstance(match.sources, dict) else None
+    if not isinstance(source, dict):
+        return False
+    return all(
+        isinstance(source.get(key), (int, float))
+        for key in ("home_squad_availability_penalty", "away_squad_availability_penalty")
+    )
 
 
 def fundamental_corrections(

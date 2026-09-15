@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .models import Choose9Plan, DrawHedgePlan, LinePortfolioPlan, Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
+from .ticket_math import ticket_probability_diagnostics
 
 
 def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False) -> dict[str, object]:
@@ -42,6 +43,7 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
     }
     if include_review_fields:
         metrics["low_risk_count"] = low_risk
+    budget_diagnostics = _serialize_budget_diagnostics(plan)
     return {
         "issue": plan.issue.issue,
         "purchase_deadline": plan.issue.metadata.get("purchase_deadline", ""),
@@ -66,6 +68,18 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
                 1,
             ),
         },
+        "decision_record": {
+            "schema": "ticket-decision-v1",
+            "recommendation_kind": "generated_ticket_plan",
+            "model_version": "market-residual-1x2-v5",
+            "strategy_version": "budget-coverage-dp-v1",
+            "budget_limit_yuan": limit_yuan,
+            "recommended_total_cost_yuan": total_cost_yuan + (
+                plan.choose9_plan.cost_yuan if isinstance(getattr(plan, "choose9_plan", None), Choose9Plan) else 0
+            ),
+            "actual_purchase_confirmed": False,
+        },
+        "budget_diagnostics": budget_diagnostics,
         "draw_hedge": _serialize_draw_hedge(plan),
         "line_portfolio": _serialize_line_portfolio(plan),
         "metrics": metrics,
@@ -73,6 +87,50 @@ def serialize_ticket_plan(plan: TicketPlan, include_review_fields: bool = False)
         "choose9_drop": list(plan.choose9_drop),
         "choose9": _serialize_choose9(plan),
         "predictions": [_serialize_prediction(prediction, include_review_fields) for prediction in predictions],
+    }
+
+
+def _serialize_budget_diagnostics(plan: TicketPlan) -> dict[str, object]:
+    probabilities = [prediction.probabilities for prediction in plan.predictions]
+    before = ticket_probability_diagnostics(
+        probabilities,
+        [prediction.analysis_picks for prediction in plan.predictions],
+    )
+    after = ticket_probability_diagnostics(
+        probabilities,
+        [prediction.picks for prediction in plan.predictions],
+    )
+    removed = []
+    for prediction in plan.predictions:
+        for outcome in prediction.budget_removed_picks:
+            removed.append(
+                {
+                    "seq": prediction.match.seq,
+                    "home": prediction.match.home,
+                    "away": prediction.match.away,
+                    "outcome": outcome,
+                    "outcome_label": OUTCOME_LABELS[outcome],
+                    "probability": round(prediction.probabilities.get(outcome, 0.0) * 100, 2),
+                    "reason": "whole_ticket_budget_compression",
+                    "was_draw": outcome == "1",
+                }
+            )
+    return {
+        "schema": "budget-compression-diagnostics-v1",
+        "before": before,
+        "after": after,
+        "cost_reduction_yuan": int(before["cost_yuan"]) - int(after["cost_yuan"]),
+        "coverage_probability_change": round(
+            float(after["coverage_probability"]) - float(before["coverage_probability"]), 10
+        ),
+        "at_least_13_probability_change": round(
+            float(after["at_least_n_minus_1_probability"])
+            - float(before["at_least_n_minus_1_probability"]),
+            10,
+        ),
+        "removed_picks": removed,
+        "removed_draw_count": sum(bool(item["was_draw"]) for item in removed),
+        "note": "概率基于逐场独立近似，用于压缩前后同口径诊断，不代表真实联合分布。",
     }
 
 
@@ -205,6 +263,7 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         "analysis_pick_text": prediction.analysis_pick_text,
         "analysis_pick_labels": [OUTCOME_LABELS[pick] for pick in prediction.analysis_picks],
         "analysis_picks": list(prediction.analysis_picks),
+        "selection_scores": dict(prediction.selection_scores),
         "budget_adjusted": prediction.budget_adjusted,
         "budget_forced_single": prediction.budget_forced_single,
         "budget_removed_picks": list(prediction.budget_removed_picks),
@@ -212,18 +271,26 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         "draw_guard": prediction.draw_guard,
         "tactical_draw": prediction.tactical_draw,
         "tactical_draw_score": round(prediction.tactical_draw_score * 100, 1),
+        "tactical_draw_score_raw": prediction.tactical_draw_score,
         "tactical_draw_evidence": list(prediction.tactical_draw_evidence),
         "confidence": prediction.confidence,
+        "dixon_coles": {
+            "probabilities": dict(prediction.dixon_coles_probabilities),
+            "quality": prediction.dixon_coles_quality,
+            "quality_score": prediction.dixon_coles_quality_score,
+        },
         "probabilities": {
             "home": round(prediction.probabilities["3"] * 100, 1),
             "draw": round(prediction.probabilities["1"] * 100, 1),
             "away": round(prediction.probabilities["0"] * 100, 1),
         },
+        "probabilities_raw": dict(prediction.probabilities),
         "market_probabilities": {
             "home": round(prediction.market_probabilities.get("3", 0.0) * 100, 1),
             "draw": round(prediction.market_probabilities.get("1", 0.0) * 100, 1),
             "away": round(prediction.market_probabilities.get("0", 0.0) * 100, 1),
         },
+        "market_probabilities_raw": dict(prediction.market_probabilities),
         "blend_weights": dict(prediction.blend_weights),
         "fundamental_audit": {
             "features": dict(prediction.fundamental_features),
@@ -244,6 +311,14 @@ def _serialize_prediction(prediction: Prediction, include_review_fields: bool) -
         result["risk"] = prediction.risk
         result["scorelines"] = [
             {"score": item.text, "probability": round(item.probability * 100, 1)}
+            for item in prediction.scorelines
+        ]
+        result["scorelines_raw"] = [
+            {
+                "home_goals": item.home_goals,
+                "away_goals": item.away_goals,
+                "probability": item.probability,
+            }
             for item in prediction.scorelines
         ]
     return result

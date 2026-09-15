@@ -401,7 +401,7 @@ class DixonColesTests(unittest.TestCase):
         self.assertIn("无法取得球队ID和xG样本", reason)
         self.assertIn("当前赔率源没有提供大小球盘口", reason)
 
-    def test_squad_paper_strength_applies_but_absence_is_not_counted_twice(self) -> None:
+    def test_squad_paper_strength_and_relative_availability_apply_once(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         base_sources = {
             "strength_model": {
@@ -414,13 +414,15 @@ class DixonColesTests(unittest.TestCase):
             }
         }
         strong_home = forecast(replace(match, sources=base_sources))
-        weakened_home = forecast(
-            replace(match, sources={"strength_model": {**base_sources["strength_model"], "home_squad_availability_penalty": 0.35}})
-        )
+        weakened_home = forecast(replace(match, sources={"strength_model": {
+            **base_sources["strength_model"],
+            "home_squad_availability_penalty": 0.35,
+            "away_squad_availability_penalty": 0.0,
+        }}))
 
         self.assertGreater(strong_home.home_xg, strong_home.away_xg)
-        self.assertEqual(weakened_home.home_xg, strong_home.home_xg)
-        self.assertEqual(weakened_home.away_xg, strong_home.away_xg)
+        self.assertLess(weakened_home.home_xg, strong_home.home_xg)
+        self.assertGreater(weakened_home.away_xg, strong_home.away_xg)
 
     def test_full_analysis_ticket_scores_reuse_final_probabilities(self) -> None:
         probabilities = {"3": 0.48, "1": 0.27, "0": 0.25}

@@ -8,6 +8,12 @@ import urllib.request
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .draw_economics import (
+    OfficialDrawEconomics,
+    OfficialPrize,
+    parse_official_draw_economics,
+    write_draw_economics_snapshot,
+)
 from .json_utils import loads_json
 from .models import Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
@@ -26,22 +32,6 @@ REVIEW_PLAY_CHOOSE9 = "choose9"
 class ResultsFetch:
     results: dict[int, "MatchResult"]
     source: str
-
-
-@dataclass(frozen=True)
-class OfficialPrize:
-    draw_date: str = ""
-    sfc14_first_yuan: int | None = None
-    sfc14_second_yuan: int | None = None
-    choose9_yuan: int | None = None
-    source: str = "中国体彩网官方开奖"
-
-    @property
-    def published(self) -> bool:
-        return any(
-            value is not None
-            for value in (self.sfc14_first_yuan, self.sfc14_second_yuan, self.choose9_yuan)
-        )
 
 
 @dataclass(frozen=True)
@@ -277,18 +267,40 @@ def fetch_sporttery_results(issue: str, cache_dir: str | Path = "data/cache") ->
 
 
 def fetch_sporttery_prize(issue: str, cache_dir: str | Path = "data/cache") -> OfficialPrize:
-    row = _fetch_sporttery_draw_row(issue, cache_dir)
+    economics = fetch_sporttery_economics(issue, cache_dir=cache_dir)
+    return economics.prize if economics is not None else OfficialPrize()
+
+
+def fetch_sporttery_economics(
+    issue: str,
+    cache_dir: str | Path = "data/cache",
+    *,
+    snapshot_dir: str | Path | None = None,
+) -> OfficialDrawEconomics | None:
+    raw, url = _fetch_sporttery_draw_payload(issue, cache_dir)
+    row = _sporttery_draw_row(raw, issue)
     if not row:
-        return OfficialPrize()
-    return OfficialPrize(
-        draw_date=str(row.get("lotteryDrawTime") or "").strip()[:10],
-        sfc14_first_yuan=_prize_amount(row.get("prizeLevelList"), "一等奖"),
-        sfc14_second_yuan=_prize_amount(row.get("prizeLevelList"), "二等奖"),
-        choose9_yuan=_prize_amount(row.get("prizeLevelListRj"), "任选9场"),
+        return None
+    economics = parse_official_draw_economics(
+        issue,
+        row,
+        source_url=url,
+        raw_response=raw,
     )
+    if snapshot_dir is not None:
+        write_draw_economics_snapshot(Path(snapshot_dir) / f"{issue}.json", economics, raw)
+    return economics
 
 
 def _fetch_sporttery_draw_row(issue: str, cache_dir: str | Path = "data/cache") -> dict[str, object] | None:
+    raw, _ = _fetch_sporttery_draw_payload(issue, cache_dir)
+    return _sporttery_draw_row(raw, issue)
+
+
+def _fetch_sporttery_draw_payload(
+    issue: str,
+    cache_dir: str | Path = "data/cache",
+) -> tuple[dict[str, object], str]:
     params = {
         "gameNo": "90",
         "provinceId": "0",
@@ -301,7 +313,13 @@ def _fetch_sporttery_draw_row(issue: str, cache_dir: str | Path = "data/cache") 
     raw = loads_json(_fetch_text(url, Path(cache_dir), max_age_seconds=300))
     if str(raw.get("errorCode")) != "0":
         raise ValueError(str(raw.get("errorMessage") or "Sporttery result request failed."))
+    return raw, url
+
+
+def _sporttery_draw_row(raw: dict[str, object], issue: str) -> dict[str, object] | None:
     value = raw.get("value") or {}
+    if not isinstance(value, dict):
+        return None
     rows = value.get("list") or []
     for row in rows:
         if str(row.get("lotteryDrawNum") or "").strip() == issue:

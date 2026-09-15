@@ -18,6 +18,8 @@ from .models import (
     TicketPlan,
 )
 from .predictor import (
+    DRAW_BOUNDARY_MAX_GAP,
+    DRAW_BOUNDARY_MIN_PROBABILITY,
     SELECTION_OUTCOME_LABELS,
     SELECTION_REASON_PREFIX,
     _draw_context,
@@ -793,9 +795,25 @@ def _fit_predictions_to_budget(
     return tuple(_with_budget_stability(prediction) for prediction in best[2])
 
 
-def _budget_state_key(state: tuple[int, float, tuple[Prediction, ...]]) -> tuple[float, int]:
+def _budget_state_key(
+    state: tuple[int, float, tuple[Prediction, ...]],
+) -> tuple[float, int, int, int]:
     forced_singles, score, _ = state
-    return score, -forced_singles
+    selected = state[2]
+    strong_draw_drops = sum(
+        1
+        for prediction in selected
+        if prediction.draw_guard and "1" not in prediction.picks
+    )
+    boundary_draw_drops = sum(
+        1
+        for prediction in selected
+        if _budget_draw_protection_level(prediction) == 1 and "1" not in prediction.picks
+    )
+    # Joint coverage is the optimizer's contract and must remain the primary
+    # objective. Draw protection and unsafe singles only resolve equal-coverage
+    # states; putting either before score can select a materially worse ticket.
+    return score, -strong_draw_drops, -boundary_draw_drops, -forced_singles
 
 
 def _prediction_budget_options(prediction: Prediction) -> tuple[Prediction, ...]:
@@ -803,10 +821,32 @@ def _prediction_budget_options(prediction: Prediction) -> tuple[Prediction, ...]
     # final probabilities. Thus these three options cover the full search
     # space without retaining all seven nonempty subsets at every DP step.
     ranked = _rank_budget_outcomes(prediction.probabilities)
-    return tuple(
+    options = [
         _budget_selection(prediction, ("3", "1", "0") if count == 3 else ranked[:count])
         for count in (1, 2, 3)
-    )
+    ]
+    if _budget_draw_protection_level(prediction) and ranked[0] != "1" and "1" not in ranked[:2]:
+        options.append(_budget_selection(prediction, (ranked[0], "1")))
+    unique: dict[frozenset[str], Prediction] = {}
+    for option in options:
+        unique.setdefault(frozenset(option.picks), option)
+    return tuple(unique.values())
+
+
+def _budget_draw_protection_level(prediction: Prediction) -> int:
+    """Return 2 for an explicit guard and 1 for a close draw boundary."""
+    if prediction.draw_guard and "1" in prediction.analysis_picks:
+        return 2
+    if "1" in prediction.analysis_picks and len(prediction.analysis_picks) == 2:
+        return 1
+    probabilities = prediction.probabilities
+    ranked = sorted(probabilities, key=probabilities.get, reverse=True)
+    if ranked[0] == "1" or probabilities.get("1", 0.0) < DRAW_BOUNDARY_MIN_PROBABILITY:
+        return 0
+    draw_index = ranked.index("1")
+    if draw_index != 2:
+        return 0
+    return int(probabilities[ranked[1]] - probabilities["1"] <= DRAW_BOUNDARY_MAX_GAP)
 
 
 def _rank_budget_outcomes(probabilities: dict[str, float]) -> tuple[str, ...]:
@@ -837,6 +877,11 @@ def _budget_selection(
             reasons += (
                 f"预算调整：为提高整张票的联合覆盖率，本场由模型建议 {'/'.join(original)} "
                 f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
+            )
+        if "1" in picks and _budget_draw_protection_level(prediction) == 1:
+            reasons += (
+                "平局边界保护：模型原始双选含平，或平局与第二候选差不超过3个百分点；"
+                "预算评分保留平局，避免纯概率 Top-2 长期偏向 3/0 或 0/3。",
             )
     adjusted = replace(
         prediction,
