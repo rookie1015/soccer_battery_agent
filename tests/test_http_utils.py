@@ -44,13 +44,13 @@ class HttpUtilsTests(unittest.TestCase):
 
         self.assertEqual(urlopen.call_count, 3)
 
-    def test_http_status_error_is_not_retried(self) -> None:
+    def test_http_status_error_is_retried_three_times(self) -> None:
         error = urllib.error.HTTPError("https://example.test", 404, "Not Found", None, None)
         with patch("football_lottery_agent.http_utils.urllib.request.urlopen", side_effect=error) as urlopen:
             with self.assertRaises(urllib.error.HTTPError):
                 read_url_text("https://example.test/data", timeout=1)
 
-        self.assertEqual(urlopen.call_count, 1)
+        self.assertEqual(urlopen.call_count, 3)
 
 
 if __name__ == "__main__":

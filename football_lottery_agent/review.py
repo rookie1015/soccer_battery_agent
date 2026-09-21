@@ -15,6 +15,7 @@ from .draw_economics import (
     write_draw_economics_snapshot,
 )
 from .json_utils import loads_json
+from .http_utils import read_url_text
 from .models import Prediction, TicketPlan
 from .predictor import OUTCOME_LABELS
 
@@ -772,8 +773,7 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         },
     )
     try:
-        with urllib.request.urlopen(request, timeout=8) as response:
-            text = response.read().decode("utf-8", errors="replace")
+        text = read_url_text(request, timeout=8, attempts=3)
     except urllib.error.HTTPError as exc:
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")

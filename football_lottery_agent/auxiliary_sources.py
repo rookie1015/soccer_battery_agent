@@ -472,7 +472,7 @@ def _fetch_cached_text(
         text = read_url_text(
             request,
             timeout=8,
-            attempts=2,
+            attempts=3,
             encoding=encoding,
             cancel_check=cancel_check,
         )

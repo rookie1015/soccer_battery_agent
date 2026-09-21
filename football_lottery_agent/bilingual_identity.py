@@ -80,10 +80,16 @@ def _fetch_json(url: str, cache_dir: Path) -> Any:
             "User-Agent": "football-lottery-agent/0.2",
         },
     )
-    try:
-        text = _download_text(url, request)
-        payload = loads_json(text)
-    except Exception:
+    text = ""
+    payload: Any = None
+    for _ in range(3):
+        try:
+            text = _download_text(url, request)
+            payload = loads_json(text)
+            break
+        except Exception:
+            payload = None
+    if payload is None:
         # This is an optional identity-enrichment source. In Chaquopy, Android
         # network failures arrive as Java exception proxies (for example
         # java.net.SocketTimeoutException), which aren't subclasses of the

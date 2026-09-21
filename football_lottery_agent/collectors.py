@@ -1135,7 +1135,7 @@ def _fetch_mainstream_feed_items(cache_dir: Path) -> list[NewsItem]:
                 media_cache,
                 max_age_seconds=1800,
                 timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
-                attempts=1,
+                attempts=3,
             )
         except (OSError, urllib.error.URLError):
             return []
@@ -1245,7 +1245,7 @@ def _fetch_google_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem
                 cache_dir,
                 max_age_seconds=3600,
                 timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
-                attempts=1,
+                attempts=3,
             )
         )[:limit]
     except (OSError, urllib.error.URLError, ET.ParseError):
@@ -1267,7 +1267,7 @@ def _fetch_gdelt_news(query: str, cache_dir: Path, limit: int) -> list[NewsItem]
             cache_dir,
             max_age_seconds=3600,
             timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
-            attempts=1,
+            attempts=3,
         )
         data = loads_json(raw)
     except (OSError, urllib.error.URLError, json.JSONDecodeError):
@@ -1290,7 +1290,7 @@ def _fetch_duckduckgo_results(query: str, cache_dir: Path, limit: int) -> list[N
             cache_dir,
             max_age_seconds=3600,
             timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
-            attempts=1,
+            attempts=3,
         )
     except (OSError, urllib.error.URLError):
         return []

@@ -201,7 +201,7 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
             return cache_path.read_text(encoding="utf-8", errors="replace")
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
     try:
-        text = read_url_text(request, timeout=OPTIONAL_SOURCE_TIMEOUT_SECONDS, attempts=1)
+        text = read_url_text(request, timeout=OPTIONAL_SOURCE_TIMEOUT_SECONDS, attempts=3)
     except (OSError, urllib.error.URLError):
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")

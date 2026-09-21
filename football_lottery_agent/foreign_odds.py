@@ -59,27 +59,29 @@ def check_the_odds_api_usage(api_key: str | None) -> dict[str, Any]:
     url = f"{THE_ODDS_API_BASE}/sports/?{urllib.parse.urlencode({'apiKey': key})}"
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
     try:
-        with urllib.request.urlopen(request, timeout=12) as response:
-            body = response.read().decode("utf-8", errors="replace")
+        body, headers = _read_url_with_headers(request, timeout=12)
+        try:
             payload = loads_json(body)
             if not isinstance(payload, list):
                 return {
                     "status": "provider_error",
                     "message": "The Odds API 返回格式异常。",
-                    "credits_remaining": _header_int(response.headers, "x-requests-remaining"),
-                    "credits_used": _header_int(response.headers, "x-requests-used"),
-                    "credits_last": _header_int(response.headers, "x-requests-last"),
+                    "credits_remaining": _header_int(headers, "x-requests-remaining"),
+                    "credits_used": _header_int(headers, "x-requests-used"),
+                    "credits_last": _header_int(headers, "x-requests-last"),
                     "active_sports": 0,
                 }
             return {
                 "status": "valid",
                 "message": "The Odds API Key 有效。用量查询本身不消耗额度。",
-                "credits_remaining": _header_int(response.headers, "x-requests-remaining"),
-                "credits_used": _header_int(response.headers, "x-requests-used"),
-                "credits_last": _header_int(response.headers, "x-requests-last"),
+                "credits_remaining": _header_int(headers, "x-requests-remaining"),
+                "credits_used": _header_int(headers, "x-requests-used"),
+                "credits_last": _header_int(headers, "x-requests-last"),
                 "active_sports": len(payload),
                 "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
             }
+        except json.JSONDecodeError:
+            raise
     except urllib.error.HTTPError as exc:
         error = _http_error_status(exc)
         messages = {
@@ -507,18 +509,36 @@ def _fetch_text_with_status(url: str, cache_dir: Path, max_age_seconds: int) -> 
                 "credits_last": metadata.get("credits_last"),
             }
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
-    with urllib.request.urlopen(request, timeout=12) as response:
-        text = response.read().decode("utf-8", errors="replace")
-        response_status = {
-            "source": "live",
-            "live_attempted": True,
-            "credits_remaining": _header_int(response.headers, "x-requests-remaining"),
-            "credits_used": _header_int(response.headers, "x-requests-used"),
-            "credits_last": _header_int(response.headers, "x-requests-last"),
-        }
+    text, headers = _read_url_with_headers(request, timeout=12)
+    response_status = {
+        "source": "live",
+        "live_attempted": True,
+        "credits_remaining": _header_int(headers, "x-requests-remaining"),
+        "credits_used": _header_int(headers, "x-requests-used"),
+        "credits_last": _header_int(headers, "x-requests-last"),
+    }
     cache_path.write_text(text, encoding="utf-8")
     meta_path.write_text(json.dumps(response_status, ensure_ascii=False, indent=2), encoding="utf-8")
     return text, response_status
+
+
+def _read_url_with_headers(
+    request: urllib.request.Request,
+    *,
+    timeout: float,
+    attempts: int = 3,
+) -> tuple[str, Any]:
+    """Read a response and its headers, retrying every failed request."""
+    last_error: BaseException | None = None
+    for _ in range(max(1, int(attempts))):
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                return response.read().decode("utf-8", errors="replace"), response.headers
+        except (OSError, urllib.error.URLError) as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise urllib.error.URLError("HTTP response could not be read")
 
 
 def _header_int(headers: Any, name: str) -> int | None:

@@ -18,8 +18,9 @@ def read_url_text(
 
     JSON and HTML responses must never be parsed or cached when the server
     closes the connection before the advertised Content-Length is received.
-    HTTP status errors remain the caller's responsibility; connection-level
-    failures are retried and normalized to URLError after the final attempt.
+    Every request failure, including HTTP status errors, is retried.  The last
+    exception is re-raised after the configured number of attempts so callers
+    can still distinguish an HTTP response from a connection failure.
     """
     attempts = max(1, int(attempts))
     last_error: BaseException | None = None
@@ -32,8 +33,8 @@ def read_url_text(
                 if cancel_check is not None:
                     cancel_check()
                 return text
-        except urllib.error.HTTPError:
-            raise
         except (http.client.HTTPException, urllib.error.URLError, OSError) as exc:
             last_error = exc
+    if isinstance(last_error, urllib.error.HTTPError):
+        raise last_error
     raise urllib.error.URLError(last_error or "HTTP response could not be read completely")

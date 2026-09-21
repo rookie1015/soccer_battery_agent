@@ -23,8 +23,8 @@ android {
         applicationId = "com.example.footballlottery"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.5.11"
+        versionCode = 26
+        versionName = "0.5.12"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

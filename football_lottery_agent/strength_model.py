@@ -60,6 +60,13 @@ FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
         "afc champions league elite west",
         "afc champions league elite",
     ),
+    "亚冠": (
+        "afc champions league elite east",
+        "afc champions league elite west",
+        "afc champions league elite",
+    ),
+    "亚冠二级": ("afc champions league two",),
+    "亚冠2": ("afc champions league two",),
     "瑞超": ("allsvenskan",),
     "瑞典超": ("allsvenskan",),
     "瑞士超": ("super league", "swiss super league"),
@@ -69,6 +76,8 @@ FOTMOB_LEAGUE_ALIASES: dict[str, tuple[str, ...]] = {
     "欧冠": ("champions league", "champions league qualification"),
     "欧联": ("europa league", "europa league qualification"),
     "欧罗巴": ("europa league", "europa league qualification"),
+    "欧协联": ("conference league", "uefa conference league", "conference league qualification"),
+    "欧会杯": ("conference league", "uefa conference league", "conference league qualification"),
     "世界杯": ("world cup",),
     "日职": ("j league", "j. league"),
     "韩职": ("k league 1",),
@@ -1294,18 +1303,21 @@ def _fetch_json(
             if cached is not None:
                 return cached
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
-    try:
-        text = read_url_text(req, timeout=12, cancel_check=cancel_check)
-    except (OSError, urllib.error.URLError):
-        if path.exists():
-            return _read_json_object(path)
-        return None
-    try:
-        payload = loads_json(text)
-    except (TypeError, ValueError):
-        # FotMob occasionally returns an empty or HTML body with a successful
-        # HTTP status. Treat it as a missing optional strength sample and do
-        # not poison the cache or abort the complete lottery analysis.
+    # A successful status can still contain an empty/truncated/HTML body.  Such
+    # a response is a failed data fetch too, so repeat the whole request up to
+    # three times rather than accepting a missing team profile immediately.
+    text = ""
+    payload: Any = None
+    for _ in range(3):
+        try:
+            text = read_url_text(req, timeout=12, attempts=1, cancel_check=cancel_check)
+            payload = loads_json(text)
+            break
+        except (OSError, urllib.error.URLError, TypeError, ValueError):
+            payload = None
+    if payload is None:
+        # Keep stale data usable after all three live attempts fail, but never
+        # cache an invalid response.
         return _read_json_object(path) if path.exists() else None
     path.write_text(text, encoding="utf-8")
     _remember_json_object(path, payload)

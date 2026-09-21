@@ -1,4 +1,5 @@
 import unittest
+import urllib.error
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -96,6 +97,28 @@ class StrengthModelTests(unittest.TestCase):
                 payload = _fetch_json(url, cache, 3600)
 
         self.assertEqual(payload, {"general": {"matchId": 99}})
+
+    def test_invalid_live_json_is_requested_again_until_valid(self) -> None:
+        url = "https://www.fotmob.com/api/data/teams?id=8472"
+        with TemporaryDirectory() as tmp, patch(
+            "football_lottery_agent.strength_model.read_url_text",
+            side_effect=["", "<html>temporary block</html>", '{"details":{"name":"Sunderland"}}'],
+        ) as fetch:
+            payload = _fetch_json(url, Path(tmp), 3600)
+
+        self.assertEqual(payload, {"details": {"name": "Sunderland"}})
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_live_json_stops_after_three_failed_requests(self) -> None:
+        url = "https://www.fotmob.com/api/data/teams?id=9906"
+        with TemporaryDirectory() as tmp, patch(
+            "football_lottery_agent.strength_model.read_url_text",
+            side_effect=urllib.error.URLError("temporary failure"),
+        ) as fetch:
+            payload = _fetch_json(url, Path(tmp), 3600)
+
+        self.assertIsNone(payload)
+        self.assertEqual(fetch.call_count, 3)
 
     def test_team_score_uses_aliases(self) -> None:
         self.assertEqual(_team_score("荷兰", "Netherlands"), 1.0)

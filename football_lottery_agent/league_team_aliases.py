@@ -251,6 +251,204 @@ LEAGUE_TEAM_ROWS: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] = {
 }
 
 
+# UEFA's verified 2026/27 league-phase participants.  These rosters are kept
+# separately from the domestic league tables because a cup roster is a
+# season-specific identity source, not a domestic competition table.  Repeated
+# clubs are merged into the same canonical identity below.
+EUROPEAN_CUP_TEAM_ROWS: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] = {
+    "欧冠": (
+        ("雅典AEK", 8563, ("AEK Athens", "AEK雅典")),
+        ("阿森纳", 9825, ("Arsenal",)),
+        ("阿斯顿维拉", 10252, ("Aston Villa", "维拉")),
+        ("马竞", 9906, ("Atlético Madrid", "Atletico Madrid", "Atleti", "马德里竞技")),
+        ("巴萨", 8634, ("Barcelona", "FC Barcelona", "巴塞罗那")),
+        ("拜仁", 9823, ("Bayern München", "Bayern Munich", "拜仁慕尼黑")),
+        ("博德闪耀", 8402, ("Bodø/Glimt", "Bodo/Glimt", "Bodo Glimt", "博德")),
+        ("多特蒙德", 9789, ("Borussia Dortmund", "Dortmund")),
+        ("布鲁日", 8342, ("Club Brugge", "Club Brugge KV", "布鲁日俱乐部")),
+        ("科莫", 10171, ("Como",)),
+        ("费内巴切", 8695, ("Fenerbahçe", "Fenerbahce")),
+        ("费耶诺德", 10235, ("Feyenoord",)),
+        ("加拉塔萨雷", 8637, ("Galatasaray", "加拉塔萨")),
+        ("国际米兰", 8636, ("Inter", "Inter Milan", "国米")),
+        ("林茨", 9977, ("LASK", "LASK Linz", "Linz ASK")),
+        ("莱比锡", 178475, ("RB Leipzig", "Leipzig", "莱比锡红牛", "莱红牛")),
+        ("朗斯", 8588, ("Lens", "RC Lens")),
+        ("里尔", 8639, ("Lille", "LOSC Lille")),
+        ("利物浦", 8650, ("Liverpool",)),
+        ("曼城", 8456, ("Manchester City", "Man City")),
+        ("曼联", 10260, ("Manchester United", "Man United")),
+        ("那不勒斯", 9875, ("Napoli",)),
+        ("巴黎圣日耳曼", 9847, ("Paris Saint-Germain", "Paris SG", "PSG", "巴黎", "巴黎圣曼")),
+        ("波尔图", 9773, ("FC Porto", "Porto")),
+        ("埃因霍温", 8640, ("PSV Eindhoven", "PSV")),
+        ("贝蒂斯", 8603, ("Real Betis", "Betis", "皇家贝蒂斯")),
+        ("皇马", 8633, ("Real Madrid", "皇家马德里")),
+        ("罗马", 8686, ("Roma", "AS Roma")),
+        ("萨巴赫", 951893, ("Sabah", "Sabah FK", "沙巴巴库")),
+        ("顿涅茨克矿工", 9728, ("Shakhtar Donetsk", "Shakhtar", "矿工")),
+        ("布拉格斯拉维亚", 7787, ("Slavia Prague", "Slavia Praha", "斯拉维亚")),
+        ("布拉迪斯拉发", 6019, ("Slovan Bratislava", "S. Bratislava", "斯洛万布拉迪斯拉发")),
+        ("葡萄牙体育", 9768, ("Sporting CP", "Sporting Lisbon", "里斯本竞技")),
+        ("斯图加特", 10269, ("VfB Stuttgart", "Stuttgart")),
+        ("维京", 8478, ("Viking", "Viking FK")),
+        ("比利亚雷亚尔", 10205, ("Villarreal",)),
+    ),
+    "欧联": (
+        ("安德莱赫特", 8635, ("Anderlecht", "RSC Anderlecht")),
+        ("阿拉拉特亚美尼亚", 866109, ("Ararat-Armenia", "Ararat Armenia", "FC Ararat-Armenia")),
+        ("阿尔克马尔", 10229, ("AZ Alkmaar", "AZ")),
+        ("本菲卡", 9772, ("Benfica", "SL Benfica")),
+        ("贝西克塔斯", 10188, ("Beşiktaş", "Besiktas")),
+        ("伯恩茅斯", 8678, ("AFC Bournemouth", "Bournemouth")),
+        ("塞尔塔", 9910, ("Celta Vigo", "Celta")),
+        ("凯尔特人", 9925, ("Celtic", "Celtic FC")),
+        ("采列", 4622, ("NK Celje", "Celje")),
+        ("水晶宫", 9826, ("Crystal Palace",)),
+        ("萨格勒布迪纳摩", 10156, ("Dinamo Zagreb", "GNK Dinamo", "GNK Dinamo Zagreb")),
+        ("费伦茨瓦罗斯", 8222, ("Ferencváros", "Ferencvaros", "Ferencvárosi TC", "费伦茨")),
+        ("贝尔谢巴工人", 9754, ("Hapoel Beer Sheva", "Hapoel Be'er Sheva", "H. Beer-Sheva")),
+        ("霍芬海姆", 8226, ("Hoffenheim", "TSG Hoffenheim")),
+        ("乔治罗尼亚", 1957, ("Jagiellonia Białystok", "Jagiellonia Bialystok", "Jagiellonia")),
+        ("尤文图斯", 9885, ("Juventus", "尤文")),
+        ("勒沃库森", 8178, ("Bayer Leverkusen", "Leverkusen")),
+        ("波兹南莱赫", 2182, ("Lech Poznań", "Lech Poznan", "Lech")),
+        ("索菲亚列夫斯基", 8632, ("Levski Sofia", "PFC Levski Sofia")),
+        ("利勒斯特罗姆", 8476, ("Lillestrøm", "Lillestrom", "Lillestrøm SK", "利勒斯")),
+        ("里昂", 9748, ("Lyon", "Olympique Lyonnais")),
+        ("AC米兰", 8564, ("Milan", "AC Milan")),
+        ("马赛", 8592, ("Marseille", "Olympique Marseille", "Olympique de Marseille")),
+        ("奈梅亨", 8464, ("NEC Nijmegen", "NEC", "N.E.C.")),
+        ("克里特", 7753, ("OFI Crete", "OFI", "OFI Crete FC", "克里特OFI")),
+        ("奥林匹亚科斯", 8638, ("Olympiacos", "Olympiakos")),
+        ("奥莫尼亚", 8044, ("Omonia Nicosia", "Omonia", "AC Omonia")),
+        ("雷恩", 9851, ("Rennes", "Stade Rennais")),
+        ("萨尔茨堡", 10013, ("Salzburg", "Red Bull Salzburg", "RB Salzburg")),
+        ("布拉格斯巴达", 10247, ("Sparta Prague", "Sparta Praha", "AC Sparta Praha")),
+        ("格拉茨风暴", 10014, ("Sturm Graz", "SK Sturm Graz")),
+        ("桑德兰", 8472, ("Sunderland",)),
+        ("托伦斯", 212820, ("Torreense", "SCU Torreense", "S.C.U. Torreense")),
+        ("圣吉罗斯联合", 7978, ("Union St.Gilloise", "Union Saint-Gilloise", "Union SG", "圣吉罗斯")),
+        ("比尔森胜利", 6033, ("Viktoria Plzeň", "Viktoria Plzen", "比尔森")),
+        ("皇家社会", 8560, ("Real Sociedad",)),
+    ),
+    "欧协联": (
+        ("奥胡斯", 8071, ("AGF", "Aarhus", "AGF Aarhus")),
+        ("阿贾克斯", 8593, ("Ajax",)),
+        ("亚特兰大", 8524, ("Atalanta",)),
+        ("巴尼亚卢卡战士", 10116, ("Borac Banja Luka", "Borac", "FK Borac Banja Luka")),
+        ("布拉加", 10264, ("Braga", "Sporting Braga")),
+        ("布兰", 8468, ("Brann", "SK Brann")),
+        ("布赖顿", 10204, ("Brighton & Hove Albion", "Brighton", "布莱顿")),
+        ("哥本哈根", 8391, ("FC København", "FC Copenhagen", "Copenhagen")),
+        ("贝尔格莱德红星", 8687, ("FK Crvena Zvezda", "Crvena Zvezda", "Red Star Belgrade", "红星")),
+        ("索菲亚中央陆军", 10144, ("CSKA Sofia", "PFC CSKA Sofia")),
+        ("埃格纳蒂亚", 10039, ("Egnatia", "KF Egnatia")),
+        ("弗赖堡", 8358, ("Freiburg", "SC Freiburg")),
+        ("根特", 9991, ("Gent", "KAA Gent")),
+        ("赫塔费", 8305, ("Getafe", "赫塔菲")),
+        ("哈伊杜克", 10154, ("Hajduk Split", "HNK Hajduk Split")),
+        ("哈茨", 9860, ("Heart of Midlothian", "Hearts")),
+        ("第比利斯伊比利亚", 480291, ("Iberia Tbilisi", "Iberia 1999", "FC Iberia 1999", "萨布塔洛")),
+        ("伊斯卡尔德斯国际", 10050, ("Inter Club d'Escaldes", "Inter Escaldes")),
+        ("亚布洛内茨", 7758, ("Jablonec", "FK Jablonec")),
+        ("阿拉木图凯拉特", 8037, ("Kairat Almaty", "Kairat", "阿拉木图")),
+        ("考纳斯萨尔基利斯", 439132, ("FK Kauno Žalgiris", "Kauno Žalgiris", "Kauno Zalgiris")),
+        ("古比斯", 1693, ("KuPS", "KuPS Kuopio", "库奥皮奥")),
+        ("林肯红魔", 545012, ("Lincoln Red Imps FC", "Lincoln Red Imps", "L. Red Imps")),
+        ("卢加诺", 7896, ("Lugano", "FC Lugano")),
+        ("中日德兰", 8113, ("FC Midtjylland", "Midtjylland")),
+        ("米亚尔比", 8127, ("Mjällby", "Mjallby", "Mjällby AIF")),
+        ("摩纳哥", 9829, ("Monaco", "AS Monaco")),
+        ("北西兰", 10202, ("Nordsjælland", "Nordsjaelland", "FC Nordsjælland")),
+        ("帕福斯FC", 2137, ("Pafos FC", "Pafos", "帕福斯")),
+        ("帕纳辛奈科斯", 10200, ("Panathinaikos", "Panathinaikos FC")),
+        ("里加FC", 624924, ("Riga FC", "Riga", "里加")),
+        ("圣图尔登", 9997, ("St.Truiden", "Sint-Truidense", "Sint-Truiden")),
+        ("图恩", 10191, ("Thun", "FC Thun")),
+        ("特拉布宗体育", 9752, ("Trabzonspor",)),
+        ("特温特", 8611, ("FC Twente", "Twente")),
+        ("克拉约瓦大学", 480286, ("Universitatea Craiova", "U. Craiova", "CS Universitatea Craiova")),
+    ),
+}
+
+
+# AFC's verified 2026/27 league/group-stage participants.  Keep the Elite and
+# Two rosters separate so an identity match can also use the competition tier
+# as context.  The IDs and provider spellings come from FotMob's opening-round
+# fixtures after the AFC draws were finalised.
+ASIAN_CUP_TEAM_ROWS: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] = {
+    "亚冠精英": (
+        ("费尔干纳石油", 102145, ("Neftchi Fargona", "Neftchi Fergana", "费尔干纳")),
+        ("巴格达空军", 101656, ("Al Quwa Al Jawiya", "Air Force Club")),
+        ("舒马尔", 101904, ("Al-Shamal", "Al Shamal")),
+        ("吉达联合", 8577, ("Al Ittihad", "Al-Ittihad Club", "Ittihad Jeddah")),
+        ("迪拜青年国民", 102119, ("Shabab Al-Ahli Dubai FC", "Shabab Al Ahli", "迪拜国民")),
+        ("大不里士拖拉机", 176352, ("Tractor", "Tractor FC", "Tractor Sazi")),
+        ("吉达国民", 2530, ("Al Ahli", "Al-Ahli", "Al Ahli Saudi FC")),
+        ("塔什干棉农", 102141, ("Pakhtakor Tashkent", "Pakhtakor")),
+        ("卡迪西亚", 101919, ("Al Qadsiah", "Al-Qadsiah", "Al-Qadisiyah")),
+        ("华斯尔", 102111, ("Al-Wasl", "Al Wasl", "迪拜祈祷", "迪拜连接")),
+        ("德黑兰独立", 101614, ("Esteghlal", "Esteghlal FC")),
+        ("萨德", 101895, ("Al-Sadd", "Al Sadd", "Al Sadd SC")),
+        ("艾因", 102117, ("Al-Ain", "Al Ain", "Al Ain FC")),
+        ("利雅得胜利", 101918, ("Al Nassr FC", "Al-Nassr", "Al Nassr")),
+        ("利雅得新月", 2529, ("Al Hilal", "Al-Hilal", "Al Hilal SFC")),
+        ("加拉法", 101897, ("Al-Gharafa", "Al Gharafa", "Al Gharafa SC")),
+        ("大田韩亚市民", 133900, ("Daejeon Hana Citizen", "Daejeon Citizen", "大田市民")),
+        ("京都不死鸟", 8542, ("Kyoto Sanga FC", "Kyoto Sanga")),
+        ("大阪钢巴", 6582, ("Gamba Osaka",)),
+        ("河内公安", 614354, ("Công An Hà Nội", "Cong An Ha Noi", "Hanoi Police")),
+        ("鹿岛鹿角", 4397, ("Kashima Antlers",)),
+        ("纽卡斯尔喷气机", 6454, ("Newcastle Jets", "Newcastle Jets FC")),
+        ("拉查武里", 421346, ("Ratchaburi FC", "Ratchaburi")),
+        ("上海海港", 198616, ("Shanghai Port", "Shanghai Port FC", "上海上港")),
+        ("北京国安", 4177, ("Beijing Guoan", "Beijing Guoan FC")),
+        ("浦项制铁", 109373, ("Pohang Steelers",)),
+        ("柔佛新山", 165228, ("Johor Darul Ta'zim", "Johor Darul Tazim", "JDT", "柔佛")),
+        ("武里南联", 165243, ("Buriram United",)),
+        ("全北现代", 46038, ("Jeonbuk Hyundai Motors FC", "Jeonbuk Hyundai Motors", "全北现代汽车")),
+        ("柏太阳神", 8699, ("Kashiwa Reysol",)),
+        ("泰港", 165255, ("Port FC", "Port MTI FC")),
+        ("神户胜利船", 4688, ("Vissel Kobe",)),
+    ),
+    "亚冠二级": (
+        ("戈尔戈哈尔", 389880, ("Gol Gohar", "Gol Gohar Sirjan")),
+        ("阿布扎比半岛", 102101, ("Al-Jazira", "Al Jazira", "Al Jazira Club")),
+        ("阿卡达格", 1689659, ("Arkadag", "Arkadag FK")),
+        ("慕哈瑞克", 101598, ("Muharraq", "Al-Muharraq", "Al Muharraq")),
+        ("阿布扎比统一", 102122, ("Al-Wahda", "Al Wahda", "Al Wahda FC")),
+        ("科威特竞技", 101713, ("Kuwait SC", "Kuwait Sports Club")),
+        ("哈尔迪亚", 1288463, ("Al Khalidiyah", "Al-Khaldiya", "Khalidiya")),
+        ("纳萨夫", 102153, ("Nasaf Qarshi", "Nasaf", "FC Nasaf")),
+        ("纳达", 101748, ("Al-Nahda", "Al Nahda", "Al-Nahda Club")),
+        ("布赖代合作", 205686, ("Al-Taawoun", "Al Taawoun", "Al-Taawoun FC")),
+        ("赖扬", 101898, ("Al-Rayyan", "Al Rayyan", "Al Rayyan SC")),
+        ("费萨里", 101665, ("Al-Faisaly", "Al Faisaly", "Al-Faisaly SC")),
+        ("侯赛因", 101688, ("Al-Hussein SC", "Al Hussein", "Al-Hussein Irbid")),
+        ("东孟加拉", 165184, ("East Bengal FC", "East Bengal")),
+        ("巴格达警察", 101655, ("Al Shorta", "Al-Shorta", "Al Shorta SC")),
+        ("锡卜", 101759, ("Al-Seeb", "Al Seeb", "Al-Seeb Club")),
+        ("首尔FC", 92630, ("FC Seoul", "Seoul FC")),
+        ("万隆", 165196, ("Persib Bandung", "Persib")),
+        ("越电信", 743070, ("Viettel", "The Cong - Viettel FC", "Thể Công-Viettel")),
+        ("墨尔本胜利", 6230, ("Melbourne Victory", "Melbourne Victory FC")),
+        ("狮城水手", 67366, ("Lion City Sailors FC", "Lion City Sailors")),
+        ("巴吞联", 165250, ("BG Pathum United", "BG Pathum United FC")),
+        ("阿德莱德联", 8008, ("Adelaide United", "Adelaide United FC")),
+        ("大埔", 165169, ("Tai Po", "Tai Po FC", "Wofoo Tai Po")),
+        ("町田泽维亚", 194011, ("Machida Zelvia", "FC Machida Zelvia")),
+        ("柴桢", 542025, ("Svay Rieng", "Preah Khan Reach Svay Rieng")),
+        ("上海申花", 6628, ("Shanghai Shenhua", "Shanghai Shenhua FC")),
+        ("淡滨尼流浪者", 67386, ("Tampines Rovers FC", "Tampines Rovers")),
+        ("杰志", 165165, ("Kitchee", "Kitchee SC")),
+        ("江原FC", 164734, ("Gangwon FC", "Gangwon")),
+        ("金边皇冠", 202520, ("Phnom Penh", "Phnom Penh Crown", "Phnom Penh Crown FC")),
+        ("古晋城", 1114226, ("Kuching City", "Kuching City FC")),
+    ),
+}
+
+
 # Verified identities needed outside the fully enumerated league rosters above.
 # Keeping these separate avoids presenting a partial cup or national-team list
 # as a complete competition roster while still providing safe provider-ID
@@ -267,20 +465,33 @@ SUPPLEMENTAL_TEAM_ROWS: tuple[tuple[str, int, tuple[str, ...]], ...] = (
 
 _ALL_TEAM_ROWS = (
     *(row for rows in LEAGUE_TEAM_ROWS.values() for row in rows),
+    *(row for rows in EUROPEAN_CUP_TEAM_ROWS.values() for row in rows),
+    *(row for rows in ASIAN_CUP_TEAM_ROWS.values() for row in rows),
     *SUPPLEMENTAL_TEAM_ROWS,
 )
 
 
-LEAGUE_TEAM_ALIASES: dict[str, tuple[str, ...]] = {
-    local_name: aliases
-    for local_name, _team_id, aliases in _ALL_TEAM_ROWS
-}
-
-FOTMOB_TEAM_IDS: dict[str, str] = {
-    local_name: str(team_id)
-    for local_name, team_id, _aliases in _ALL_TEAM_ROWS
-}
+LEAGUE_TEAM_ALIASES: dict[str, tuple[str, ...]] = {}
+FOTMOB_TEAM_IDS: dict[str, str] = {}
+for _local_name, _team_id, _aliases in _ALL_TEAM_ROWS:
+    _existing_id = FOTMOB_TEAM_IDS.get(_local_name)
+    if _existing_id is not None and _existing_id != str(_team_id):
+        raise ValueError(f"Conflicting FotMob IDs for {_local_name}: {_existing_id} vs {_team_id}")
+    FOTMOB_TEAM_IDS[_local_name] = str(_team_id)
+    _merged_aliases = list(LEAGUE_TEAM_ALIASES.get(_local_name, ()))
+    for _alias in _aliases:
+        if _alias not in _merged_aliases:
+            _merged_aliases.append(_alias)
+    LEAGUE_TEAM_ALIASES[_local_name] = tuple(_merged_aliases)
 
 LEAGUE_TEAM_COUNTS: dict[str, int] = {
     league: len(rows) for league, rows in LEAGUE_TEAM_ROWS.items()
+}
+
+EUROPEAN_CUP_TEAM_COUNTS: dict[str, int] = {
+    competition: len(rows) for competition, rows in EUROPEAN_CUP_TEAM_ROWS.items()
+}
+
+ASIAN_CUP_TEAM_COUNTS: dict[str, int] = {
+    competition: len(rows) for competition, rows in ASIAN_CUP_TEAM_ROWS.items()
 }
