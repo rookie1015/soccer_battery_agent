@@ -118,7 +118,7 @@ class StrengthModelTests(unittest.TestCase):
             payload = _fetch_json(url, Path(tmp), 3600)
 
         self.assertIsNone(payload)
-        self.assertEqual(fetch.call_count, 3)
+        self.assertEqual(fetch.call_count, 1)
 
     def test_team_score_uses_aliases(self) -> None:
         self.assertEqual(_team_score("荷兰", "Netherlands"), 1.0)
@@ -316,7 +316,7 @@ class StrengthModelTests(unittest.TestCase):
             configure_team_identity(Path(temp_dir) / "team_identity.json")
             with patch(
                 "football_lottery_agent.strength_model.fetch_dbpedia_club_aliases",
-                side_effect=lambda name, _cache: aliases.get(name, ()),
+                side_effect=lambda name, _cache, _cancel=None: aliases.get(name, ()),
             ):
                 _learn_bilingual_provider_aliases([match], events, Path(temp_dir))
             self.assertEqual(_team_score("斯旺西", "Swansea City"), 1.0)

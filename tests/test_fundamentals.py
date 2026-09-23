@@ -9,6 +9,7 @@ from football_lottery_agent.fundamentals import (
     fit_fundamental_coefficients,
     fundamental_corrections,
     mathematical_corrections,
+    _squad_availability_owns_injuries,
 )
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.models import Signals
@@ -16,6 +17,23 @@ from football_lottery_agent.predictor import predict_match
 
 
 class FundamentalModelTests(unittest.TestCase):
+    def test_unverified_national_roster_does_not_suppress_structured_injuries(self) -> None:
+        match = load_issue("data/sample_issue.json").matches[0]
+        national = replace(
+            match,
+            sources={
+                **match.sources,
+                "strength_model": {
+                    "home_squad_roster_status": "unverified_national_team",
+                    "away_squad_roster_status": "unverified_national_team",
+                    "home_squad_availability_penalty": 0.1,
+                    "away_squad_availability_penalty": 0.0,
+                },
+            },
+        )
+
+        self.assertFalse(_squad_availability_owns_injuries(national))
+
     def test_missing_full_analysis_sources_do_not_become_real_evidence(self) -> None:
         match = load_issue("data/sample_issue.json").matches[0]
         audited = replace(

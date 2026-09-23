@@ -84,6 +84,11 @@ def _squad_availability_owns_injuries(match: Match) -> bool:
     source = match.sources.get("strength_model") if isinstance(match.sources, dict) else None
     if not isinstance(source, dict):
         return False
+    if "unverified_national_team" in {
+        source.get("home_squad_roster_status"),
+        source.get("away_squad_roster_status"),
+    }:
+        return False
     return all(
         isinstance(source.get(key), (int, float))
         for key in ("home_squad_availability_penalty", "away_squad_availability_penalty")

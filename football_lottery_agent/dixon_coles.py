@@ -614,6 +614,11 @@ def _apply_squad_strength(source: dict[str, object], home_xg: float, away_xg: fl
     suppresses its separate injury correction whenever both squad penalties
     are present, so the same absences cannot be counted twice.
     """
+    national_roster_unverified = "unverified_national_team" in {
+        source.get("home_squad_roster_status"),
+        source.get("away_squad_roster_status"),
+    }
+
     home_rating = _number(source.get("home_squad_paper_rating"))
     away_rating = _number(source.get("away_squad_paper_rating"))
     if home_rating is None or away_rating is None:
@@ -622,8 +627,20 @@ def _apply_squad_strength(source: dict[str, object], home_xg: float, away_xg: fl
     home_factor = 1.0 + edge
     away_factor = 1.0 - edge
 
-    home_penalty = _probability(source.get("home_squad_availability_penalty"))
-    away_penalty = _probability(source.get("away_squad_availability_penalty"))
+    # A national-team squad page remains useful as a long-term paper-strength
+    # pool, but it can lag the current camp. Preserve the paper-rating edge and
+    # let corroborated roster news / structured injury sources own current
+    # availability instead of applying FotMob's stale roster penalty.
+    home_penalty = (
+        None
+        if national_roster_unverified
+        else _probability(source.get("home_squad_availability_penalty"))
+    )
+    away_penalty = (
+        None
+        if national_roster_unverified
+        else _probability(source.get("away_squad_availability_penalty"))
+    )
     if home_penalty is not None and away_penalty is not None:
         home_retention = 1.0 - max(0.0, min(0.35, home_penalty))
         away_retention = 1.0 - max(0.0, min(0.35, away_penalty))

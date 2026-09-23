@@ -19,6 +19,7 @@ from .bilingual_identity import fetch_dbpedia_club_aliases
 from .collectors import RawMatch
 from .http_utils import read_url_text
 from .json_utils import loads_json
+from .league_team_aliases import FIFA_MENS_TEAM_IDS
 from .team_identity import (
     TEAM_ALIASES,
     configure_team_identity,
@@ -184,7 +185,12 @@ def build_strength_for_matches(
     _learn_unique_context_provider_aliases(matches, fotmob_events)
     _learn_one_sided_provider_aliases(matches, fotmob_events)
     check_cancelled()
-    _learn_bilingual_provider_aliases(matches, fotmob_events, Path(cache_dir))
+    _learn_bilingual_provider_aliases(
+        matches,
+        fotmob_events,
+        Path(cache_dir),
+        cancel_check=cancel_check,
+    )
     check_cancelled()
 
     result: dict[int, FixtureStrength] = {}
@@ -297,6 +303,16 @@ def _build_fixture_strength(
             "matched_event_id": event.get("id") if event else "",
             "home_team_id": home_ref.id if home_ref else "",
             "away_team_id": away_ref.id if away_ref else "",
+            "home_squad_roster_status": (
+                "unverified_national_team"
+                if home_ref and home_ref.id in FIFA_MENS_TEAM_IDS
+                else "current_club_roster"
+            ),
+            "away_squad_roster_status": (
+                "unverified_national_team"
+                if away_ref and away_ref.id in FIFA_MENS_TEAM_IDS
+                else "current_club_roster"
+            ),
             "lookback": lookback,
             "xg_matches": xg_matches,
             "candidate_league_id": _event_league_id(event) if event else 0,
@@ -1006,6 +1022,7 @@ def _learn_bilingual_provider_aliases(
     matches: list[RawMatch],
     events_by_date: dict[str, list[dict[str, Any]]],
     cache_dir: Path,
+    cancel_check: Callable[[], None] | None = None,
 ) -> None:
     """Resolve only ambiguous fixture groups through a bilingual entity source.
 
@@ -1032,19 +1049,35 @@ def _learn_bilingual_provider_aliases(
         return
 
     aliases_by_name: dict[str, tuple[str, ...]] = {}
-    with ThreadPoolExecutor(max_workers=6) as executor:
-        futures = {
-            name: executor.submit(fetch_dbpedia_club_aliases, name, cache_dir)
-            for name in sorted(names)
-        }
-        for name, future in futures.items():
-            try:
-                aliases_by_name[name] = future.result()
-            except Exception:
-                # DBpedia is optional, and Chaquopy exposes Android networking
-                # failures as Java exception proxies rather than Python socket
-                # exceptions. Treat every lookup failure as an empty alias set.
-                aliases_by_name[name] = ()
+    executor = ThreadPoolExecutor(max_workers=6)
+    futures = {
+        executor.submit(fetch_dbpedia_club_aliases, name, cache_dir, cancel_check): name
+        for name in sorted(names)
+    }
+    pending = set(futures)
+    try:
+        while pending:
+            if cancel_check is not None:
+                cancel_check()
+            done, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+            for future in done:
+                name = futures[future]
+                try:
+                    aliases_by_name[name] = future.result()
+                except Exception:
+                    if cancel_check is not None:
+                        cancel_check()
+                    # DBpedia is optional, and Chaquopy exposes Android
+                    # networking failures as Java exception proxies rather
+                    # than Python socket exceptions.
+                    aliases_by_name[name] = ()
+    except BaseException:
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
 
     claimed_events: set[str] = set()
     for match, candidates in unresolved:
@@ -1303,18 +1336,22 @@ def _fetch_json(
             if cached is not None:
                 return cached
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json", "x-fm-req": "1"})
-    # A successful status can still contain an empty/truncated/HTML body.  Such
-    # a response is a failed data fetch too, so repeat the whole request up to
-    # three times rather than accepting a missing team profile immediately.
+    # A successful status can still contain an empty/truncated/HTML body. Such
+    # a body is retried here, while read_url_text handles transient transport
+    # and HTTP failures without repeating permanent 4xx responses.
     text = ""
     payload: Any = None
     for _ in range(3):
         try:
-            text = read_url_text(req, timeout=12, attempts=1, cancel_check=cancel_check)
+            text = read_url_text(req, timeout=12, attempts=3, cancel_check=cancel_check)
+        except (OSError, urllib.error.URLError):
+            return _read_json_object(path) if path.exists() else None
+        try:
             payload = loads_json(text)
-            break
-        except (OSError, urllib.error.URLError, TypeError, ValueError):
+        except (TypeError, ValueError):
             payload = None
+            continue
+        break
     if payload is None:
         # Keep stale data usable after all three live attempts fail, but never
         # cache an invalid response.

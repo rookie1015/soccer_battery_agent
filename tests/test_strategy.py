@@ -14,6 +14,8 @@ from football_lottery_agent.strategy import (
     _build_line_portfolio,
     _downgrade_prediction,
     _fit_predictions_to_budget,
+    _fit_predictions_to_maximize_win_probability,
+    _win_probability,
     _with_budget_stability,
     build_ticket_plan,
     ticket_cost_yuan,
@@ -26,6 +28,66 @@ class StrategyTests(unittest.TestCase):
 
         self.assertIsNone(plan.draw_hedge)
         self.assertIsNone(plan.line_portfolio)
+
+    def test_exact_win_probability_optimizer_matches_exhaustive_search(self) -> None:
+        base = build_ticket_plan(
+            load_issue("data/sample_issue.json"),
+            max_ticket_cost_yuan=2,
+            optimize_for_win_probability=False,
+        ).predictions[:4]
+        probabilities = (
+            {"3": 0.72, "1": 0.17, "0": 0.11},
+            {"3": 0.48, "1": 0.30, "0": 0.22},
+            {"3": 0.41, "1": 0.35, "0": 0.24},
+            {"3": 0.37, "1": 0.34, "0": 0.29},
+        )
+        predictions = tuple(
+            replace(
+                item,
+                probabilities=values,
+                picks=("3", "1", "0"),
+                original_picks=("3", "1", "0"),
+            )
+            for item, values in zip(base, probabilities)
+        )
+        budget = 24
+
+        optimized = _fit_predictions_to_maximize_win_probability(predictions, budget)
+        exhaustive_best = 0.0
+        for counts in product((1, 2, 3), repeat=len(predictions)):
+            if prod(counts) * 2 > budget:
+                continue
+            candidate = tuple(
+                replace(
+                    prediction,
+                    picks=tuple(
+                        sorted(
+                            ("3", "1", "0"),
+                            key=lambda outcome: -prediction.probabilities[outcome],
+                        )[:count]
+                    ),
+                )
+                for prediction, count in zip(predictions, counts)
+            )
+            exhaustive_best = max(exhaustive_best, _win_probability(candidate))
+
+        self.assertLessEqual(ticket_cost_yuan(optimized), budget)
+        self.assertAlmostEqual(_win_probability(optimized), exhaustive_best, places=12)
+
+    def test_default_main_ticket_uses_exact_win_probability_objective(self) -> None:
+        issue = load_issue("data/sample_issue.json")
+        exact = build_ticket_plan(issue, max_ticket_cost_yuan=128)
+        joint = build_ticket_plan(
+            issue,
+            max_ticket_cost_yuan=128,
+            optimize_for_win_probability=False,
+        )
+
+        self.assertGreaterEqual(
+            _win_probability(exact.predictions),
+            _win_probability(joint.predictions) - 1e-12,
+        )
+        self.assertEqual(exact.choose9_plan, joint.choose9_plan)
 
     def test_build_ticket_plan_has_14_predictions(self) -> None:
         issue = load_issue("data/sample_issue.json")

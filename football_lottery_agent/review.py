@@ -778,6 +778,10 @@ def _fetch_text(url: str, cache_dir: Path, max_age_seconds: int) -> str:
         if cache_path.exists():
             return cache_path.read_text(encoding="utf-8", errors="replace")
         raise exc
+    except (OSError, urllib.error.URLError):
+        if cache_path.exists():
+            return cache_path.read_text(encoding="utf-8", errors="replace")
+        raise
     cache_path.write_text(text, encoding="utf-8")
     return text
 

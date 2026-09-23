@@ -1,4 +1,6 @@
 import io
+import hashlib
+import http.client
 import json
 import tempfile
 import unittest
@@ -8,6 +10,7 @@ from unittest.mock import patch
 
 from football_lottery_agent.collectors import RawMatch
 from football_lottery_agent.foreign_odds import (
+    _fetch_text_with_status,
     _fetch_the_odds_api,
     _match_event_to_odds,
     check_the_odds_api_usage,
@@ -28,6 +31,23 @@ class _FakeResponse:
 
     def read(self) -> bytes:
         return self._body
+
+
+class _ReadResponse:
+    def __init__(self, value: bytes | BaseException) -> None:
+        self.value = value
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self) -> "_ReadResponse":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        if isinstance(self.value, BaseException):
+            raise self.value
+        return self.value
 
 
 class ForeignOddsTests(unittest.TestCase):
@@ -117,6 +137,72 @@ class ForeignOddsTests(unittest.TestCase):
             self.assertEqual(cache_audit["attempted_queries"], 0)
             self.assertEqual(cache_audit["cache_hits"], 1)
             cached_urlopen.assert_not_called()
+
+    def test_truncated_response_is_retried_before_caching(self) -> None:
+        truncated = http.client.IncompleteRead(b'{"partial":', 10)
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "urllib.request.urlopen",
+            side_effect=[_ReadResponse(truncated), _ReadResponse(b"[]")],
+        ) as urlopen:
+            text, status = _fetch_text_with_status(
+                "https://example.test/odds",
+                Path(temp_dir),
+                300,
+            )
+
+        self.assertEqual(text, "[]")
+        self.assertEqual(status["source"], "live")
+        self.assertEqual(urlopen.call_count, 2)
+
+    def test_exhausted_truncated_response_falls_back_without_escaping(self) -> None:
+        truncated = http.client.IncompleteRead(b'{"partial":', 10)
+        audit: dict[str, object] = {}
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "urllib.request.urlopen",
+            return_value=_ReadResponse(truncated),
+        ) as urlopen:
+            events = _fetch_the_odds_api(
+                "soccer_epl",
+                "secret",
+                "uk,eu",
+                "",
+                Path(temp_dir),
+                audit=audit,
+            )
+
+        self.assertEqual(events, [])
+        self.assertEqual(audit["status"], "network_error")
+        self.assertEqual(urlopen.call_count, 3)
+
+    def test_cache_filename_uses_stable_sha256(self) -> None:
+        url = "https://example.test/odds?apiKey=secret"
+        expected = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "urllib.request.urlopen",
+            return_value=_ReadResponse(b"[]"),
+        ):
+            _fetch_text_with_status(url, Path(temp_dir), 300)
+
+            self.assertTrue((Path(temp_dir) / f"{expected}.json").exists())
+            self.assertTrue((Path(temp_dir) / f"{expected}.meta.json").exists())
+
+    def test_cancellation_stops_before_foreign_request(self) -> None:
+        match = RawMatch(seq=1, kickoff="2026-06-21T01:00:00+08:00", league="世界杯", home="荷兰", away="瑞典")
+
+        def cancelled() -> None:
+            raise RuntimeError("cancelled")
+
+        with tempfile.TemporaryDirectory() as temp_dir, patch("urllib.request.urlopen") as urlopen:
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                fetch_foreign_odds_for_matches(
+                    [match],
+                    temp_dir,
+                    api_key="secret",
+                    sport_keys=("soccer_fifa_world_cup",),
+                    cancel_check=cancelled,
+                )
+
+        urlopen.assert_not_called()
 
     def test_usage_check_reads_quota_without_odds_request(self) -> None:
         headers = {

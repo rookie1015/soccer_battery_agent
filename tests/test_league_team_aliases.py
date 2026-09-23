@@ -5,10 +5,13 @@ from football_lottery_agent.league_team_aliases import (
     ASIAN_CUP_TEAM_ROWS,
     EUROPEAN_CUP_TEAM_COUNTS,
     EUROPEAN_CUP_TEAM_ROWS,
+    FIFA_MENS_TEAM_COUNTS,
+    FIFA_MENS_TEAM_ROWS,
     FOTMOB_TEAM_IDS,
     LEAGUE_TEAM_COUNTS,
     LEAGUE_TEAM_ROWS,
     SUPPLEMENTAL_TEAM_ROWS,
+    is_fifa_mens_team,
 )
 from football_lottery_agent.strength_model import FOTMOB_LEAGUE_ALIASES
 from football_lottery_agent.team_identity import (
@@ -24,6 +27,11 @@ class LeagueTeamAliasTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         configure_team_identity(None)
+
+    def test_fifa_mens_team_detection_accepts_local_and_provider_names(self) -> None:
+        self.assertTrue(is_fifa_mens_team("英格兰"))
+        self.assertTrue(is_fifa_mens_team("England"))
+        self.assertFalse(is_fifa_mens_team("曼城"))
 
     def test_current_rosters_have_expected_team_counts(self) -> None:
         self.assertEqual(
@@ -95,6 +103,56 @@ class LeagueTeamAliasTests(unittest.TestCase):
                     )
                     self.assertNotIn(str(team_id), seen_ids)
                     seen_ids.add(str(team_id))
+
+    def test_all_fifa_senior_mens_teams_are_complete_and_matchable(self) -> None:
+        self.assertEqual(
+            FIFA_MENS_TEAM_COUNTS,
+            {
+                "AFC": 46,
+                "CAF": 54,
+                "CONCACAF": 35,
+                "CONMEBOL": 10,
+                "OFC": 11,
+                "UEFA": 55,
+            },
+        )
+        self.assertEqual(sum(FIFA_MENS_TEAM_COUNTS.values()), 211)
+        seen_ids: set[str] = set()
+        for confederation, rows in FIFA_MENS_TEAM_ROWS.items():
+            for local_name, team_id, aliases in rows:
+                with self.subTest(confederation=confederation, local_name=local_name):
+                    self.assertTrue(aliases)
+                    self.assertFalse(any("(W)" in alias for alias in aliases))
+                    self.assertFalse(any(" U23" in alias or " U21" in alias for alias in aliases))
+                    self.assertEqual(team_match_score(local_name, aliases[0]), 1.0)
+                    self.assertEqual(
+                        provider_team_match_score(local_name, "renamed", "fotmob", team_id),
+                        1.0,
+                    )
+                    self.assertNotIn(str(team_id), seen_ids)
+                    seen_ids.add(str(team_id))
+
+        # These FotMob teams play regional international fixtures but are not
+        # among FIFA's 211 member associations.
+        self.assertTrue({"929188", "5859", "929189", "929190"}.isdisjoint(seen_ids))
+
+    def test_common_fifa_team_variants_resolve(self) -> None:
+        pairs = {
+            "中国男足": "China PR",
+            "香港": "Hong Kong, China",
+            "中华台北": "Chinese Taipei",
+            "波斯尼亚和黑塞哥维那": "Bosnia and Herzegovina",
+            "刚果（金）": "DR Congo",
+            "刚果（布）": "Congo",
+            "北朝鲜": "DPR Korea",
+            "沙特阿拉伯": "Saudi Arabia",
+            "阿拉伯联合酋长国": "UAE",
+            "巴勒斯坦领土": "Palestine",
+            "法属波利尼西亚": "Tahiti",
+        }
+        for local_name, provider_name in pairs.items():
+            with self.subTest(local_name=local_name):
+                self.assertEqual(team_match_score(local_name, provider_name), 1.0)
 
     def test_common_asian_cup_chinese_variants_resolve(self) -> None:
         pairs = {

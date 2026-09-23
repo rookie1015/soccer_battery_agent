@@ -1,5 +1,8 @@
+import hashlib
+import os
 import tempfile
 import unittest
+import urllib.error
 from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
@@ -9,6 +12,7 @@ from football_lottery_agent.review import (
     MatchResult,
     REVIEW_PLAY_CHOOSE9,
     _diagnostic_tags,
+    _fetch_text,
     build_review,
     fetch_sporttery_prize,
     fetch_sporttery_results,
@@ -23,6 +27,21 @@ from football_lottery_agent.strategy import _build_line_portfolio, _fit_predicti
 
 
 class ReviewTests(unittest.TestCase):
+    def test_fetch_text_uses_stale_cache_after_connection_failure(self) -> None:
+        url = "https://example.test/results"
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            cache_path = cache / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.txt"
+            cache_path.write_text("stale-result", encoding="utf-8")
+            os.utime(cache_path, (1, 1))
+            with patch(
+                "football_lottery_agent.review.read_url_text",
+                side_effect=urllib.error.URLError("offline"),
+            ):
+                text = _fetch_text(url, cache, 1)
+
+        self.assertEqual(text, "stale-result")
+
     def test_choose9_review_uses_only_independent_nine_match_ticket(self) -> None:
         plan = build_ticket_plan(load_issue("data/sample_issue.json"), max_ticket_cost_yuan=500)
         assert plan.choose9_plan is not None

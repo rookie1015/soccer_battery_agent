@@ -115,7 +115,7 @@ class SofaScoreTests(unittest.TestCase):
             self.assertIsNone(client.fetch("/another", 60))
 
         self.assertTrue(client.blocked)
-        self.assertEqual(urlopen.call_count, 3)
+        self.assertEqual(urlopen.call_count, 1)
 
 
 def _event(

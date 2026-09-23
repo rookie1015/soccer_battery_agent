@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from football_lottery_agent.dixon_coles import forecast
+from football_lottery_agent.dixon_coles import _apply_squad_strength, forecast
 from football_lottery_agent.loader import load_issue
 from football_lottery_agent.models import Match, Odds
 from football_lottery_agent.predictor import (
@@ -17,6 +17,26 @@ from football_lottery_agent.predictor import (
 
 
 class DixonColesTests(unittest.TestCase):
+    def test_unverified_national_team_roster_keeps_paper_strength_but_ignores_availability(self) -> None:
+        source = {
+            "home_squad_roster_status": "unverified_national_team",
+            "away_squad_roster_status": "unverified_national_team",
+            "home_squad_paper_rating": 10.0,
+            "away_squad_paper_rating": 1.0,
+            "home_squad_availability_penalty": 0.0,
+            "away_squad_availability_penalty": 0.35,
+        }
+
+        without_availability = {
+            **source,
+            "home_squad_availability_penalty": None,
+            "away_squad_availability_penalty": None,
+        }
+        adjusted = _apply_squad_strength(source, 1.4, 1.1)
+
+        self.assertEqual(adjusted, _apply_squad_strength(without_availability, 1.4, 1.1))
+        self.assertNotEqual(adjusted, (1.4, 1.1))
+
     @staticmethod
     def _history_row(
         match_id: int,

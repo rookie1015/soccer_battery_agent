@@ -449,6 +449,238 @@ ASIAN_CUP_TEAM_ROWS: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] = {
 }
 
 
+# FIFA's 211 member associations, senior men's national teams only.  The
+# membership and confederation split are sourced from FIFA's association list;
+# provider IDs and spellings are verified against FotMob's men's World Cup
+# qualification/friendly fixtures.  Women's, youth and non-FIFA regional teams
+# are intentionally excluded.
+FIFA_MENS_TEAM_ROWS: dict[str, tuple[tuple[str, int, tuple[str, ...]], ...]] = {
+    "AFC": (
+        ("阿富汗", 95796, ("Afghanistan",)),
+        ("澳大利亚", 6716, ("Australia",)),
+        ("孟加拉国", 95797, ("Bangladesh",)),
+        ("巴林", 5901, ("Bahrain",)),
+        ("不丹", 95800, ("Bhutan",)),
+        ("文莱", 178671, ("Brunei", "Brunei Darussalam")),
+        ("柬埔寨", 6332, ("Cambodia",)),
+        ("中国", 5822, ("China", "China PR", "中国队", "中国男足")),
+        ("关岛", 95798, ("Guam",)),
+        ("中国香港", 6322, ("Hong Kong", "Hong Kong, China", "香港")),
+        ("印度尼西亚", 6324, ("Indonesia",)),
+        ("印度", 6329, ("India",)),
+        ("伊朗", 6711, ("Iran", "IR Iran")),
+        ("伊拉克", 5819, ("Iraq",)),
+        ("约旦", 5816, ("Jordan",)),
+        ("日本", 6715, ("Japan",)),
+        ("吉尔吉斯斯坦", 5893, ("Kyrgyzstan", "Kyrgyz Republic")),
+        ("韩国", 7804, ("South Korea", "Korea Republic")),
+        ("沙特", 7795, ("Saudi Arabia", "沙特阿拉伯")),
+        ("科威特", 5821, ("Kuwait",)),
+        ("老挝", 5891, ("Laos",)),
+        ("黎巴嫩", 5897, ("Lebanon",)),
+        ("中国澳门", 4175, ("Macao", "Macau, China", "澳门")),
+        ("马来西亚", 5823, ("Malaysia",)),
+        ("马尔代夫", 5899, ("Maldives",)),
+        ("蒙古", 95971, ("Mongolia",)),
+        ("缅甸", 8307, ("Myanmar",)),
+        ("尼泊尔", 95799, ("Nepal",)),
+        ("阿曼", 5824, ("Oman",)),
+        ("巴基斯坦", 5910, ("Pakistan",)),
+        ("菲律宾", 230139, ("Philippines",)),
+        ("巴勒斯坦", 6333, ("Palestine", "巴勒斯坦领土")),
+        ("朝鲜", 6330, ("North Korea", "DPR Korea", "北朝鲜")),
+        ("卡塔尔", 5902, ("Qatar",)),
+        ("新加坡", 5825, ("Singapore",)),
+        ("斯里兰卡", 5895, ("Sri Lanka",)),
+        ("叙利亚", 6320, ("Syria",)),
+        ("泰国", 5788, ("Thailand",)),
+        ("塔吉克斯坦", 5898, ("Tajikistan",)),
+        ("土库曼斯坦", 5900, ("Turkmenistan",)),
+        ("东帝汶", 95801, ("Timor-Leste",)),
+        ("中国台北", 5896, ("Chinese Taipei", "中华台北", "台湾")),
+        ("阿联酋", 5789, ("UAE", "United Arab Emirates", "阿拉伯联合酋长国")),
+        ("乌兹别克斯坦", 8700, ("Uzbekistan",)),
+        ("越南", 5894, ("Vietnam",)),
+        ("也门", 5892, ("Yemen",)),
+    ),
+    "CAF": (
+        ("阿尔及利亚", 6317, ("Algeria",)),
+        ("安哥拉", 6712, ("Angola",)),
+        ("布隆迪", 121284, ("Burundi",)),
+        ("贝宁", 5883, ("Benin",)),
+        ("布基纳法索", 6323, ("Burkina Faso",)),
+        ("博茨瓦纳", 5887, ("Botswana",)),
+        ("刚果", 5801, ("Congo", "刚果（布）", "刚果共和国")),
+        ("乍得", 4432, ("Chad",)),
+        ("科特迪瓦", 6709, ("Ivory Coast", "Côte d'Ivoire")),
+        ("喀麦隆", 6629, ("Cameroon",)),
+        ("民主刚果", 6321, ("DR Congo", "Congo DR", "刚果（金）", "刚果民主共和国")),
+        ("科摩罗", 230692, ("Comoros",)),
+        ("佛得角", 5888, ("Cape Verde", "Cabo Verde")),
+        ("中非共和国", 230693, ("Central African Republic",)),
+        ("吉布提", 121285, ("Djibouti",)),
+        ("埃及", 10255, ("Egypt",)),
+        ("赤道几内亚", 8323, ("Equatorial Guinea",)),
+        ("厄立特里亚", 6011, ("Eritrea",)),
+        ("埃塞俄比亚", 121282, ("Ethiopia",)),
+        ("加蓬", 5889, ("Gabon",)),
+        ("冈比亚", 5979, ("Gambia", "The Gambia")),
+        ("加纳", 6714, ("Ghana",)),
+        ("几内亚比绍", 230700, ("Guinea-Bissau",)),
+        ("几内亚", 6289, ("Guinea",)),
+        ("肯尼亚", 5884, ("Kenya",)),
+        ("利比里亚", 5804, ("Liberia",)),
+        ("利比亚", 6328, ("Libya",)),
+        ("莱索托", 4167, ("Lesotho",)),
+        ("马达加斯加", 5809, ("Madagascar",)),
+        ("摩洛哥", 6262, ("Morocco",)),
+        ("马里", 5815, ("Mali",)),
+        ("莫桑比克", 5965, ("Mozambique",)),
+        ("毛里求斯", 5750, ("Mauritius",)),
+        ("毛里塔尼亚", 68374, ("Mauritania",)),
+        ("马拉维", 6020, ("Malawi",)),
+        ("纳米比亚", 5802, ("Namibia",)),
+        ("尼日利亚", 6346, ("Nigeria",)),
+        ("尼日尔", 121281, ("Niger",)),
+        ("南非", 6316, ("South Africa",)),
+        ("卢旺达", 5885, ("Rwanda",)),
+        ("苏丹", 5805, ("Sudan",)),
+        ("塞内加尔", 6395, ("Senegal",)),
+        ("塞舌尔", 121274, ("Seychelles",)),
+        ("塞拉利昂", 5803, ("Sierra Leone",)),
+        ("索马里", 287978, ("Somalia",)),
+        ("南苏丹", 408231, ("South Sudan",)),
+        ("圣多美和普林西比", 287979, ("Sao Tome and Principe", "São Tomé and Príncipe")),
+        ("斯威士兰", 4433, ("Eswatini", "埃斯瓦蒂尼")),
+        ("坦桑尼亚", 7941, ("Tanzania",)),
+        ("多哥", 7740, ("Togo",)),
+        ("突尼斯", 6719, ("Tunisia",)),
+        ("乌干达", 5890, ("Uganda",)),
+        ("赞比亚", 6277, ("Zambia",)),
+        ("津巴布韦", 6290, ("Zimbabwe",)),
+    ),
+    "CONCACAF": (
+        ("安圭拉", 262132, ("Anguilla",)),
+        ("阿鲁巴", 262131, ("Aruba",)),
+        ("安提瓜和巴布达", 6101, ("Antigua and Barbuda",)),
+        ("巴哈马", 73596, ("Bahamas",)),
+        ("百慕大", 5943, ("Bermuda",)),
+        ("伯利兹", 127409, ("Belize",)),
+        ("巴巴多斯", 5886, ("Barbados",)),
+        ("加拿大", 5810, ("Canada",)),
+        ("开曼群岛", 287982, ("Cayman Islands",)),
+        ("哥斯达黎加", 6705, ("Costa Rica",)),
+        ("古巴", 5857, ("Cuba",)),
+        ("库拉索", 287981, ("Curacao", "Curaçao")),
+        ("多米尼克", 287980, ("Dominica",)),
+        ("多米尼加共和国", 262134, ("Dominican Republic",)),
+        ("格林纳达", 6548, ("Grenada",)),
+        ("危地马拉", 5858, ("Guatemala",)),
+        ("圭亚那", 6222, ("Guyana",)),
+        ("海地", 5934, ("Haiti",)),
+        ("洪都拉斯", 5808, ("Honduras",)),
+        ("牙买加", 5806, ("Jamaica",)),
+        ("圣卢西亚", 127408, ("Saint Lucia", "St Lucia")),
+        ("墨西哥", 6710, ("Mexico",)),
+        ("蒙特塞拉特", 262133, ("Montserrat",)),
+        ("尼加拉瓜", 5807, ("Nicaragua",)),
+        ("巴拿马", 5922, ("Panama",)),
+        ("波多黎各", 5756, ("Puerto Rico",)),
+        ("圣基茨和尼维斯", 5924, ("St. Kitts and Nevis", "St Kitts and Nevis")),
+        ("萨尔瓦多", 6327, ("El Salvador",)),
+        ("苏里南", 127411, ("Suriname",)),
+        ("特克斯和凯科斯群岛", 262137, ("Turks and Caicos Islands",)),
+        ("特立尼达和多巴哥", 7724, ("Trinidad and Tobago",)),
+        ("美国", 6713, ("USA",)),
+        ("英属维尔京群岛", 262135, ("British Virgin Islands",)),
+        ("圣文森特和格林纳丁斯", 5923, ("Saint Vincent and The Grenadines", "St Vincent and the Grenadines")),
+        ("美属维尔京群岛", 262136, ("U.S. Virgin Islands", "US Virgin Islands")),
+    ),
+    "CONMEBOL": (
+        ("阿根廷", 6706, ("Argentina",)),
+        ("玻利维亚", 5797, ("Bolivia",)),
+        ("巴西", 8256, ("Brazil",)),
+        ("智利", 9762, ("Chile",)),
+        ("哥伦比亚", 8258, ("Colombia",)),
+        ("厄瓜多尔", 6707, ("Ecuador",)),
+        ("巴拉圭", 6724, ("Paraguay",)),
+        ("秘鲁", 5798, ("Peru",)),
+        ("乌拉圭", 5796, ("Uruguay",)),
+        ("委内瑞拉", 5800, ("Venezuela",)),
+    ),
+    "OFC": (
+        ("美属萨摩亚", 287879, ("American Samoa",)),
+        ("库克群岛", 287880, ("Cook Islands",)),
+        ("斐济", 5925, ("Fiji",)),
+        ("新喀里多尼亚", 101595, ("New Caledonia",)),
+        ("新西兰", 5820, ("New Zealand",)),
+        ("巴布亚新几内亚", 287876, ("Papua New Guinea",)),
+        ("萨摩亚", 287878, ("Samoa",)),
+        ("所罗门群岛", 6319, ("Solomon Islands",)),
+        ("塔希提", 5927, ("Tahiti", "法属波利尼西亚")),
+        ("汤加", 287881, ("Tonga",)),
+        ("瓦努阿图", 5926, ("Vanuatu",)),
+    ),
+    "UEFA": (
+        ("阿尔巴尼亚", 10024, ("Albania",)),
+        ("安道尔", 10045, ("Andorra",)),
+        ("亚美尼亚", 6583, ("Armenia",)),
+        ("奥地利", 8255, ("Austria",)),
+        ("阿塞拜疆", 8566, ("Azerbaijan",)),
+        ("比利时", 8263, ("Belgium",)),
+        ("波黑", 10106, ("Bosnia and Herzegovina", "波斯尼亚和黑塞哥维那")),
+        ("白俄罗斯", 10057, ("Belarus",)),
+        ("保加利亚", 10150, ("Bulgaria",)),
+        ("克罗地亚", 10155, ("Croatia",)),
+        ("塞浦路斯", 5793, ("Cyprus",)),
+        ("捷克", 8496, ("Czechia",)),
+        ("丹麦", 8238, ("Denmark",)),
+        ("英格兰", 8491, ("England",)),
+        ("西班牙", 6720, ("Spain",)),
+        ("爱沙尼亚", 8261, ("Estonia",)),
+        ("芬兰", 7871, ("Finland",)),
+        ("法国", 6723, ("France",)),
+        ("法罗群岛", 8269, ("Faroe Islands",)),
+        ("格鲁吉亚", 8268, ("Georgia",)),
+        ("德国", 8570, ("Germany",)),
+        ("直布罗陀", 507764, ("Gibraltar",)),
+        ("希腊", 6383, ("Greece",)),
+        ("匈牙利", 8565, ("Hungary",)),
+        ("爱尔兰", 5791, ("Ireland", "Republic of Ireland", "爱尔兰共和国")),
+        ("冰岛", 8536, ("Iceland",)),
+        ("以色列", 8567, ("Israel",)),
+        ("意大利", 8204, ("Italy",)),
+        ("哈萨克斯坦", 8265, ("Kazakhstan",)),
+        ("科索沃", 430156, ("Kosovo",)),
+        ("列支敦士登", 5799, ("Liechtenstein",)),
+        ("立陶宛", 8254, ("Lithuania",)),
+        ("卢森堡", 5792, ("Luxembourg",)),
+        ("拉脱维亚", 5795, ("Latvia",)),
+        ("摩尔多瓦", 5794, ("Moldova",)),
+        ("北马其顿", 8260, ("North Macedonia",)),
+        ("马耳他", 8495, ("Malta",)),
+        ("黑山", 49437, ("Montenegro",)),
+        ("荷兰", 6708, ("Netherlands",)),
+        ("北爱尔兰", 10259, ("Northern Ireland",)),
+        ("挪威", 8492, ("Norway",)),
+        ("波兰", 8568, ("Poland",)),
+        ("葡萄牙", 8361, ("Portugal",)),
+        ("罗马尼亚", 9730, ("Romania",)),
+        ("俄罗斯", 8713, ("Russia",)),
+        ("苏格兰", 8498, ("Scotland",)),
+        ("圣马力诺", 6035, ("San Marino",)),
+        ("塞尔维亚", 8205, ("Serbia",)),
+        ("瑞士", 6717, ("Switzerland",)),
+        ("斯洛伐克", 8497, ("Slovakia",)),
+        ("斯洛文尼亚", 5787, ("Slovenia",)),
+        ("瑞典", 8520, ("Sweden",)),
+        ("土耳其", 6595, ("Turkiye", "Türkiye")),
+        ("乌克兰", 6718, ("Ukraine",)),
+        ("威尔士", 5790, ("Wales",)),
+    ),
+}
+
+
 # Verified identities needed outside the fully enumerated league rosters above.
 # Keeping these separate avoids presenting a partial cup or national-team list
 # as a complete competition roster while still providing safe provider-ID
@@ -467,6 +699,7 @@ _ALL_TEAM_ROWS = (
     *(row for rows in LEAGUE_TEAM_ROWS.values() for row in rows),
     *(row for rows in EUROPEAN_CUP_TEAM_ROWS.values() for row in rows),
     *(row for rows in ASIAN_CUP_TEAM_ROWS.values() for row in rows),
+    *(row for rows in FIFA_MENS_TEAM_ROWS.values() for row in rows),
     *SUPPLEMENTAL_TEAM_ROWS,
 )
 
@@ -495,3 +728,32 @@ EUROPEAN_CUP_TEAM_COUNTS: dict[str, int] = {
 ASIAN_CUP_TEAM_COUNTS: dict[str, int] = {
     competition: len(rows) for competition, rows in ASIAN_CUP_TEAM_ROWS.items()
 }
+
+FIFA_MENS_TEAM_COUNTS: dict[str, int] = {
+    confederation: len(rows) for confederation, rows in FIFA_MENS_TEAM_ROWS.items()
+}
+
+FIFA_MENS_TEAM_NAMES = frozenset(
+    local_name
+    for rows in FIFA_MENS_TEAM_ROWS.values()
+    for local_name, _, _ in rows
+)
+
+FIFA_MENS_TEAM_IDS = frozenset(
+    team_id
+    for rows in FIFA_MENS_TEAM_ROWS.values()
+    for _, team_id, _ in rows
+)
+
+
+def is_fifa_mens_team(name: str) -> bool:
+    """Return whether a local or provider alias identifies a senior FIFA men's team."""
+    value = str(name or "").strip().casefold()
+    if not value:
+        return False
+    for local_name, _, aliases in (
+        row for rows in FIFA_MENS_TEAM_ROWS.values() for row in rows
+    ):
+        if value == local_name.casefold() or any(value == alias.casefold() for alias in aliases):
+            return True
+    return False

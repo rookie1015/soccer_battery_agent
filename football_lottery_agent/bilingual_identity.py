@@ -11,16 +11,21 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .json_utils import loads_json
 
 
 DBPEDIA_SPARQL_URL = "https://dbpedia.org/sparql"
 DBPEDIA_CACHE_SECONDS = 86400 * 30
+DBPEDIA_FAILURE_CACHE_SECONDS = 300
 
 
-def fetch_dbpedia_club_aliases(local_name: str, cache_dir: str | Path) -> tuple[str, ...]:
+def fetch_dbpedia_club_aliases(
+    local_name: str,
+    cache_dir: str | Path,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[str, ...]:
     """Resolve a Chinese club abbreviation to English labels without guessing.
 
     DBpedia is used only as a bilingual bridge. The returned labels must still
@@ -41,7 +46,11 @@ def fetch_dbpedia_club_aliases(local_name: str, cache_dir: str | Path) -> tuple[
     )
     params = urllib.parse.urlencode({"query": query, "format": "json"})
     url = f"{DBPEDIA_SPARQL_URL}?{params}"
-    payload = _fetch_json(url, Path(cache_dir) / "team_identity_lookup")
+    payload = _fetch_json(
+        url,
+        Path(cache_dir) / "team_identity_lookup",
+        cancel_check=cancel_check,
+    )
     bindings = (((payload or {}).get("results") or {}).get("bindings") or []) if isinstance(payload, dict) else []
     aliases: list[str] = []
     for binding in bindings:
@@ -67,12 +76,22 @@ def _club_alias_variants(label: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item for item in (clean, without_suffix) if item))
 
 
-def _fetch_json(url: str, cache_dir: Path) -> Any:
+def _fetch_json(
+    url: str,
+    cache_dir: Path,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> Any:
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_path = cache_dir / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
+    failure_path = cache_path.with_suffix(".failure")
     cached = _read_cache(cache_path)
     if cached is not None and datetime.now().timestamp() - cache_path.stat().st_mtime <= DBPEDIA_CACHE_SECONDS:
         return cached
+    if failure_path.exists():
+        age = datetime.now().timestamp() - failure_path.stat().st_mtime
+        if age <= DBPEDIA_FAILURE_CACHE_SECONDS:
+            return cached
     request = urllib.request.Request(
         url,
         headers={
@@ -83,19 +102,26 @@ def _fetch_json(url: str, cache_dir: Path) -> Any:
     text = ""
     payload: Any = None
     for _ in range(3):
+        if cancel_check is not None:
+            cancel_check()
         try:
             text = _download_text(url, request)
             payload = loads_json(text)
-            break
         except Exception:
             payload = None
+        if cancel_check is not None:
+            cancel_check()
+        if payload is not None:
+            break
     if payload is None:
         # This is an optional identity-enrichment source. In Chaquopy, Android
         # network failures arrive as Java exception proxies (for example
         # java.net.SocketTimeoutException), which aren't subclasses of the
         # equivalent Python OSError/TimeoutError classes. Never abort the full
         # analysis because this lookup is unavailable.
+        failure_path.write_text("temporary_failure", encoding="utf-8")
         return cached
+    failure_path.unlink(missing_ok=True)
     cache_path.write_text(text, encoding="utf-8")
     return payload
 

@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 import re
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -12,6 +13,7 @@ import xml.etree.ElementTree as ET
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -19,6 +21,7 @@ from typing import Any, Callable
 
 from .json_utils import loads_json
 from .http_utils import read_url_text
+from .league_team_aliases import is_fifa_mens_team
 from .team_identity import (
     TEAM_ALIASES as SHARED_TEAM_ALIASES,
     configure_team_identity,
@@ -38,6 +41,20 @@ MAINSTREAM_MEDIA_FEEDS = (
 )
 OPTIONAL_SOURCE_TIMEOUT_SECONDS = 5.0
 OPTIONAL_SOURCE_WORKERS = 10
+FIFA_ASSOCIATIONS_URL = "https://inside.fifa.com/associations"
+OFFICIAL_ASSOCIATION_SOURCE = "official_association"
+_FIFA_DIRECTORY_LOCK = threading.Lock()
+TRUSTED_ROSTER_NEWS_SOURCES = (
+    "england football",
+    "bbc",
+    "sky sports",
+    "espn",
+    "the guardian",
+    "the athletic",
+    "reuters",
+    "associated press",
+    "new york times",
+)
 MEDIA_TEAM_ALIASES = {
     "荷兰": ("netherlands", "holland"),
     "瑞典": ("sweden",),
@@ -102,6 +119,8 @@ class NewsItem:
     title: str
     link: str
     published: str = ""
+    source_class: str = ""
+    source_name: str = ""
 
 
 @dataclass(frozen=True)
@@ -234,6 +253,7 @@ def collect_issue(
             bookmakers=foreign_odds_bookmakers,
             sport_keys=tuple(item.strip() for item in foreign_odds_sports.split(",") if item.strip()),
             audit=foreign_odds_audit,
+            cancel_check=cancel_check,
         )
 
     def collect_polymarket() -> dict[int, Any]:
@@ -320,7 +340,8 @@ def collect_issue(
         briefing = briefings.get(item.seq, [])
         media_items = media_briefings.get(item.seq, [])
         news = [item for item in briefing if not _looks_like_injury(item.title)][:3]
-        injury_news = [item for item in briefing if _looks_like_injury(item.title)][:3]
+        injury_news = [item for item in briefing if _looks_like_injury(item.title)][:5]
+        roster_evidence = _national_team_roster_evidence(item, briefing)
         history = [f"历史/战绩线索：{item.title}" for item in briefing if _looks_like_history(item.title)][:2]
         injury_notes = [f"伤停数据：{note}" for note in detail.injury_notes]
         history_notes = [f"历史交锋：{note}" for note in detail.history_notes]
@@ -400,6 +421,7 @@ def collect_issue(
         # overwritten when FotMob/SofaScore matched both teams.
         signals = _apply_strength_to_signals(signals, strength)
         signals = _apply_sina_detail_to_signals(signals, detail)
+        signals = _apply_national_team_roster_evidence(signals, roster_evidence)
         strength_source = _strength_source(strength, pooled_strength_history)
         selected_market = _selected_market_source(detail, foreign)
         if not foreign and item.seq not in odds_by_seq and odds_reconciliation.status in {
@@ -445,6 +467,7 @@ def collect_issue(
                     "news": [news_item.__dict__ for news_item in news],
                     "mainstream_media": [news_item.__dict__ for news_item in media_items],
                     "injuries": [news_item.__dict__ for news_item in injury_news],
+                    "national_team_roster_news": roster_evidence,
                     "history": history,
                     "sina_detail": detail.raw,
                     "knockout_context": knockout_context if isinstance(knockout_context, dict) else {},
@@ -528,9 +551,161 @@ def fetch_sporttery_issue_metadata(
 def _fetch_briefings(raw_matches: list[RawMatch], cache: Path, offline: bool) -> dict[int, list[NewsItem]]:
     if offline:
         return {match.seq: [] for match in raw_matches}
-    with ThreadPoolExecutor(max_workers=min(OPTIONAL_SOURCE_WORKERS, len(raw_matches) or 1)) as executor:
-        pairs = executor.map(lambda match: (match.seq, fetch_match_briefing(match, cache)), raw_matches)
-    return dict(pairs)
+    national_teams = tuple(
+        dict.fromkeys(
+            team
+            for match in raw_matches
+            for team in (match.home, match.away)
+            if is_fifa_mens_team(team)
+        )
+    )
+    worker_count = min(OPTIONAL_SOURCE_WORKERS, len(raw_matches) + len(national_teams) or 1)
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        match_futures = {
+            executor.submit(fetch_match_briefing, match, cache): match.seq
+            for match in raw_matches
+        }
+        roster_futures = {
+            executor.submit(_fetch_national_team_roster_news, team, cache): team
+            for team in national_teams
+        }
+        result = {seq: future.result() for future, seq in match_futures.items()}
+        roster_news = {team: future.result() for future, team in roster_futures.items()}
+    for match in raw_matches:
+        supplements = [
+            item
+            for team in (match.home, match.away)
+            for item in roster_news.get(team, ())
+            if _roster_news_is_timely(item, match.kickoff)
+        ]
+        result[match.seq] = _dedupe_news_items([*result.get(match.seq, ()), *supplements])[:10]
+    return result
+
+
+def _fetch_national_team_roster_news(team: str, cache_dir: Path) -> list[NewsItem]:
+    term = _primary_media_term(team)
+    query = f'"{term}" squad withdrawn ruled out called up injury'
+    media_items = [
+        item
+        for item in _fetch_google_news(query, cache_dir / "national_team_rosters", 10)
+        if _looks_like_senior_mens_roster_update(item.title)
+        and any(alias in _normalize_media_text(item.title) for alias in _media_terms(team))
+    ]
+    official_site = _fifa_official_association_site(team, cache_dir)
+    official_items: list[NewsItem] = []
+    if official_site:
+        domain = urllib.parse.urlparse(official_site).hostname or ""
+        domain = domain.removeprefix("www.")
+        official_query = f'site:{domain} "{term}" squad withdrawn ruled out called up injury'
+        official_items = [
+            NewsItem(
+                title=item.title,
+                link=item.link,
+                published=item.published,
+                source_class=OFFICIAL_ASSOCIATION_SOURCE,
+                source_name=domain,
+            )
+            for item in _fetch_google_news(
+                official_query,
+                cache_dir / "national_team_rosters" / "official_news",
+                10,
+            )
+            if _looks_like_senior_mens_roster_update(item.title)
+            and any(alias in _normalize_media_text(item.title) for alias in _media_terms(team))
+        ]
+    return _dedupe_news_items([*official_items, *media_items])[:12]
+
+
+def _fifa_official_association_site(team: str, cache_dir: Path) -> str:
+    """Resolve a national association's official site from FIFA's member directory."""
+    official_cache = cache_dir / "national_team_rosters" / "official_associations"
+    try:
+        # All national-team workers share this one 211-association document.
+        # Serialize the first cache fill so a new install does not download it
+        # once per team in the same issue.
+        with _FIFA_DIRECTORY_LOCK:
+            directory_html = _fetch_text(
+                FIFA_ASSOCIATIONS_URL,
+                official_cache,
+                max_age_seconds=30 * 86400,
+                timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+                attempts=2,
+            )
+        association = next(
+            (
+                item
+                for item in _fifa_association_directory(directory_html)
+                if team_match_score(team, str(item.get("name") or "")) >= 1.0
+            ),
+            None,
+        )
+        if not association:
+            return ""
+        code = str(association.get("code") or "")
+        if not re.fullmatch(r"[A-Z]{3}", code):
+            return ""
+        profile_html = _fetch_text(
+            f"{FIFA_ASSOCIATIONS_URL}/{code}/organisation",
+            official_cache,
+            max_age_seconds=30 * 86400,
+            timeout_seconds=OPTIONAL_SOURCE_TIMEOUT_SECONDS,
+            attempts=2,
+        )
+        return _fifa_association_website(profile_html)
+    except (OSError, urllib.error.URLError, ValueError, json.JSONDecodeError):
+        return ""
+
+
+def _next_data(html: str) -> dict[str, Any]:
+    match = re.search(
+        r'<script[^>]+id=["\']__NEXT_DATA__["\'][^>]*>(.*?)</script>',
+        html,
+        flags=re.DOTALL,
+    )
+    if not match:
+        raise ValueError("missing __NEXT_DATA__")
+    data = loads_json(match.group(1))
+    if not isinstance(data, dict):
+        raise ValueError("invalid __NEXT_DATA__")
+    return data
+
+
+def _walk_dicts(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
+
+
+def _fifa_association_directory(html: str) -> list[dict[str, str]]:
+    result: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in _walk_dicts(_next_data(html)):
+        url = str(item.get("url") or "")
+        match = re.fullmatch(r"/associations/([A-Z]{3})", url)
+        name = str(item.get("name") or "").strip()
+        if match and name and match.group(1) not in seen:
+            seen.add(match.group(1))
+            result.append({"name": name, "code": match.group(1)})
+    return result
+
+
+def _fifa_association_website(html: str) -> str:
+    for item in _walk_dicts(_next_data(html)):
+        website = item.get("website")
+        if not isinstance(website, dict):
+            continue
+        candidate = str(website.get("href") or website.get("value") or "").strip()
+        if candidate and not candidate.startswith(("http://", "https://")):
+            candidate = f"https://{candidate}"
+        parsed = urllib.parse.urlparse(candidate)
+        hostname = (parsed.hostname or "").lower()
+        if parsed.scheme in {"http", "https"} and "." in hostname and hostname not in {"inside.fifa.com", "fifa.com"}:
+            return candidate
+    return ""
 
 
 def _fetch_mainstream_media_briefings(raw_matches: list[RawMatch], cache: Path, offline: bool) -> dict[int, list[NewsItem]]:
@@ -1443,7 +1618,153 @@ def _decode_duckduckgo_url(value: str) -> str:
 
 
 def _looks_like_injury(text: str) -> bool:
-    return any(keyword in text for keyword in ["伤停", "停赛", "缺阵", "伤病", "首发", "阵容"])
+    normalized = _normalize_media_text(text)
+    return any(
+        keyword in normalized
+        for keyword in (
+            "伤停",
+            "停赛",
+            "缺阵",
+            "伤病",
+            "首发",
+            "阵容",
+            "injury",
+            "injured",
+            "withdraw",
+            "ruled out",
+            "sidelined",
+            "unavailable",
+            "squad update",
+        )
+    )
+
+
+def _looks_like_roster_update(text: str) -> bool:
+    normalized = _normalize_media_text(text)
+    absence = any(
+        keyword in normalized
+        for keyword in ("withdraw", "ruled out", "sidelined", "unavailable", "injury")
+    )
+    roster = any(keyword in normalized for keyword in ("squad", "call up", "called up", "team"))
+    return absence and roster
+
+
+def _looks_like_senior_mens_roster_update(text: str) -> bool:
+    normalized = _normalize_media_text(text)
+    non_senior_mens_markers = (
+        "women",
+        "lionesses",
+        "youth",
+        "under 21",
+        "under 20",
+        "under 19",
+        "under 18",
+        "u21",
+        "u20",
+        "u19",
+        "u18",
+    )
+    return _looks_like_roster_update(text) and not any(
+        marker in normalized for marker in non_senior_mens_markers
+    )
+
+
+def _roster_news_is_timely(item: NewsItem, kickoff: str) -> bool:
+    try:
+        published = parsedate_to_datetime(item.published)
+        match_time = datetime.fromisoformat(kickoff)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if published.tzinfo is None:
+        published = published.replace(tzinfo=timezone.utc)
+    if match_time.tzinfo is None:
+        match_time = match_time.replace(tzinfo=timezone.utc)
+    age_days = (match_time.astimezone(timezone.utc) - published.astimezone(timezone.utc)).total_seconds() / 86400
+    return -2.0 <= age_days <= 30.0
+
+
+def _national_team_roster_evidence(match: RawMatch, items: list[NewsItem]) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    for side, team in (("home", match.home), ("away", match.away)):
+        if not is_fifa_mens_team(team):
+            continue
+        terms = _media_terms(team)
+        official_matching = []
+        media_matching = []
+        for item in items:
+            normalized = _normalize_media_text(f"{item.title} {item.link}")
+            if not (
+                _looks_like_senior_mens_roster_update(item.title)
+                and any(term in normalized for term in terms)
+                and _roster_news_is_timely(item, match.kickoff)
+            ):
+                continue
+            if item.source_class == OFFICIAL_ASSOCIATION_SOURCE:
+                official_matching.append(item)
+            elif _trusted_roster_news(item):
+                media_matching.append(item)
+        # A federation announcement is authoritative for its own senior squad.
+        # Ordinary headlines still need two independent trusted publishers.
+        if not official_matching and len(media_matching) < 2:
+            continue
+        matching = _dedupe_news_items([*official_matching, *media_matching])
+        withdrawal_count = max(_withdrawal_count_hint(item.title) for item in matching)
+        evidence.append(
+            {
+                "side": side,
+                "team": team,
+                "status": "official_confirmed" if official_matching else "corroborated",
+                "withdrawal_count": withdrawal_count,
+                "impact": round(min(0.35, 0.04 + 0.04 * withdrawal_count), 3),
+                "sources": [item.__dict__ for item in matching[:5]],
+            }
+        )
+    return evidence
+
+
+def _trusted_roster_news(item: NewsItem) -> bool:
+    normalized = _normalize_media_text(f"{item.title} {item.link}")
+    return any(source in normalized for source in TRUSTED_ROSTER_NEWS_SOURCES)
+
+
+def _withdrawal_count_hint(text: str) -> int:
+    normalized = _normalize_media_text(text)
+    named_counts = {
+        "duo": 2,
+        "pair": 2,
+        "trio": 3,
+        "quartet": 4,
+        "quintet": 5,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+    }
+    hinted = [count for word, count in named_counts.items() if re.search(rf"\b{word}\b", normalized)]
+    hinted.extend(
+        int(value)
+        for value in re.findall(r"\b(\d{1,2})\b(?=\s+(?:players?\s+)?(?:withdraw|ruled out))", normalized)
+    )
+    return max([1, *hinted])
+
+
+def _apply_national_team_roster_evidence(
+    signals: dict[str, float],
+    evidence: list[dict[str, Any]],
+) -> dict[str, float]:
+    updated = dict(signals)
+    for item in evidence:
+        side = str(item.get("side") or "")
+        if side not in {"home", "away"}:
+            continue
+        updated[f"{side}_injury_impact"] = max(
+            float(updated.get(f"{side}_injury_impact") or 0.0),
+            float(item.get("impact") or 0.0),
+        )
+    return updated
 
 
 def _looks_like_history(text: str) -> bool:
@@ -1461,8 +1782,20 @@ def _strength_notes(strength: Any) -> list[str]:
     if home_rating is not None and away_rating is not None:
         edge = home_rating - away_rating
         notes.append(f"实力模型：综合评分主队 {home_rating:.3f} / 客队 {away_rating:.3f}，差值 {edge:+.3f}。")
-    for squad in (getattr(strength, "home_squad", None), getattr(strength, "away_squad", None)):
+    source = getattr(strength, "source", {}) if strength else {}
+    roster_statuses = (
+        source.get("home_squad_roster_status") if isinstance(source, dict) else "",
+        source.get("away_squad_roster_status") if isinstance(source, dict) else "",
+    )
+    squads = (getattr(strength, "home_squad", None), getattr(strength, "away_squad", None))
+    for squad, roster_status in zip(squads, roster_statuses):
         if not squad:
+            continue
+        if roster_status == "unverified_national_team":
+            notes.append(
+                f"阵容模型：{squad.team.name} 的 FotMob 名单用于长期人才池和纸面实力基线，"
+                "但不直接裁定本期可用名单；当期缺阵采用结构化伤停及经多来源印证的退出消息。"
+            )
             continue
         absence_text = f"，缺阵 {', '.join(squad.notable_absences)}" if squad.notable_absences else ""
         form_text = (

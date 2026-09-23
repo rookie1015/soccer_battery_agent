@@ -26,6 +26,7 @@ from .predictor import (
     predict_issue,
     selection_reason,
 )
+from .ticket_math import hit_distribution
 
 
 DEFAULT_MAX_TICKET_COST_YUAN = 2000
@@ -52,6 +53,7 @@ def build_ticket_plan(
     draw_calibration_coefficients: dict[str, float] | None = None,
     evidence_aware_secondary: bool = False,
     selection_policy: dict[str, float] | None = None,
+    optimize_for_win_probability: bool = True,
 ) -> TicketPlan:
     raw_predictions = predict_issue(
         issue.matches,
@@ -61,7 +63,12 @@ def build_ticket_plan(
         evidence_aware_secondary=evidence_aware_secondary,
         selection_policy=selection_policy,
     )
-    ticket_predictions = _fit_predictions_to_budget(
+    fit_main_ticket = (
+        _fit_predictions_to_maximize_win_probability
+        if optimize_for_win_probability
+        else _fit_predictions_to_budget
+    )
+    ticket_predictions = fit_main_ticket(
         raw_predictions,
         max_ticket_cost_yuan=max_ticket_cost_yuan,
         budget_overage_tolerance_yuan=budget_overage_tolerance_yuan,
@@ -795,6 +802,179 @@ def _fit_predictions_to_budget(
     return tuple(_with_budget_stability(prediction) for prediction in best[2])
 
 
+def _win_probability(predictions: tuple[Prediction, ...]) -> float:
+    """Return the model P(hit all N or exactly N-1), assuming independence."""
+    fixture_count = len(predictions)
+    if fixture_count == 0:
+        return 0.0
+    distribution = hit_distribution(
+        [prediction.probabilities for prediction in predictions],
+        [prediction.picks for prediction in predictions],
+    )
+    return distribution[fixture_count] + distribution[fixture_count - 1]
+
+
+def _fit_predictions_to_maximize_win_probability(
+    predictions: tuple[Prediction, ...],
+    max_ticket_cost_yuan: int,
+    budget_overage_tolerance_yuan: int = 0,
+    *,
+    fixed_picks: dict[int, tuple[str, ...]] | None = None,
+    allow_expansion: bool = True,
+) -> tuple[Prediction, ...]:
+    """Exactly maximize the 14-match P(hit 14 or 13) within the ticket budget.
+
+    For a fixed choice count, a lower-coverage subset can never improve this
+    objective, so only maximum-coverage subsets of each size are considered.
+    The dynamic program retains every non-dominated (P0, P1) state for each
+    ticket-unit count, where P0 is the probability of no miss so far and P1 is
+    the probability of exactly one miss. This is an exact Pareto search rather
+    than a designated-miss heuristic. It is not used for 任九, whose only prize
+    requires all nine selected fixtures to be covered.
+    """
+    if max_ticket_cost_yuan <= 0 or not predictions:
+        return predictions
+
+    effective_budget_yuan = max_ticket_cost_yuan + max(0, budget_overage_tolerance_yuan)
+    max_units = max(1, effective_budget_yuan // STAKE_PER_LINE_YUAN)
+    if not allow_expansion and ticket_units(predictions) <= max_units:
+        return predictions
+
+    # State: P(no miss), P(exactly one miss), forced singles, strong draw
+    # drops, boundary draw drops, and the selected predictions.
+    states: dict[int, list[tuple[float, float, int, int, int, tuple[Prediction, ...]]]] = {
+        1: [(1.0, 0.0, 0, 0, 0, ())]
+    }
+    for prediction in predictions:
+        locked = (fixed_picks or {}).get(prediction.match.seq)
+        options = _win_probability_options(
+            prediction,
+            locked=locked,
+            allow_expansion=allow_expansion,
+        )
+        expanded: dict[
+            int,
+            list[tuple[float, float, int, int, int, tuple[Prediction, ...]]],
+        ] = {}
+        for units, frontier in states.items():
+            for option in options:
+                new_units = units * max(1, len(option.picks))
+                if new_units > max_units:
+                    continue
+                coverage = _option_coverage(option)
+                strong_drop = int(option.draw_guard and "1" not in option.picks)
+                boundary_drop = int(
+                    _budget_draw_protection_level(option) == 1 and "1" not in option.picks
+                )
+                bucket = expanded.setdefault(new_units, [])
+                for p0, p1, forced, strong, boundary, selected in frontier:
+                    bucket.append(
+                        (
+                            p0 * coverage,
+                            p1 * coverage + p0 * (1.0 - coverage),
+                            forced + int(option.budget_forced_single),
+                            strong + strong_drop,
+                            boundary + boundary_drop,
+                            (*selected, option),
+                        )
+                    )
+        if not expanded:
+            raise ValueError("预算不足以容纳指定票面。")
+        states = {units: _pareto_win_states(candidates) for units, candidates in expanded.items()}
+
+    _, best = max(
+        (
+            (units, state)
+            for units, frontier in states.items()
+            for state in frontier
+        ),
+        key=lambda item: _win_state_key(item[1], item[0]),
+    )
+    return tuple(_with_budget_stability(prediction) for prediction in best[5])
+
+
+def _win_probability_options(
+    prediction: Prediction,
+    *,
+    locked: tuple[str, ...] | None,
+    allow_expansion: bool,
+) -> tuple[Prediction, ...]:
+    if locked is not None:
+        return (_budget_selection(prediction, locked, win_probability=True),)
+    if not allow_expansion:
+        source = _choose9_prediction_options(prediction)
+        by_count: dict[int, list[Prediction]] = {}
+        for option in source:
+            by_count.setdefault(len(option.picks), []).append(option)
+        result: list[Prediction] = []
+        for options in by_count.values():
+            best_coverage = max(_option_coverage(option) for option in options)
+            result.extend(
+                replace(option, reasons=_win_probability_adjustment_reasons(option))
+                for option in options
+                if abs(_option_coverage(option) - best_coverage) <= 1e-15
+            )
+        return tuple(result)
+
+    outcomes = ("3", "1", "0")
+    result = []
+    for count in (1, 2, 3):
+        subsets = tuple(combinations(outcomes, count))
+        best_coverage = max(
+            sum(prediction.probabilities.get(outcome, 0.0) for outcome in picks)
+            for picks in subsets
+        )
+        result.extend(
+            _budget_selection(prediction, picks, win_probability=True)
+            for picks in subsets
+            if abs(
+                sum(prediction.probabilities.get(outcome, 0.0) for outcome in picks)
+                - best_coverage
+            )
+            <= 1e-15
+        )
+    return tuple(result)
+
+
+def _option_coverage(prediction: Prediction) -> float:
+    return min(
+        1.0,
+        max(0.0, sum(prediction.probabilities.get(outcome, 0.0) for outcome in prediction.picks)),
+    )
+
+
+def _pareto_win_states(
+    candidates: list[tuple[float, float, int, int, int, tuple[Prediction, ...]]],
+) -> list[tuple[float, float, int, int, int, tuple[Prediction, ...]]]:
+    """Keep states not dominated in both P0 and P1 for the same cost."""
+    ordered = sorted(
+        candidates,
+        key=lambda state: (
+            state[0],
+            state[1],
+            -state[3],
+            -state[4],
+            -state[2],
+        ),
+        reverse=True,
+    )
+    frontier = []
+    best_p1 = -1.0
+    for state in ordered:
+        if state[1] > best_p1:
+            frontier.append(state)
+            best_p1 = state[1]
+    return frontier
+
+
+def _win_state_key(
+    state: tuple[float, float, int, int, int, tuple[Prediction, ...]],
+    units: int,
+) -> tuple[float, float, int, int, int, int]:
+    p0, p1, forced, strong, boundary, _ = state
+    return p0 + p1, p0, -strong, -boundary, -forced, units
+
+
 def _budget_state_key(
     state: tuple[int, float, tuple[Prediction, ...]],
 ) -> tuple[float, int, int, int]:
@@ -859,6 +1039,7 @@ def _budget_selection(
     picks: tuple[str, ...],
     *,
     compression_only: bool = False,
+    win_probability: bool = False,
 ) -> Prediction:
     original = prediction.analysis_picks
     changed = set(picks) != set(original)
@@ -874,9 +1055,10 @@ def _budget_selection(
                 f"{'/'.join(picks)}；仅删除模型原有选项，不新增选项。",
             )
         else:
-            reasons += (
-                f"预算调整：为提高整张票的联合覆盖率，本场由模型建议 {'/'.join(original)} "
-                f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
+            reasons += _win_probability_adjustment_reasons_for_picks(
+                original,
+                picks,
+                win_probability=win_probability,
             )
         if "1" in picks and _budget_draw_protection_level(prediction) == 1:
             reasons += (
@@ -895,6 +1077,41 @@ def _budget_selection(
         budget_stability={},
     )
     return replace(adjusted, reasons=(selection_reason(adjusted), *reasons))
+
+
+def _win_probability_adjustment_reasons_for_picks(
+    original: tuple[str, ...],
+    picks: tuple[str, ...],
+    *,
+    win_probability: bool,
+) -> tuple[str, ...]:
+    objective = (
+        "十四场至少中得一个奖级的模型概率"
+        if win_probability
+        else "整张票的联合覆盖率"
+    )
+    return (
+        f"预算调整：为提高{objective}，本场由模型建议 {'/'.join(original)} "
+        f"重新分配为 {'/'.join(picks)}；单选、双选、全包均参与整票优化。",
+    )
+
+
+def _win_probability_adjustment_reasons(prediction: Prediction) -> tuple[str, ...]:
+    reasons = tuple(
+        reason
+        for reason in prediction.reasons
+        if not reason.startswith("预算调整：为提高整张票的联合覆盖率")
+    )
+    if not prediction.budget_adjusted:
+        return reasons
+    return (
+        *reasons,
+        *_win_probability_adjustment_reasons_for_picks(
+            prediction.analysis_picks,
+            prediction.picks,
+            win_probability=True,
+        ),
+    )
 
 
 def _with_budget_stability(prediction: Prediction) -> Prediction:

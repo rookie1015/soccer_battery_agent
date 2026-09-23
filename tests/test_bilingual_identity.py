@@ -28,10 +28,25 @@ class BilingualIdentityTests(unittest.TestCase):
             with patch(
                 "football_lottery_agent.bilingual_identity._download_text",
                 side_effect=RuntimeError("java.net.SocketTimeoutException"),
-            ):
+            ) as download:
                 payload = _fetch_json("https://dbpedia.org/sparql?query=test", Path(temp_dir))
+                second = _fetch_json("https://dbpedia.org/sparql?query=test", Path(temp_dir))
 
         self.assertIsNone(payload)
+        self.assertIsNone(second)
+        self.assertEqual(download.call_count, 3)
+
+    def test_optional_lookup_propagates_cancellation(self) -> None:
+        def cancelled() -> None:
+            raise RuntimeError("cancelled")
+
+        with TemporaryDirectory() as temp_dir:
+            with self.assertRaisesRegex(RuntimeError, "cancelled"):
+                _fetch_json(
+                    "https://dbpedia.org/sparql?query=test",
+                    Path(temp_dir),
+                    cancel_check=cancelled,
+                )
 
 
 if __name__ == "__main__":

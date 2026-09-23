@@ -13,12 +13,16 @@ from football_lottery_agent.collectors import (
     _injury_signal_summary,
     _infer_two_leg_context,
     _media_item_matches_match,
+    _fifa_association_directory,
+    _fifa_association_website,
+    _national_team_roster_evidence,
     _news_item_matches_both_teams,
     _odds_market_summary,
     _parse_rss,
     _collection_audit,
     _strength_history_pool,
     _strength_source,
+    _apply_national_team_roster_evidence,
     fetch_sina_sfc,
     fetch_sporttery_issue_metadata,
     infer_signals,
@@ -29,6 +33,99 @@ from football_lottery_agent.collectors import (
 
 
 class CollectorTests(unittest.TestCase):
+    def test_fifa_member_pages_resolve_association_code_and_official_site(self) -> None:
+        directory_html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            '{"props":{"rows":[{"name":"England","url":"/associations/ENG"}]}}'
+            "</script>"
+        )
+        profile_html = (
+            '<script id="__NEXT_DATA__" type="application/json">'
+            '{"props":{"association":{"website":{"href":"https://www.thefa.com"}}}}'
+            "</script>"
+        )
+
+        self.assertEqual(
+            _fifa_association_directory(directory_html),
+            [{"name": "England", "code": "ENG"}],
+        )
+        self.assertEqual(_fifa_association_website(profile_html), "https://www.thefa.com")
+
+    def test_single_official_association_roster_update_is_authoritative(self) -> None:
+        match = RawMatch(
+            1,
+            "2026-09-26T19:45:00+01:00",
+            "欧国联",
+            "英格兰",
+            "西班牙",
+        )
+        items = [
+            NewsItem(
+                "Five players withdraw from England squad because of injury - TheFA.com",
+                "https://news.google.com/rss/articles/example",
+                "Mon, 21 Sep 2026 08:06:06 GMT",
+                source_class="official_association",
+                source_name="thefa.com",
+            )
+        ]
+
+        evidence = _national_team_roster_evidence(match, items)
+
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["status"], "official_confirmed")
+        self.assertEqual(evidence[0]["withdrawal_count"], 5)
+        self.assertEqual(evidence[0]["sources"][0]["source_name"], "thefa.com")
+
+    def test_official_womens_roster_news_does_not_affect_mens_team(self) -> None:
+        match = RawMatch(1, "2026-09-26T19:45:00+01:00", "欧国联", "英格兰", "西班牙")
+        items = [
+            NewsItem(
+                "Five players withdraw from England Women's squad because of injury - TheFA.com",
+                "https://news.google.com/rss/articles/example",
+                "Mon, 21 Sep 2026 08:06:06 GMT",
+                source_class="official_association",
+                source_name="thefa.com",
+            )
+        ]
+
+        self.assertEqual(_national_team_roster_evidence(match, items), [])
+
+    def test_correlated_national_team_withdrawal_news_becomes_side_aware_evidence(self) -> None:
+        match = RawMatch(
+            1,
+            "2026-09-26T19:45:00+01:00",
+            "欧国联",
+            "英格兰",
+            "西班牙",
+            "1",
+            (),
+            (),
+        )
+        items = [
+            NewsItem(
+                "Palmer & Rice among five withdrawals from England squad - bbc.com",
+                "https://bbc.com/sport/football/example",
+                "Mon, 21 Sep 2026 08:06:06 GMT",
+            ),
+            NewsItem(
+                "England latest: five players withdraw from the squad - Sky Sports",
+                "https://skysports.com/football/example",
+                "Mon, 21 Sep 2026 12:50:13 GMT",
+            ),
+        ]
+
+        evidence = _national_team_roster_evidence(match, items)
+        signals = _apply_national_team_roster_evidence(
+            {"home_injury_impact": 0.0, "away_injury_impact": 0.0},
+            evidence,
+        )
+
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["side"], "home")
+        self.assertEqual(evidence[0]["withdrawal_count"], 5)
+        self.assertEqual(signals["home_injury_impact"], 0.24)
+        self.assertEqual(signals["away_injury_impact"], 0.0)
+
     def test_strength_history_is_serialized_and_deduplicated_for_fitting(self) -> None:
         recent = SimpleNamespace(
             match_id=77,

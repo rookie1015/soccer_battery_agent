@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -9,10 +10,11 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .collectors import OddsRow, RawMatch
 from .json_utils import loads_json
+from .http_utils import read_url_text_with_headers
 from .team_identity import team_match_score
 
 
@@ -126,6 +128,7 @@ def fetch_foreign_odds_for_matches(
     bookmakers: str = DEFAULT_BOOKMAKERS,
     sport_keys: tuple[str, ...] = (),
     audit: dict[str, Any] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[int, ForeignOdds]:
     key = api_key or os.getenv("THE_ODDS_API_KEY")
     status = audit if audit is not None else {}
@@ -165,6 +168,8 @@ def fetch_foreign_odds_for_matches(
     events_by_sport: dict[str, list[dict[str, Any]]] = {}
     query_audits: list[dict[str, Any]] = []
     for sport_key in candidate_sports:
+        if cancel_check is not None:
+            cancel_check()
         query_audit: dict[str, Any] = {}
         events_by_sport[sport_key] = _fetch_the_odds_api(
             sport_key,
@@ -173,6 +178,7 @@ def fetch_foreign_odds_for_matches(
             bookmakers,
             cache,
             audit=query_audit,
+            cancel_check=cancel_check,
         )
         query_audits.append(query_audit)
 
@@ -212,6 +218,7 @@ def _fetch_the_odds_api(
     bookmakers: str,
     cache_dir: Path,
     audit: dict[str, Any] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> list[dict[str, Any]]:
     query_audit = audit if audit is not None else {}
     query_audit.update(
@@ -238,7 +245,12 @@ def _fetch_the_odds_api(
         params["bookmakers"] = bookmakers
     url = f"{THE_ODDS_API_BASE}/sports/{sport_key}/odds?{urllib.parse.urlencode(params)}"
     try:
-        text, response_status = _fetch_text_with_status(url, cache_dir, max_age_seconds=300)
+        text, response_status = _fetch_text_with_status(
+            url,
+            cache_dir,
+            max_age_seconds=300,
+            cancel_check=cancel_check,
+        )
         query_audit.update(response_status)
         data = loads_json(text)
     except urllib.error.HTTPError as exc:
@@ -487,9 +499,15 @@ def _normalize_name(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
 
 
-def _fetch_text_with_status(url: str, cache_dir: Path, max_age_seconds: int) -> tuple[str, dict[str, Any]]:
+def _fetch_text_with_status(
+    url: str,
+    cache_dir: Path,
+    max_age_seconds: int,
+    *,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[str, dict[str, Any]]:
     cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_path = cache_dir / f"{abs(hash(url))}.json"
+    cache_path = cache_dir / f"{hashlib.sha256(url.encode('utf-8')).hexdigest()}.json"
     meta_path = cache_path.with_suffix(".meta.json")
     if cache_path.exists():
         age = datetime.now().timestamp() - cache_path.stat().st_mtime
@@ -509,7 +527,7 @@ def _fetch_text_with_status(url: str, cache_dir: Path, max_age_seconds: int) -> 
                 "credits_last": metadata.get("credits_last"),
             }
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 football-lottery-agent/0.1"})
-    text, headers = _read_url_with_headers(request, timeout=12)
+    text, headers = _read_url_with_headers(request, timeout=12, cancel_check=cancel_check)
     response_status = {
         "source": "live",
         "live_attempted": True,
@@ -527,18 +545,15 @@ def _read_url_with_headers(
     *,
     timeout: float,
     attempts: int = 3,
+    cancel_check: Callable[[], None] | None = None,
 ) -> tuple[str, Any]:
-    """Read a response and its headers, retrying every failed request."""
-    last_error: BaseException | None = None
-    for _ in range(max(1, int(attempts))):
-        try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                return response.read().decode("utf-8", errors="replace"), response.headers
-        except (OSError, urllib.error.URLError) as exc:
-            last_error = exc
-    if last_error is not None:
-        raise last_error
-    raise urllib.error.URLError("HTTP response could not be read")
+    """Read a response and its headers using the shared retry policy."""
+    return read_url_text_with_headers(
+        request,
+        timeout=timeout,
+        attempts=attempts,
+        cancel_check=cancel_check,
+    )
 
 
 def _header_int(headers: Any, name: str) -> int | None:
